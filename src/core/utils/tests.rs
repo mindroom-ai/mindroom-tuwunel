@@ -317,3 +317,22 @@ async fn set_difference_sorted_stream2() {
 	println!("{r:?}");
 	assert!(r.eq(&["aaa", "eee", "hhh"]));
 }
+
+#[test]
+fn cycle_counter() {
+	use crate::debug::cycles;
+
+	let a = cycles();
+	let b = cycles();
+
+	println!("{a}");
+	assert!(a != 0, "cycle count must not be zero");
+
+	println!("{b}");
+	assert!(b != 0, "cycle count must not be zero");
+
+	let c = b - a;
+	println!("{c}");
+	assert!(b > a, "b must happen after a");
+	assert!(c > 0, "c must be positive");
+}
