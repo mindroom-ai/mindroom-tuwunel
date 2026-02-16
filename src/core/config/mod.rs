@@ -1061,8 +1061,8 @@ pub struct Config {
 	/// registered users join. The rooms specified must be rooms that you have
 	/// joined at least once on the server, and must be public.
 	///
-	/// example: ["#tuwunel:tuwunel.chat",
-	/// "!eoIzvAvVwY23LPDay8:tuwunel.chat"]
+	/// example: ["#tuwunel:grin.hu",
+	/// "!l2xV0sd51lraysuRcsWVECge4NULaH3g-ou95vgDgiM"]
 	///
 	/// default: []
 	#[serde(default = "Vec::new")]
