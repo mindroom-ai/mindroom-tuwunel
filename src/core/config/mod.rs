@@ -2350,13 +2350,25 @@ pub struct WellKnownConfig {
 	/// example "@admin:example.com"
 	pub support_mxid: Option<OwnedUserId>,
 
-	/// Element Call / MatrixRTC configuration (MSC4143).
-	/// Configures the LiveKit SFU server for voice/video calls.
-	///
-	/// Requires a LiveKit server with JWT authentication.
-	/// The `livekit_service_url` should point to your LiveKit JWT endpoint.
+	/// LiveKit JWT endpoint.
+	/// Required for Element Call / MatrixRTC (MSC4143).
 	///
 	/// Note: You must also set `client` above to your homeserver URL.
+	///
+	/// default: ""
+	#[serde(default)]
+	pub livekit_url: Option<String>,
+
+	/// Custom MatrixRTC transports.
+	///
+	/// If you're looking to setup Element Call / MatrixRTC with Livekit,
+	/// you should not use this option and instead set `livekit_url`.
+	/// This is only required if you want to configure a non-livekit MatrixRTC
+	/// transport. There are no known client implementations that support any
+	/// other transport types.
+	///
+	/// This option was previously the only way to configure a Livekit
+	/// transport. It has been superseded by `livekit_url`.
 	///
 	/// Example:
 	/// ```toml
