@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use ruma::api::appservice::Registration;
 use tuwunel_core::{Err, Result, checked, err};
 
 use crate::admin_command;
@@ -16,18 +17,19 @@ pub(super) async fn appservice_register(&self) -> Result {
 
 	let range = 1..checked!(body_len - 1)?;
 	let appservice_config_body = body[range].join("\n");
-	let parsed_config = serde_yaml::from_str(&appservice_config_body);
 
-	let registration =
-		parsed_config.map_err(|e| err!("Could not parse appservice config as YAML: {e}"))?;
+	let registration: Registration = serde_yaml::from_str(&appservice_config_body)
+		.map_err(|e| err!("Could not parse appservice config as YAML: {e}"))?;
+
+	let id = registration.id.clone();
 
 	self.services
 		.appservice
-		.register_appservice(&registration, &appservice_config_body)
+		.register_appservice(registration)
 		.await
 		.map_err(|e| err!("Failed to register appservice: {e}"))?;
 
-	self.write_str(&format!("Appservice registered with ID: {}", registration.id))
+	self.write_str(&format!("Appservice registered with ID: {}", &id))
 		.await
 }
 
