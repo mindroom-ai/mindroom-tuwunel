@@ -145,7 +145,7 @@ async fn migrate(services: &Services) -> Result {
 		fix_readreceiptid_readreceipt_duplicates(services).await?;
 	}
 
-	if services.globals.db.database_version().await < 17 {
+	if services.globals.db.database_version().await != 17 {
 		services.globals.db.bump_database_version(17);
 		info!("Migration: Bumped database version to 17");
 	}
