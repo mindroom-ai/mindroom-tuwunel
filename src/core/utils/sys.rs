@@ -1,10 +1,11 @@
 pub mod compute;
 pub mod limits;
 pub mod storage;
+pub mod usage;
 
 use std::path::PathBuf;
 
-pub use self::{compute::available_parallelism, limits::*};
+pub use self::{compute::available_parallelism, limits::*, usage::*};
 use crate::{Result, at};
 
 /// Return a possibly corrected std::env::current_exe() even if the path is
