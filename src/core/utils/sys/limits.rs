@@ -1,8 +1,9 @@
 #[cfg(unix)]
 use nix::sys::resource::{Resource, getrlimit};
 
-use crate::{Result, debug};
+use crate::{Result, apply, debug, utils::math::usize_from_u64_truncated};
 
+#[cfg(unix)]
 /// This is needed for opening lots of file descriptors, which tends to
 /// happen more often when using RocksDB and making lots of federation
 /// connections at startup. The soft limit is usually 1024, and the hard
@@ -10,13 +11,13 @@ use crate::{Result, debug};
 ///
 /// * <https://www.freedesktop.org/software/systemd/man/systemd.exec.html#id-1.12.2.1.17.6>
 /// * <https://github.com/systemd/systemd/commit/0abf94923b4a95a7d89bc526efc84e7ca2b71741>
-#[cfg(unix)]
 pub fn maximize_fd_limit() -> Result {
 	use nix::sys::resource::setrlimit;
 
 	let (soft_limit, hard_limit) = max_file_descriptors()?;
 	if soft_limit < hard_limit {
-		setrlimit(Resource::RLIMIT_NOFILE, hard_limit, hard_limit)?;
+		let new_limit = hard_limit.try_into()?;
+		setrlimit(Resource::RLIMIT_NOFILE, new_limit, new_limit)?;
 		assert_eq!((hard_limit, hard_limit), max_file_descriptors()?, "getrlimit != setrlimit");
 		debug!(to = hard_limit, from = soft_limit, "Raised RLIMIT_NOFILE");
 	}
@@ -28,9 +29,51 @@ pub fn maximize_fd_limit() -> Result {
 pub fn maximize_fd_limit() -> Result { Ok(()) }
 
 #[cfg(unix)]
-pub fn max_file_descriptors() -> Result<(u64, u64)> {
-	getrlimit(Resource::RLIMIT_NOFILE).map_err(Into::into)
+pub fn max_file_descriptors() -> Result<(usize, usize)> {
+	getrlimit(Resource::RLIMIT_NOFILE)
+		.map(apply!(2, usize_from_u64_truncated))
+		.map_err(Into::into)
 }
 
 #[cfg(not(unix))]
-pub fn max_file_descriptors() -> Result<(u64, u64)> { Ok((u64::MAX, u64::MAX)) }
+pub fn max_file_descriptors() -> Result<(usize, usize)> { Ok((usize::MAX, usize::MAX)) }
+
+#[cfg(unix)]
+pub fn max_stack_size() -> Result<(usize, usize)> {
+	getrlimit(Resource::RLIMIT_STACK)
+		.map(apply!(2, usize_from_u64_truncated))
+		.map_err(Into::into)
+}
+
+#[cfg(not(unix))]
+pub fn max_stack_size() -> Result<(usize, usize)> { Ok((usize::MAX, usize::MAX)) }
+
+#[cfg(any(linux_android, netbsdlike, target_os = "freebsd",))]
+pub fn max_memory_locked() -> Result<(usize, usize)> {
+	getrlimit(Resource::RLIMIT_MEMLOCK)
+		.map(apply!(2, usize_from_u64_truncated))
+		.map_err(Into::into)
+}
+
+#[cfg(not(any(linux_android, netbsdlike, target_os = "freebsd",)))]
+pub fn max_memory_locked() -> Result<(usize, usize)> { Ok((usize::MIN, usize::MIN)) }
+
+#[cfg(any(
+	linux_android,
+	netbsdlike,
+	target_os = "aix",
+	target_os = "freebsd",
+))]
+pub fn max_threads() -> Result<(usize, usize)> {
+	getrlimit(Resource::RLIMIT_NPROC)
+		.map(apply!(2, usize_from_u64_truncated))
+		.map_err(Into::into)
+}
+
+#[cfg(not(any(
+	linux_android,
+	netbsdlike,
+	target_os = "aix",
+	target_os = "freebsd",
+)))]
+pub fn max_threads() -> Result<(usize, usize)> { Ok((usize::MAX, usize::MAX)) }
