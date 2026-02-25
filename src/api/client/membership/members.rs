@@ -46,6 +46,11 @@ pub(crate) async fn get_member_events_route(
 
 	let membership = body.membership.as_ref();
 	let not_membership = body.not_membership.as_ref();
+	let membership_filter = |content: &RoomMemberEventContent| {
+		membership.is_none_or(is_equal_to!(&content.membership))
+			&& not_membership.is_none_or(is_not_equal_to!(&content.membership))
+	};
+
 	Ok(get_member_events::v3::Response {
 		chunk: services
 			.state_accessor
@@ -55,12 +60,8 @@ pub(crate) async fn get_member_events_route(
 			.map(at!(1))
 			.ready_filter(|pdu| {
 				pdu.get_content::<RoomMemberEventContent>()
-					.is_ok_and(|content| {
-						let event_membership = content.membership;
-
-						membership.is_none_or(is_equal_to!(&event_membership))
-							&& not_membership.is_none_or(is_not_equal_to!(&event_membership))
-					})
+					.as_ref()
+					.is_ok_and(membership_filter)
 			})
 			.map(Event::into_format)
 			.collect()
