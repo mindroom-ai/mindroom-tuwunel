@@ -231,7 +231,13 @@ rev = "93795449913f65ab533b7fa482333eef63fc3ae0"
 [workspace.dependencies.jsonwebtoken]
 version = "10.3"
 default-features = false
-features = ["use_pem"]
+features = [
+	"aws_lc_rs",
+	"ed25519-dalek",
+	"hmac",
+	"sha2",
+	"use_pem",
+]
 
 [workspace.dependencies.ldap3]
 git = "https://github.com/matrix-construct/ldap3"
