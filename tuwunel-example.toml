@@ -1944,6 +1944,10 @@
 #
 #sso_aware_preferred = false
 
+# appservice dir
+#
+#appservice_dir = false
+
 
 
 #[global.tls]
