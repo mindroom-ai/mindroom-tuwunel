@@ -274,7 +274,7 @@ version = "0.6"
 features = ["std"]
 
 [workspace.dependencies.nix]
-version = "0.30"
+version = "0"
 default-features = false
 features = [
 	"resource",
