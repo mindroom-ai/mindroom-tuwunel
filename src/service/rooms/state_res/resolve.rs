@@ -131,7 +131,10 @@ where
 		.boxed()
 		.await?;
 
-	let power_set_event_ids: Vec<_> = sorted_power_set.iter().sorted().collect();
+	let power_set_event_ids: Vec<_> = sorted_power_set
+		.iter()
+		.sorted_unstable()
+		.collect();
 
 	let sorted_power_set = sorted_power_set
 		.iter()
@@ -236,7 +239,7 @@ where
 	ExistsFut: Future<Output = bool> + Send,
 	FetchEvent: Fn(OwnedEventId) -> EventFut + Sync,
 	EventFut: Future<Output = Result<Pdu>> + Send,
-	Pdu: Event + Clone,
+	Pdu: Event,
 {
 	let consider_conflicted_subgraph = rules
 		.state_res
@@ -244,7 +247,12 @@ where
 		.is_some_and(|rules| rules.consider_conflicted_state_subgraph)
 		|| backport_css;
 
-	let conflicted_state_set: HashSet<_> = conflicted_states.values().flatten().collect();
+	let conflicted_state_set: Vec<_> = conflicted_states
+		.values()
+		.flatten()
+		.sorted_unstable()
+		.dedup()
+		.collect();
 
 	// Since `org.matrix.hydra.11`, fetch the conflicted state subgraph.
 	let conflicted_subgraph = consider_conflicted_subgraph

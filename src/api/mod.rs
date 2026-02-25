@@ -1,4 +1,4 @@
-#![type_length_limit = "262144"] //TODO: REDUCE ME
+#![type_length_limit = "327680"] //TODO: REDUCE ME
 #![expect(clippy::toplevel_ref_arg)]
 #![expect(clippy::duration_suboptimal_units)] // remove after MSRV 1.91
 
