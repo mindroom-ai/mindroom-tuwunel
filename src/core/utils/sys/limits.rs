@@ -29,6 +29,28 @@ pub fn maximize_fd_limit() -> Result {
 pub fn maximize_fd_limit() -> Result { Ok(()) }
 
 #[cfg(unix)]
+/// Some distributions ship with very low defaults for thread counts; similar to
+/// low default file descriptor limits. But unlike fd's, thread limit is rarely
+/// reached, though on large systems (32+ cores) shipping with defaults of
+/// ~1024 as have been observed are problematic.
+pub fn maximize_thread_limit() -> Result {
+	use nix::sys::resource::setrlimit;
+
+	let (soft_limit, hard_limit) = max_threads()?;
+	if soft_limit < hard_limit {
+		let new_limit = hard_limit.try_into()?;
+		setrlimit(Resource::RLIMIT_NPROC, new_limit, new_limit)?;
+		assert_eq!((hard_limit, hard_limit), max_threads()?, "getrlimit != setrlimit");
+		debug!(to = hard_limit, from = soft_limit, "Raised RLIMIT_NPROC");
+	}
+
+	Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn maximize_thread_limit() -> Result { Ok(()) }
+
+#[cfg(unix)]
 pub fn max_file_descriptors() -> Result<(usize, usize)> {
 	getrlimit(Resource::RLIMIT_NOFILE)
 		.map(apply!(2, usize_from_u64_truncated))
