@@ -301,24 +301,28 @@ pub(crate) async fn sso_callback_route(
 		return Err!(Request(Unauthorized("Authorization grant session has expired.")));
 	}
 
-	let cookie = body
-		.cookie
-		.get(GRANT_SESSION_COOKIE)
-		.map(Cookie::value)
-		.map(serde_html_form::from_str::<GrantCookie<'_>>)
-		.transpose()?
-		.ok_or_else(|| err!(Request(Unauthorized("Missing cookie {GRANT_SESSION_COOKIE:?}"))))?;
+	if provider.check_cookie {
+		let cookie = body
+			.cookie
+			.get(GRANT_SESSION_COOKIE)
+			.map(Cookie::value)
+			.map(serde_html_form::from_str::<GrantCookie<'_>>)
+			.transpose()?
+			.ok_or_else(|| {
+				err!(Request(Unauthorized("Missing cookie {GRANT_SESSION_COOKIE:?}")))
+			})?;
 
-	if cookie.client_id.as_ref() != client_id.as_str() {
-		return Err!(Request(Unauthorized("Client ID {client_id:?} cookie mismatch.")));
-	}
+		if cookie.client_id.as_ref() != client_id.as_str() {
+			return Err!(Request(Unauthorized("Client ID {client_id:?} cookie mismatch.")));
+		}
 
-	if Some(cookie.nonce.as_ref()) != session.cookie_nonce.as_deref() {
-		return Err!(Request(Unauthorized("Cookie nonce does not match session state.")));
-	}
+		if Some(cookie.nonce.as_ref()) != session.cookie_nonce.as_deref() {
+			return Err!(Request(Unauthorized("Cookie nonce does not match session state.")));
+		}
 
-	if cookie.state.as_ref() != sess_id {
-		return Err!(Request(Unauthorized("Session ID {sess_id:?} cookie mismatch.")));
+		if cookie.state.as_ref() != sess_id {
+			return Err!(Request(Unauthorized("Session ID {sess_id:?} cookie mismatch.")));
+		}
 	}
 
 	// Request access token.

@@ -2768,6 +2768,15 @@ pub struct IdentityProvider {
 	/// default: 300
 	#[serde(default = "default_sso_grant_session_duration")]
 	pub grant_session_duration: Option<u64>,
+
+	/// Whether to check the redirect cookie during the callback. This is a
+	/// security feature and should remain enabled. This is available for
+	/// developers or deployments which cannot tolerate cookies and are willing
+	/// to tolerate the risks.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub check_cookie: bool,
 }
 
 impl IdentityProvider {

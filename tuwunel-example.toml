@@ -2378,6 +2378,13 @@
 #
 #grant_session_duration = 300
 
+# Whether to check the redirect cookie during the callback. This is a
+# security feature and should remain enabled. This is available for
+# developers or deployments which cannot tolerate cookies and are willing
+# to tolerate the risks.
+#
+#check_cookie = true
+
 
 
 #[global.appservice.<ID>]
