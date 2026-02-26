@@ -79,8 +79,8 @@ struct RelatesToInfo {
 }
 
 /// Collapse multiple m.replace relation events targeting the same event from
-/// the same sender into just the latest one (by origin_server_ts, then
-/// event_id).
+/// the same sender into just the latest one by timeline order (`PduCount`),
+/// with `event_id` as a deterministic tie-break.
 ///
 /// Non-replace events are always kept. For each `(target_event_id, sender)`
 /// group with multiple replacements in the batch, only the newest replacement
@@ -116,11 +116,10 @@ fn collapse_superseded_edits(events: Vec<(PduCount, PduEvent)>) -> Vec<(PduCount
 		let best_idx = *indices
 			.iter()
 			.max_by(|&&a, &&b| {
-				let pdu_a = &events[a].1;
-				let pdu_b = &events[b].1;
-				pdu_a
-					.origin_server_ts
-					.cmp(&pdu_b.origin_server_ts)
+				let (count_a, pdu_a) = &events[a];
+				let (count_b, pdu_b) = &events[b];
+				count_a
+					.cmp(count_b)
 					.then_with(|| pdu_a.event_id.cmp(&pdu_b.event_id))
 			})
 			.expect("indices is non-empty");
@@ -178,6 +177,16 @@ mod tests {
 		replace_target: Option<&str>,
 		sender: &str,
 	) -> (PduCount, PduEvent) {
+		make_pdu_with_count_and_sender(event_id, ts, ts, replace_target, sender)
+	}
+
+	fn make_pdu_with_count_and_sender(
+		event_id: &str,
+		count: u64,
+		ts: u64,
+		replace_target: Option<&str>,
+		sender: &str,
+	) -> (PduCount, PduEvent) {
 		let content = if let Some(target) = replace_target {
 			format!(
 				r#"{{"body":"edited","m.relates_to":{{"rel_type":"m.replace","event_id":"{target}"}}}}"#
@@ -204,7 +213,7 @@ mod tests {
 			signatures: None,
 		};
 
-		(PduCount::Normal(ts), pdu)
+		(PduCount::Normal(count), pdu)
 	}
 
 	#[test]
@@ -295,6 +304,34 @@ mod tests {
 		let result = collapse_superseded_edits(events);
 		assert_eq!(result.len(), 2);
 		assert_eq!(result[1].1.event_id.as_str(), "$editB:example.com");
+	}
+
+	#[test]
+	fn collapse_prefers_timeline_order_over_timestamp() {
+		let events = vec![
+			make_pdu("$msg1:example.com", 1000, None),
+			make_pdu_with_count_and_sender(
+				"$edit_old_ts_newer_count:example.com",
+				3000,
+				1000,
+				Some("$msg1:example.com"),
+				"@user:example.com",
+			),
+			make_pdu_with_count_and_sender(
+				"$edit_new_ts_older_count:example.com",
+				2000,
+				4000,
+				Some("$msg1:example.com"),
+				"@user:example.com",
+			),
+		];
+
+		let result = collapse_superseded_edits(events);
+		assert_eq!(result.len(), 2);
+		assert_eq!(
+			result[1].1.event_id.as_str(),
+			"$edit_old_ts_newer_count:example.com"
+		);
 	}
 
 	#[test]

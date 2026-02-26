@@ -53,17 +53,15 @@ struct RelatesToInfo {
 /// A candidate replacement event with its metadata.
 #[derive(Clone)]
 struct ReplaceCandidate {
-	/// origin_server_ts for sorting.
-	origin_server_ts: ruma::UInt,
-	/// event_id for tiebreaking.
+	/// event_id for deterministic tie-breaks.
 	event_id: OwnedEventId,
 	/// The raw PduId bytes for deletion from pduid_pdu.
 	pdu_id_bytes: Vec<u8>,
 }
 
 fn compare_replace_candidates(a: &ReplaceCandidate, b: &ReplaceCandidate) -> std::cmp::Ordering {
-	a.origin_server_ts
-		.cmp(&b.origin_server_ts)
+	a.pdu_id_bytes
+		.cmp(&b.pdu_id_bytes)
 		.then_with(|| a.event_id.cmp(&b.event_id))
 }
 
@@ -209,7 +207,6 @@ impl Service {
 			let target_event_id = content.relates_to.event_id;
 			let group_key = (target_event_id.clone(), pdu.sender.clone());
 			let candidate = ReplaceCandidate {
-				origin_server_ts: pdu.origin_server_ts,
 				event_id: pdu.event_id.clone(),
 				pdu_id_bytes: key.to_vec(),
 			};
@@ -678,6 +675,43 @@ rocksdb_read_only = {}
 		assert_event_absent(service, &edit1);
 		assert_event_absent(service, &edit2);
 		assert_event_present(service, &edit3);
+	}
+
+	#[tokio::test]
+	async fn purge_prefers_pdu_order_over_timestamp() {
+		let harness = make_harness(HarnessConfig::default()).await;
+		let service = &harness.service;
+
+		let target = insert_event(
+			service,
+			0,
+			"$target_order:example.com",
+			"@alice:example.com",
+			100,
+			None,
+		);
+		let newer_by_count_older_ts = insert_event(
+			service,
+			2,
+			"$edit_order_keep:example.com",
+			"@alice:example.com",
+			1_000,
+			Some("$target_order:example.com"),
+		);
+		let older_by_count_newer_ts = insert_event(
+			service,
+			1,
+			"$edit_order_drop:example.com",
+			"@alice:example.com",
+			4_000,
+			Some("$target_order:example.com"),
+		);
+
+		service.purge_cycle().await.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_present(service, &newer_by_count_older_ts);
+		assert_event_absent(service, &older_by_count_newer_ts);
 	}
 
 	#[tokio::test]
