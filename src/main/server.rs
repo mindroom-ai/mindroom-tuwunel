@@ -51,8 +51,9 @@ pub fn new(args: Option<&Args>, runtime: Option<&runtime::Handle>) -> Result<Arc
 	#[cfg(feature = "sentry_telemetry")]
 	let sentry_guard = crate::sentry::init(&config);
 
-	sys::maximize_fd_limit()
-		.expect("Unable to increase maximum soft and hard file descriptor limit");
+	sys::maximize_fd_limit().expect("Unable to increase maximum file descriptor limit");
+
+	sys::maximize_thread_limit().expect("Unable to increase maximum thread count limit");
 
 	let (_old_width, _new_width) = stream::set_width(config.stream_width_default);
 	let (_old_amp, _new_amp) = stream::set_amplification(config.stream_amplification);

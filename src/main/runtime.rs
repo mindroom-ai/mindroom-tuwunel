@@ -16,7 +16,7 @@ use tuwunel_core::{
 	Result, debug, is_true,
 	utils::sys::{
 		compute::{nth_core_available, set_affinity},
-		thread_usage, usage,
+		max_threads, thread_usage, usage,
 	},
 };
 
@@ -50,13 +50,19 @@ pub fn new(args: Option<&Args>) -> Result<Runtime> {
 		.set(args.gc_muzzy)
 		.expect("set GC_MUZZY from program argument");
 
+	let max_blocking_threads = max_threads()
+		.expect("obtained RLIMIT_NPROC or default")
+		.0
+		.saturating_div(3)
+		.clamp(WORKER_MIN, MAX_BLOCKING_THREADS);
+
 	let mut builder = Builder::new_multi_thread();
 	builder
 		.enable_io()
 		.enable_time()
 		.thread_name(WORKER_NAME)
 		.worker_threads(args.worker_threads.max(WORKER_MIN))
-		.max_blocking_threads(MAX_BLOCKING_THREADS)
+		.max_blocking_threads(max_blocking_threads)
 		.thread_keep_alive(Duration::from_secs(WORKER_KEEPALIVE))
 		.global_queue_interval(args.global_event_interval)
 		.event_interval(args.kernel_event_interval)
