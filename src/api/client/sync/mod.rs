@@ -5,10 +5,12 @@ use std::collections::HashMap;
 
 use futures::{FutureExt, StreamExt, pin_mut};
 use ruma::{OwnedEventId, OwnedUserId, RoomId, UserId};
-use serde::Deserialize;
 use tuwunel_core::{
 	Error, PduCount, Result,
-	matrix::pdu::PduEvent,
+	matrix::{
+		event::{Event, ExtractRelatesToInfo},
+		pdu::PduEvent,
+	},
 	utils::stream::{BroadbandExt, ReadyExt},
 };
 use tuwunel_service::Services;
@@ -65,22 +67,9 @@ async fn load_timeline(
 	Ok((timeline_pdus, limited, last_timeline_count))
 }
 
-/// Helper structs for extracting m.relates_to from event content.
-#[derive(Deserialize)]
-struct ExtractRelatesToInfo {
-	#[serde(rename = "m.relates_to")]
-	relates_to: RelatesToInfo,
-}
-
-#[derive(Deserialize)]
-struct RelatesToInfo {
-	rel_type: String,
-	event_id: OwnedEventId,
-}
-
 /// Collapse multiple m.replace relation events targeting the same event from
-/// the same sender into just the latest one (by origin_server_ts, then
-/// event_id).
+/// the same sender into just the latest one by timeline order (`PduCount`),
+/// with `event_id` as a deterministic tie-break.
 ///
 /// Non-replace events are always kept. For each `(target_event_id, sender)`
 /// group with multiple replacements in the batch, only the newest replacement
@@ -116,11 +105,10 @@ fn collapse_superseded_edits(events: Vec<(PduCount, PduEvent)>) -> Vec<(PduCount
 		let best_idx = *indices
 			.iter()
 			.max_by(|&&a, &&b| {
-				let pdu_a = &events[a].1;
-				let pdu_b = &events[b].1;
-				pdu_a
-					.origin_server_ts
-					.cmp(&pdu_b.origin_server_ts)
+				let (count_a, pdu_a) = &events[a];
+				let (count_b, pdu_b) = &events[b];
+				count_a
+					.cmp(count_b)
 					.then_with(|| pdu_a.event_id.cmp(&pdu_b.event_id))
 			})
 			.expect("indices is non-empty");
@@ -178,6 +166,16 @@ mod tests {
 		replace_target: Option<&str>,
 		sender: &str,
 	) -> (PduCount, PduEvent) {
+		make_pdu_with_count_and_sender(event_id, ts, ts, replace_target, sender)
+	}
+
+	fn make_pdu_with_count_and_sender(
+		event_id: &str,
+		count: u64,
+		ts: u64,
+		replace_target: Option<&str>,
+		sender: &str,
+	) -> (PduCount, PduEvent) {
 		let content = if let Some(target) = replace_target {
 			format!(
 				r#"{{"body":"edited","m.relates_to":{{"rel_type":"m.replace","event_id":"{target}"}}}}"#
@@ -189,7 +187,7 @@ mod tests {
 		let pdu = PduEvent {
 			kind: ruma::events::TimelineEventType::RoomMessage,
 			content: RawValue::from_string(content).expect("valid JSON"),
-			event_id: EventId::parse(event_id).expect("valid event_id"),
+			event_id: EventId::parse(event_id).expect("valid event_id").into(),
 			room_id: OwnedRoomId::try_from("!test:example.com").expect("valid room_id"),
 			sender: OwnedUserId::try_from(sender).expect("valid user_id"),
 			state_key: None,
@@ -204,7 +202,7 @@ mod tests {
 			signatures: None,
 		};
 
-		(PduCount::Normal(ts), pdu)
+		(PduCount::Normal(count), pdu)
 	}
 
 	#[test]
@@ -298,6 +296,34 @@ mod tests {
 	}
 
 	#[test]
+	fn collapse_prefers_timeline_order_over_timestamp() {
+		let events = vec![
+			make_pdu("$msg1:example.com", 1000, None),
+			make_pdu_with_count_and_sender(
+				"$edit_old_ts_newer_count:example.com",
+				3000,
+				1000,
+				Some("$msg1:example.com"),
+				"@user:example.com",
+			),
+			make_pdu_with_count_and_sender(
+				"$edit_new_ts_older_count:example.com",
+				2000,
+				4000,
+				Some("$msg1:example.com"),
+				"@user:example.com",
+			),
+		];
+
+		let result = collapse_superseded_edits(events);
+		assert_eq!(result.len(), 2);
+		assert_eq!(
+			result[1].1.event_id.as_str(),
+			"$edit_old_ts_newer_count:example.com"
+		);
+	}
+
+	#[test]
 	fn collapse_groups_edits_by_target_and_sender() {
 		let events = vec![
 			make_pdu("$msg1:example.com", 1000, None),
@@ -340,7 +366,7 @@ mod tests {
 			let pdu = PduEvent {
 				kind: ruma::events::TimelineEventType::RoomMessage,
 				content: RawValue::from_string(content).expect("valid JSON"),
-				event_id: EventId::parse(event_id).expect("valid event_id"),
+				event_id: EventId::parse(event_id).expect("valid event_id").into(),
 				room_id: OwnedRoomId::try_from("!test:example.com").expect("valid room_id"),
 				sender: OwnedUserId::try_from("@user:example.com").expect("valid user_id"),
 				state_key: None,
