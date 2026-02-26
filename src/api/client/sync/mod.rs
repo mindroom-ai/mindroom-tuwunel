@@ -208,6 +208,29 @@ mod tests {
 	}
 
 	#[test]
+	fn collapse_no_edits() {
+		let events = vec![
+			make_pdu("$msg1:example.com", 1000, None),
+			make_pdu("$msg2:example.com", 2000, None),
+		];
+
+		let result = collapse_superseded_edits(events.clone());
+		assert_eq!(result.len(), 2);
+	}
+
+	#[test]
+	fn collapse_single_edit_kept() {
+		let events = vec![
+			make_pdu("$msg1:example.com", 1000, None),
+			make_pdu("$edit1:example.com", 2000, Some("$msg1:example.com")),
+		];
+
+		let result = collapse_superseded_edits(events);
+		assert_eq!(result.len(), 2);
+		assert_eq!(result[1].1.event_id.as_str(), "$edit1:example.com");
+	}
+
+	#[test]
 	fn collapse_multiple_edits_keeps_latest() {
 		let events = vec![
 			make_pdu("$msg1:example.com", 1000, None),
@@ -220,6 +243,58 @@ mod tests {
 		assert_eq!(result.len(), 2);
 		assert_eq!(result[0].1.event_id.as_str(), "$msg1:example.com");
 		assert_eq!(result[1].1.event_id.as_str(), "$edit3:example.com");
+	}
+
+	#[test]
+	fn collapse_multiple_targets_independent() {
+		let events = vec![
+			make_pdu("$msg1:example.com", 1000, None),
+			make_pdu("$edit1a:example.com", 2000, Some("$msg1:example.com")),
+			make_pdu("$edit1b:example.com", 3000, Some("$msg1:example.com")),
+			make_pdu("$msg2:example.com", 4000, None),
+			make_pdu("$edit2a:example.com", 5000, Some("$msg2:example.com")),
+			make_pdu("$edit2b:example.com", 6000, Some("$msg2:example.com")),
+		];
+
+		let result = collapse_superseded_edits(events);
+		assert_eq!(result.len(), 4);
+
+		let event_ids: Vec<&str> = result.iter().map(|(_, pdu)| pdu.event_id.as_str()).collect();
+		assert!(event_ids.contains(&"$msg1:example.com"));
+		assert!(event_ids.contains(&"$edit1b:example.com"));
+		assert!(event_ids.contains(&"$msg2:example.com"));
+		assert!(event_ids.contains(&"$edit2b:example.com"));
+		assert!(!event_ids.contains(&"$edit1a:example.com"));
+		assert!(!event_ids.contains(&"$edit2a:example.com"));
+	}
+
+	#[test]
+	fn collapse_preserves_order() {
+		let events = vec![
+			make_pdu("$msg1:example.com", 1000, None),
+			make_pdu("$edit1:example.com", 2000, Some("$msg1:example.com")),
+			make_pdu("$msg2:example.com", 3000, None),
+			make_pdu("$edit2:example.com", 4000, Some("$msg1:example.com")),
+		];
+
+		let result = collapse_superseded_edits(events);
+		assert_eq!(result.len(), 3);
+		assert_eq!(result[0].1.event_id.as_str(), "$msg1:example.com");
+		assert_eq!(result[1].1.event_id.as_str(), "$msg2:example.com");
+		assert_eq!(result[2].1.event_id.as_str(), "$edit2:example.com");
+	}
+
+	#[test]
+	fn collapse_same_ts_uses_event_id_tiebreak() {
+		let events = vec![
+			make_pdu("$msg1:example.com", 1000, None),
+			make_pdu("$editA:example.com", 2000, Some("$msg1:example.com")),
+			make_pdu("$editB:example.com", 2000, Some("$msg1:example.com")),
+		];
+
+		let result = collapse_superseded_edits(events);
+		assert_eq!(result.len(), 2);
+		assert_eq!(result[1].1.event_id.as_str(), "$editB:example.com");
 	}
 
 	#[test]
