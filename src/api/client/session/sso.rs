@@ -597,10 +597,14 @@ async fn decide_user_id(
 		return Ok(user_id);
 	}
 
-	let allowed =
-		|claim: &str| provider.userid_claims.is_empty() || provider.userid_claims.contains(claim);
+	let explicit = |claim: &str| provider.userid_claims.contains(claim);
+
+	let allowed = |claim: &str| provider.userid_claims.is_empty() || explicit(claim);
 
 	let choices = [
+		explicit("sub")
+			.then_some(userinfo.sub.as_str())
+			.map(str::to_lowercase),
 		userinfo
 			.preferred_username
 			.as_deref()

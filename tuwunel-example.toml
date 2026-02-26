@@ -2320,9 +2320,17 @@
 # compute a Matrix UserId for new registrations. Reviewing Tuwunel's
 # documentation will be necessary for a complete description in detail. An
 # empty array imposes no restriction here, avoiding generated fallbacks as
-# much as possible. For simplicity we reserve a claim called "unique"
-# which can be listed alone to ensure *only* generated ID's are used for
-# registrations.
+# much as possible.
+#
+# For simplicity we reserve a claim called "unique" which can be listed
+# alone to ensure *only* generated ID's are used for registrations.
+#
+# Note that listing the claim "sub" has special significance and will take
+# precedence over all other claims, listed or unlisted. "sub" is not
+# normally used to determine a UserId unless explicitly listed here.
+#
+# As of now arbitrary claims cannot be listed here, we only recognize
+# specific hard-coded claims.
 #
 #userid_claims = []
 
