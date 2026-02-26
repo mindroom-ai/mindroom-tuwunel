@@ -2222,9 +2222,10 @@ pub struct Config {
 	#[serde(default = "default_mindroom_edit_purge_batch_size")]
 	pub mindroom_edit_purge_batch_size: usize,
 
-	/// MindRoom: Minimum number of PDUs to scan per purge cycle.
+	/// MindRoom: Floor for PDUs scanned per purge cycle.
 	///
-	/// The effective per-cycle scan budget is:
+	/// This value competes with `mindroom_edit_purge_batch_size * 10`; the
+	/// effective per-cycle scan budget is:
 	/// `max(mindroom_edit_purge_batch_size * 10, mindroom_edit_purge_scan_limit)`.
 	///
 	/// default: 100000

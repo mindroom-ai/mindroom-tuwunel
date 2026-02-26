@@ -10,7 +10,8 @@ pub fn remove<K>(&self, key: &K)
 where
 	K: AsRef<[u8]> + ?Sized + Debug,
 {
-	self.remove_fallible(key).expect("database remove error");
+	self.remove_fallible(key)
+		.expect("database remove error");
 }
 
 #[implement(super::Map)]
@@ -26,7 +27,7 @@ where
 		.or_else(or_else)?;
 
 	if !self.engine.corked() {
-		self.engine.flush().or_else(or_else)?;
+		self.engine.flush()?;
 	}
 
 	self.notify(key.as_ref());

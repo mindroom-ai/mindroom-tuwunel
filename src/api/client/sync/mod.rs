@@ -5,10 +5,12 @@ use std::collections::HashMap;
 
 use futures::{FutureExt, StreamExt, pin_mut};
 use ruma::{OwnedEventId, OwnedUserId, RoomId, UserId};
-use serde::Deserialize;
 use tuwunel_core::{
 	Error, PduCount, Result,
-	matrix::pdu::PduEvent,
+	matrix::{
+		event::{Event, ExtractRelatesToInfo},
+		pdu::PduEvent,
+	},
 	utils::stream::{BroadbandExt, ReadyExt},
 };
 use tuwunel_service::Services;
@@ -63,19 +65,6 @@ async fn load_timeline(
 	};
 
 	Ok((timeline_pdus, limited, last_timeline_count))
-}
-
-/// Helper structs for extracting m.relates_to from event content.
-#[derive(Deserialize)]
-struct ExtractRelatesToInfo {
-	#[serde(rename = "m.relates_to")]
-	relates_to: RelatesToInfo,
-}
-
-#[derive(Deserialize)]
-struct RelatesToInfo {
-	rel_type: String,
-	event_id: OwnedEventId,
 }
 
 /// Collapse multiple m.replace relation events targeting the same event from
@@ -198,7 +187,7 @@ mod tests {
 		let pdu = PduEvent {
 			kind: ruma::events::TimelineEventType::RoomMessage,
 			content: RawValue::from_string(content).expect("valid JSON"),
-			event_id: EventId::parse(event_id).expect("valid event_id"),
+			event_id: EventId::parse(event_id).expect("valid event_id").into(),
 			room_id: OwnedRoomId::try_from("!test:example.com").expect("valid room_id"),
 			sender: OwnedUserId::try_from(sender).expect("valid user_id"),
 			state_key: None,
@@ -377,7 +366,7 @@ mod tests {
 			let pdu = PduEvent {
 				kind: ruma::events::TimelineEventType::RoomMessage,
 				content: RawValue::from_string(content).expect("valid JSON"),
-				event_id: EventId::parse(event_id).expect("valid event_id"),
+				event_id: EventId::parse(event_id).expect("valid event_id").into(),
 				room_id: OwnedRoomId::try_from("!test:example.com").expect("valid room_id"),
 				sender: OwnedUserId::try_from("@user:example.com").expect("valid user_id"),
 				state_key: None,

@@ -1,5 +1,5 @@
 use std::{
-	collections::{HashMap, HashSet, hash_map::Entry},
+	collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
 	sync::Arc,
 	time::Duration,
 };
@@ -7,12 +7,18 @@ use std::{
 use async_trait::async_trait;
 use futures::StreamExt;
 use ruma::{OwnedEventId, OwnedUserId};
-use serde::Deserialize;
 use tokio::{
 	sync::{Mutex, Notify},
 	time::{MissedTickBehavior, interval},
 };
-use tuwunel_core::{Result, Server, debug, info, matrix::pdu::PduEvent, utils, warn};
+use tuwunel_core::{
+	Result, Server, debug, info,
+	matrix::{
+		event::{Event, ExtractRelatesToInfo},
+		pdu::PduEvent,
+	},
+	utils, warn,
+};
 use tuwunel_database::{Database, Map};
 
 pub struct Service {
@@ -29,25 +35,15 @@ pub struct Service {
 	/// replacements split across scan windows are still compared.
 	latest_replace_by_target_sender:
 		Mutex<HashMap<(OwnedEventId, OwnedUserId), ReplaceCandidate>>,
+	/// Superseded candidates discovered in previous cycles but not yet deleted
+	/// because `batch_size` was reached.
+	pending_superseded_candidates: Mutex<VecDeque<(OwnedEventId, ReplaceCandidate)>>,
 	services: Services,
 }
 
 struct Services {
 	server: Arc<Server>,
 	db: Arc<Database>,
-}
-
-/// Extract m.relates_to from PDU content.
-#[derive(Deserialize)]
-struct ExtractRelatesToInfo {
-	#[serde(rename = "m.relates_to")]
-	relates_to: RelatesToInfo,
-}
-
-#[derive(Deserialize)]
-struct RelatesToInfo {
-	rel_type: String,
-	event_id: OwnedEventId,
 }
 
 /// A candidate replacement event with its metadata.
@@ -85,6 +81,7 @@ impl crate::Service for Service {
 			shorteventid_eventid: db["shorteventid_eventid"].clone(),
 			last_scan_key: Mutex::new(None),
 			latest_replace_by_target_sender: Mutex::new(HashMap::new()),
+			pending_superseded_candidates: Mutex::new(VecDeque::new()),
 			services: Services {
 				server: args.server.clone(),
 				db: args.db.clone(),
@@ -176,6 +173,7 @@ impl Service {
 		let mut last_key: Option<Vec<u8>> = None;
 		let mut scanned: usize = 0;
 		let mut reached_end = true;
+		let mut reset_scan_state = false;
 
 		while let Some(kv) = stream.next().await {
 			let Ok((key, value)) = kv else {
@@ -233,11 +231,24 @@ impl Service {
 			}
 		}
 
+		// Under sustained high write load this pass may never reach the end; cap
+		// retained latest-state entries to avoid unbounded growth.
+		let latest_state_cap = scan_limit.saturating_mul(4).max(10_000);
+		if latest_replace_by_target_sender.len() > latest_state_cap {
+			warn!(
+				groups = latest_replace_by_target_sender.len(),
+				cap = latest_state_cap,
+				"MindRoom edit purge latest-state cache exceeded cap; resetting scan pass"
+			);
+			latest_replace_by_target_sender.clear();
+			reset_scan_state = true;
+		}
+
 		// Update the cursor: if we reached the end, reset to None (start
 		// over next cycle). Otherwise, save the last key for resuming.
 		{
 			let mut cursor = self.last_scan_key.lock().await;
-			if reached_end {
+			if reached_end || reset_scan_state {
 				*cursor = None;
 				latest_replace_by_target_sender.clear();
 			} else {
@@ -246,9 +257,16 @@ impl Service {
 		}
 		drop(latest_replace_by_target_sender);
 
-		// Phase 2: Purge superseded events discovered during this scan window.
+		// Phase 2: Purge superseded events discovered during this and prior scan
+		// windows.
 		let mut purge_count: usize = 0;
 		let mut target_ids: HashSet<OwnedEventId> = HashSet::new();
+		let mut pending_superseded = self.pending_superseded_candidates.lock().await;
+		pending_superseded.extend(superseded_candidates);
+		let purge_budget = pending_superseded.len().min(batch_size);
+		let remaining_backlog = pending_superseded.len().saturating_sub(purge_budget);
+		let purge_batch: Vec<_> = pending_superseded.drain(..purge_budget).collect();
+		drop(pending_superseded);
 
 		let _cork = if !dry_run {
 			Some(self.services.db.cork_and_flush())
@@ -256,7 +274,7 @@ impl Service {
 			None
 		};
 
-		for (target_event_id, candidate) in superseded_candidates.into_iter().take(batch_size) {
+		for (target_event_id, candidate) in purge_batch {
 			if dry_run {
 				info!(
 					event_id = %candidate.event_id,
@@ -281,10 +299,10 @@ impl Service {
 
 		let target_count = target_ids.len();
 
-		if purge_count > 0 || target_count > 0 {
+		if purge_count > 0 || target_count > 0 || remaining_backlog > 0 {
 			info!(
 				"MindRoom edit purge: {}purged {purge_count} superseded edits \
-				 for {target_count} target events (scanned {scanned} PDUs)",
+				 for {target_count} target events (scanned {scanned} PDUs, backlog {remaining_backlog})",
 				if dry_run { "[dry-run] would have " } else { "" },
 			);
 		} else {
@@ -358,7 +376,7 @@ impl Service {
 #[cfg(test)]
 mod tests {
 	use std::{
-		collections::HashMap,
+		collections::{HashMap, VecDeque},
 		fs,
 		path::{Path, PathBuf},
 		sync::{
@@ -446,6 +464,7 @@ mod tests {
 			shorteventid_eventid: db["shorteventid_eventid"].clone(),
 			last_scan_key: Mutex::new(None),
 			latest_replace_by_target_sender: Mutex::new(HashMap::new()),
+			pending_superseded_candidates: Mutex::new(VecDeque::new()),
 			services: Services { server, db },
 		});
 
@@ -521,7 +540,7 @@ rocksdb_read_only = {}
 		PduEvent {
 			kind: ruma::events::TimelineEventType::RoomMessage,
 			content: RawValue::from_string(content).expect("valid JSON content"),
-			event_id: EventId::parse(event_id).expect("valid event id"),
+			event_id: EventId::parse(event_id).expect("valid event id").into(),
 			room_id: OwnedRoomId::try_from("!room:example.com").expect("valid room id"),
 			sender: OwnedUserId::try_from(sender).expect("valid sender"),
 			state_key: None,
