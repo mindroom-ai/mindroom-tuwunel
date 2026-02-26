@@ -266,17 +266,20 @@ impl Service {
 					target = %target_event_id,
 					"[dry-run] Would purge superseded edit"
 				);
-			} else {
-				self.delete_event(&candidate);
+				purge_count += 1;
+				target_ids.insert(target_event_id);
+				continue;
+			}
+
+			if self.delete_event(&candidate) {
 				debug!(
 					event_id = %candidate.event_id,
 					target = %target_event_id,
 					"Purged superseded edit event"
 				);
+				purge_count += 1;
+				target_ids.insert(target_event_id);
 			}
-
-			purge_count += 1;
-			target_ids.insert(target_event_id);
 		}
 
 		let target_count = target_ids.len();
@@ -295,29 +298,63 @@ impl Service {
 	}
 
 	/// Delete a superseded edit event from the database.
-	fn delete_event(&self, candidate: &ReplaceCandidate) {
+	///
+	/// Returns true when the primary event row was removed; returns false when
+	/// purge should skip this candidate due to a write error.
+	fn delete_event(&self, candidate: &ReplaceCandidate) -> bool {
 		// Remove from pduid_pdu (the main event storage)
-		self.pduid_pdu.remove(&candidate.pdu_id_bytes);
+		if let Err(e) = self.pduid_pdu.remove_fallible(&candidate.pdu_id_bytes) {
+			warn!(
+				%e,
+				event_id = %candidate.event_id,
+				"Failed to remove superseded edit from pduid_pdu; skipping candidate"
+			);
+			return false;
+		}
 
 		// Remove from eventid_pduid (event_id -> pdu_id index)
-		self.eventid_pduid.remove(candidate.event_id.as_bytes());
+		if let Err(e) = self
+			.eventid_pduid
+			.remove_fallible(candidate.event_id.as_bytes())
+		{
+			warn!(
+				%e,
+				event_id = %candidate.event_id,
+				"Failed to remove superseded edit from eventid_pduid"
+			);
+		}
 
 		// Remove from eventid_shorteventid / shorteventid_eventid
 		// (short numeric ID mappings that would otherwise be orphaned)
 		if let Ok(short_bytes) = self
 			.eventid_shorteventid
 			.get_blocking(candidate.event_id.as_bytes())
+			&& let Err(e) = self.shorteventid_eventid.remove_fallible(&*short_bytes)
 		{
-			self.shorteventid_eventid.remove(&*short_bytes);
+			warn!(
+				%e,
+				event_id = %candidate.event_id,
+				"Failed to remove superseded edit from shorteventid_eventid"
+			);
 		}
-		self.eventid_shorteventid
-			.remove(candidate.event_id.as_bytes());
+
+		if let Err(e) = self
+			.eventid_shorteventid
+			.remove_fallible(candidate.event_id.as_bytes())
+		{
+			warn!(
+				%e,
+				event_id = %candidate.event_id,
+				"Failed to remove superseded edit from eventid_shorteventid"
+			);
+		}
 
 		// Note: we intentionally do NOT remove from tofrom_relation.
 		// The relation entry is tiny (16 bytes) and removing it could
 		// affect federation or relation queries. The PDU itself being
 		// gone is sufficient — lookups via the relation will simply
 		// fail to find the PDU and skip it.
+		true
 	}
 }
 
