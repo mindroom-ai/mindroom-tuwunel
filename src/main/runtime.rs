@@ -14,7 +14,10 @@ pub use tokio::runtime::{Handle, Runtime};
 use tuwunel_core::result::LogDebugErr;
 use tuwunel_core::{
 	Result, debug, is_true,
-	utils::sys::compute::{nth_core_available, set_affinity},
+	utils::sys::{
+		compute::{nth_core_available, set_affinity},
+		thread_usage, usage,
+	},
 };
 
 use crate::{Args, Server};
@@ -95,20 +98,22 @@ pub fn shutdown(server: &Arc<Server>, runtime: Runtime) -> Result {
 
 	// The final metrics output is promoted to INFO when tokio_unstable is active in
 	// a release/bench mode and DEBUG is likely optimized out
-	const LEVEL: Level = if cfg!(debug_assertions) {
+	const LEVEL: Level = if cfg!(not(any(tokio_unstable, feature = "release_max_log_level"))) {
 		Level::DEBUG
 	} else {
 		Level::INFO
 	};
 
 	wait_shutdown(server, runtime);
-	let runtime_metrics = server
-		.server
-		.metrics
-		.runtime_interval()
-		.unwrap_or_default();
 
-	tuwunel_core::event!(LEVEL, ?runtime_metrics, "Final runtime metrics");
+	if let Some(runtime_metrics) = server.server.metrics.runtime_interval() {
+		tuwunel_core::event!(LEVEL, ?runtime_metrics, "Final runtime metrics.");
+	}
+
+	if let Ok(resource_usage) = usage() {
+		tuwunel_core::event!(LEVEL, ?resource_usage, "Final resource usage.");
+	}
+
 	Ok(())
 }
 
@@ -201,7 +206,13 @@ fn set_worker_mallctl(_: usize) {}
 		name = %thread::current().name().unwrap_or("None"),
 	),
 )]
-fn thread_stop() {}
+fn thread_stop() {
+	if cfg!(any(tokio_unstable, not(feature = "release_max_log_level")))
+		&& let Ok(resource_usage) = thread_usage()
+	{
+		tuwunel_core::debug!(?resource_usage, "Thread resource usage.");
+	}
+}
 
 #[tracing::instrument(
 	name = "work",
