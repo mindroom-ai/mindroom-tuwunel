@@ -1,5 +1,19 @@
 # Tuwunel<sup>💕</sup>
 
+> This is the MindRoom fork of
+> [`matrix-construct/tuwunel`](https://github.com/matrix-construct/tuwunel).
+> It tracks upstream and carries a focused set of fork-specific changes for
+> high-frequency edit streaming workloads.
+
+## MindRoom Fork Additions
+
+- Compact edit timeline mode in `/sync` to collapse superseded `m.replace`
+  events in response timelines.
+- Background purge service for superseded `m.replace` events with configurable
+  age/interval/batch controls.
+- Fork runbook and commit-by-commit changelog in
+  [`FORK_CHANGES.md`](./FORK_CHANGES.md).
+
 ![GitHub License](https://img.shields.io/github/license/matrix-construct/tuwunel?style=flat%2Dsquare&color=%238A2BE2)
 ![GitHub Created At](https://img.shields.io/github/created-at/matrix-construct/tuwunel?style=flat%2Dsquare&color=%238A2BE2)
 ![GitHub Commit Activity](https://img.shields.io/github/commit-activity/m/matrix-construct/tuwunel?style=flat%2Dsquare&link=https%3A%2F%2Fgithub.com%2Fmatrix-construct%2Ftuwunel%2Fpulse%2Fmonthly&color=%238A2BE2)
