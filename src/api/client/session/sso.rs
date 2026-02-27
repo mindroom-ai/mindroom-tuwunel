@@ -11,6 +11,7 @@ use ruma::{
 	api::client::session::{sso_callback, sso_login, sso_login_with_provider},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use tuwunel_core::{
 	Err, Result, at,
 	config::IdentityProvider,
@@ -64,6 +65,63 @@ struct GrantCookie<'a> {
 }
 
 static GRANT_SESSION_COOKIE: &str = "tuwunel_grant_session";
+
+fn decode_apple_userinfo_from_id_token(session: &Session) -> Result<UserInfo> {
+	let id_token = session
+		.id_token
+		.as_deref()
+		.ok_or_else(|| err!(Request(Unauthorized("Missing Apple id_token in token response."))))?;
+
+	let payload_b64 = id_token
+		.split('.')
+		.nth(1)
+		.ok_or_else(|| err!(Request(Unauthorized("Apple id_token is malformed."))))?;
+
+	let payload = b64
+		.decode(payload_b64)
+		.map_err(|_| err!(Request(Unauthorized("Apple id_token payload is invalid base64."))))?;
+
+	let payload: JsonValue = serde_json::from_slice(&payload)
+		.map_err(|_| err!(Request(Unauthorized("Apple id_token payload is not valid JSON."))))?;
+
+	let sub = payload
+		.get("sub")
+		.and_then(JsonValue::as_str)
+		.ok_or_else(|| err!(Request(Unauthorized("Apple id_token missing required sub claim."))))?;
+
+	let email = payload
+		.get("email")
+		.and_then(JsonValue::as_str)
+		.map(ToOwned::to_owned);
+
+	let preferred_username = email
+		.as_deref()
+		.and_then(|value| value.split_once('@'))
+		.map(at!(0))
+		.map(ToOwned::to_owned);
+
+	Ok(UserInfo {
+		sub: sub.to_owned(),
+		preferred_username: preferred_username.clone(),
+		username: preferred_username,
+		nickname: None,
+		name: payload
+			.get("name")
+			.and_then(JsonValue::as_str)
+			.map(ToOwned::to_owned),
+		given_name: payload
+			.get("given_name")
+			.and_then(JsonValue::as_str)
+			.map(ToOwned::to_owned),
+		family_name: payload
+			.get("family_name")
+			.and_then(JsonValue::as_str)
+			.map(ToOwned::to_owned),
+		email,
+		avatar_url: None,
+		picture: None,
+	})
+}
 
 /// # `GET /_matrix/client/v3/login/sso/redirect`
 ///
@@ -344,6 +402,7 @@ pub(crate) async fn sso_callback_route(
 		scope: token_response.scope,
 		token_type: token_response.token_type,
 		access_token: token_response.access_token,
+		id_token: token_response.id_token,
 		expires_at: token_expires_at,
 		refresh_token: token_response.refresh_token,
 		refresh_token_expires_at,
@@ -354,7 +413,28 @@ pub(crate) async fn sso_callback_route(
 	let userinfo = services
 		.oauth
 		.request_userinfo((&provider, &session))
-		.await?;
+		.await
+		.or_else(|error| {
+			if provider.brand != "appleoidc" {
+				return Err(error);
+			}
+
+			debug_warn!(
+				?error,
+				idp_id = provider.id(),
+				"Failed to fetch Apple userinfo endpoint; falling back to id_token claims.",
+			);
+
+			decode_apple_userinfo_from_id_token(&session)
+				.map_err(|decode_error| {
+					debug_warn!(
+						?decode_error,
+						idp_id = provider.id(),
+						"Failed to decode Apple id_token fallback.",
+					);
+					error
+				})
+		})?;
 
 	let unique_id = unique_id_sub((&provider, &userinfo.sub))?;
 
