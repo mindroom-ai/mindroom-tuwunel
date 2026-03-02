@@ -10,7 +10,10 @@
 - Compact edit timeline mode in `/sync` to collapse superseded `m.replace`
   events in response timelines.
 - Background purge service for superseded `m.replace` events with configurable
-  age/interval/batch controls.
+  age/interval/batch/scan/dry-run controls.
+- Apple OAuth fallback that decodes `id_token` claims when the provider
+  `userinfo` endpoint is unavailable.
+- Tagged-release binary publishing workflow for Linux `x86_64` and `aarch64`.
 - Fork runbook and commit-by-commit changelog in
   [`FORK_CHANGES.md`](./FORK_CHANGES.md).
 - Automated fork release tagging on `main` in
@@ -24,6 +27,8 @@
 - `base_version` is auto-detected from `BASE_VERSION`, then `Cargo.toml`
   (`workspace.package.version`), then standard semver tags.
 - Reused tags are detected when `HEAD` is already tagged for that base version.
+- Tagged pushes publish Linux release tarballs for `x86_64` and `aarch64` via
+  [`mindroom-release.yml`](./.github/workflows/mindroom-release.yml).
 - Tagging is performed by
   [`auto-mindroom-release.yml`](./.github/workflows/auto-mindroom-release.yml)
   using [`scripts/fork_release_tag.py`](./scripts/fork_release_tag.py).
