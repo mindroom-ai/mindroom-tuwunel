@@ -13,6 +13,25 @@
   age/interval/batch controls.
 - Fork runbook and commit-by-commit changelog in
   [`FORK_CHANGES.md`](./FORK_CHANGES.md).
+- Automated fork release tagging on `main` in
+  `v<base_version>-mindroom.<n>` format.
+
+## MindRoom Release Tags
+
+- Every push to `main` computes a release tag in the format
+  `v<base_version>-mindroom.<n>`.
+- The workflow creates (or reuses) the corresponding GitHub Release for that tag.
+- `base_version` is auto-detected from `BASE_VERSION`, then `Cargo.toml`
+  (`workspace.package.version`), then standard semver tags.
+- Reused tags are detected when `HEAD` is already tagged for that base version.
+- Tagging is performed by
+  [`auto-mindroom-release.yml`](./.github/workflows/auto-mindroom-release.yml)
+  using [`scripts/fork_release_tag.py`](./scripts/fork_release_tag.py).
+- Local preview of the next tag:
+
+```bash
+python3 scripts/fork_release_tag.py
+```
 
 ![GitHub License](https://img.shields.io/github/license/matrix-construct/tuwunel?style=flat%2Dsquare&color=%238A2BE2)
 ![GitHub Created At](https://img.shields.io/github/created-at/matrix-construct/tuwunel?style=flat%2Dsquare&color=%238A2BE2)
