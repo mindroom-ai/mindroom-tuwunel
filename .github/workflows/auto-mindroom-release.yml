@@ -1,0 +1,52 @@
+name: Auto MindRoom Release Tag
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-mindroom-release-main
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Compute and push MindRoom release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Refresh remote tags
+        run: git fetch --force --tags origin
+
+      - name: Compute MindRoom release tag
+        id: version
+        env:
+          RELEASE_TAG_PREFIX: v
+          RELEASE_TAG_SUFFIX: mindroom
+        run: python3 scripts/fork_release_tag.py
+
+      - name: Push release tag (or skip when already tagged)
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          REUSED_TAG_AT_HEAD: ${{ steps.version.outputs.reused_tag_at_head }}
+        run: |
+          if [ "$REUSED_TAG_AT_HEAD" = "true" ]; then
+            echo "HEAD already tagged as $RELEASE_TAG; skipping."
+            exit 0
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$RELEASE_TAG" > /dev/null; then
+            echo "Tag $RELEASE_TAG already exists locally; skipping push."
+            exit 0
+          fi
+
+          git tag "$RELEASE_TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$RELEASE_TAG"

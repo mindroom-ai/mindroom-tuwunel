@@ -89,6 +89,23 @@ Behavior:
 - For Apple OAuth flows, if userinfo endpoint lookup fails, the server falls back to
   claims from `id_token` so login can still complete.
 
+### 8) `ci(release): auto-tag main pushes with mindroom suffix`
+Files:
+- `.github/workflows/auto-mindroom-release.yml`
+- `scripts/fork_release_tag.py`
+- `README.md`
+- `FORK_CHANGES.md`
+
+Behavior:
+- Adds an automatic tagger on `main` pushes that computes
+  `v<base_version>-mindroom.<n>`.
+- Reads `base_version` from `BASE_VERSION`, then `Cargo.toml` workspace version,
+  then semver base tags as fallback.
+- Reuses an existing release tag when `HEAD` is already tagged for that base
+  version/iteration.
+- Pushes the computed tag so existing tag-driven release pipelines can publish
+  artifacts.
+
 ## Runtime Configuration
 
 ### Compact edits in `/sync`
@@ -120,6 +137,7 @@ mindroom_edit_purge_dry_run = false
 - Purge worker reclaims storage by removing superseded historical edits after the
   configured age threshold.
 - OAuth change improves Apple sign-in robustness when userinfo retrieval is unavailable.
+- Main-branch pushes now auto-generate MindRoom-suffixed release tags.
 
 ## Compatibility Notes
 - Matrix event formats remain standard.
