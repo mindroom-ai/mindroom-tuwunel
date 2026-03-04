@@ -20,6 +20,7 @@ use crate::users::PASSWORD_SENTINEL;
 
 pub struct Service {
 	userdevicesessionid_uiaarequest: RwLock<RequestMap>,
+	sessionid_userdevice: RwLock<SessionMap>,
 	db: Data,
 	services: Arc<crate::services::OnceServices>,
 }
@@ -30,6 +31,7 @@ struct Data {
 
 type RequestMap = BTreeMap<RequestKey, CanonicalJsonValue>;
 type RequestKey = (OwnedUserId, OwnedDeviceId, String);
+type SessionMap = BTreeMap<String, (OwnedUserId, OwnedDeviceId)>;
 
 pub const SESSION_ID_LENGTH: usize = 32;
 
@@ -37,6 +39,7 @@ impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
 			userdevicesessionid_uiaarequest: RwLock::new(RequestMap::new()),
+			sessionid_userdevice: RwLock::new(SessionMap::new()),
 			db: Data {
 				userdevicesessionid_uiaainfo: args.db["userdevicesessionid_uiaainfo"].clone(),
 			},
@@ -252,6 +255,39 @@ pub fn get_uiaa_request(
 }
 
 #[implement(Service)]
+pub async fn complete_stage(
+	&self,
+	user_id: &UserId,
+	session: &str,
+	stage: AuthType,
+) -> Result {
+	let Some((session_user, session_device)) = self
+		.sessionid_userdevice
+		.read()
+		.expect("locked for reading")
+		.get(session)
+		.cloned()
+	else {
+		return Err!(Request(Forbidden("UIAA session does not exist.")));
+	};
+
+	if session_user.as_str() != user_id.as_str() {
+		return Err!(Request(Forbidden("UIAA session and user mismatch.")));
+	}
+
+	let mut uiaainfo = self
+		.get_uiaa_session(&session_user, &session_device, session)
+		.await?;
+
+	if !uiaainfo.completed.contains(&stage) {
+		uiaainfo.completed.push(stage);
+	}
+
+	self.update_uiaa_session(&session_user, &session_device, session, Some(&uiaainfo));
+	Ok(())
+}
+
+#[implement(Service)]
 fn update_uiaa_session(
 	&self,
 	user_id: &UserId,
@@ -265,8 +301,18 @@ fn update_uiaa_session(
 		self.db
 			.userdevicesessionid_uiaainfo
 			.put(key, Json(uiaainfo));
+		self
+			.sessionid_userdevice
+			.write()
+			.expect("locked for writing")
+			.insert(session.to_owned(), (user_id.to_owned(), device_id.to_owned()));
 	} else {
 		self.db.userdevicesessionid_uiaainfo.del(key);
+		self
+			.sessionid_userdevice
+			.write()
+			.expect("locked for writing")
+			.remove(session);
 	}
 }
 

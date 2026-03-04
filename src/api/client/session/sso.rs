@@ -485,6 +485,13 @@ pub(crate) async fn sso_callback_route(
 
 	// Commit the updated session.
 	services.oauth.sessions.put(&session).await;
+	if services
+		.users
+		.maybe_repair_legacy_sso_origin(&user_id)
+		.await
+	{
+		info!("Repaired legacy SSO-origin metadata for {user_id}");
+	}
 
 	// Delete any old session.
 	if let Some(old_sess_id) = old_sess_id
