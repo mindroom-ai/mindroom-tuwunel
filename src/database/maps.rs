@@ -301,6 +301,10 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
+		name: "sessionid_userdeviceid",
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
 		name: "shorteventid_authchain",
 		cache_disp: CacheDisp::SharedWith("authchainkey_authchain"),
 		key_size_hint: Some(8),

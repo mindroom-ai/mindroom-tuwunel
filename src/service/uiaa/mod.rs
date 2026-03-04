@@ -20,21 +20,17 @@ use crate::users::PASSWORD_SENTINEL;
 
 pub struct Service {
 	userdevicesessionid_uiaarequest: RwLock<RequestMap>,
-	// TODO: Persist or rebuild this reverse index to survive restarts and
-	// support multi-instance deployments.
-	// TODO: Add expiry/eviction for abandoned sessions.
-	sessionid_userdevice: RwLock<SessionMap>,
 	db: Data,
 	services: Arc<crate::services::OnceServices>,
 }
 
 struct Data {
+	sessionid_userdeviceid: Arc<Map>,
 	userdevicesessionid_uiaainfo: Arc<Map>,
 }
 
 type RequestMap = BTreeMap<RequestKey, CanonicalJsonValue>;
 type RequestKey = (OwnedUserId, OwnedDeviceId, String);
-type SessionMap = BTreeMap<String, (OwnedUserId, OwnedDeviceId)>;
 
 pub const SESSION_ID_LENGTH: usize = 32;
 
@@ -42,8 +38,8 @@ impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
 			userdevicesessionid_uiaarequest: RwLock::new(RequestMap::new()),
-			sessionid_userdevice: RwLock::new(SessionMap::new()),
 			db: Data {
+				sessionid_userdeviceid: args.db["sessionid_userdeviceid"].clone(),
 				userdevicesessionid_uiaainfo: args.db["userdevicesessionid_uiaainfo"].clone(),
 			},
 			services: args.services.clone(),
@@ -264,15 +260,13 @@ pub async fn complete_stage(
 	session: &str,
 	stage: AuthType,
 ) -> Result {
-	let Some((session_user, session_device)) = self
-		.sessionid_userdevice
-		.read()
-		.expect("locked for reading")
+	let (session_user, session_device): (OwnedUserId, OwnedDeviceId) = self
+		.db
+		.sessionid_userdeviceid
 		.get(session)
-		.cloned()
-	else {
-		return Err!(Request(Forbidden("UIAA session does not exist.")));
-	};
+		.await
+		.deserialized()
+		.map_err(|_| err!(Request(Forbidden("UIAA session does not exist."))))?;
 
 	if session_user.as_str() != user_id.as_str() {
 		return Err!(Request(Forbidden("UIAA session and user mismatch.")));
@@ -305,17 +299,12 @@ fn update_uiaa_session(
 			.userdevicesessionid_uiaainfo
 			.put(key, Json(uiaainfo));
 		self
-			.sessionid_userdevice
-			.write()
-			.expect("locked for writing")
-			.insert(session.to_owned(), (user_id.to_owned(), device_id.to_owned()));
+			.db
+			.sessionid_userdeviceid
+			.put(session, (user_id, device_id));
 	} else {
 		self.db.userdevicesessionid_uiaainfo.del(key);
-		self
-			.sessionid_userdevice
-			.write()
-			.expect("locked for writing")
-			.remove(session);
+		self.db.sessionid_userdeviceid.del(session);
 	}
 }
 
