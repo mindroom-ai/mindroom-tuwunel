@@ -27,6 +27,25 @@ pub use self::{keys::parse_master_key, register::Register};
 pub const PASSWORD_SENTINEL: &str = "*";
 pub const PASSWORD_DISABLED: &str = "";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeactivationReason {
+	SelfService,
+	Admin,
+}
+
+impl DeactivationReason {
+	const fn as_str(self) -> &'static str {
+		match self {
+			| Self::SelfService => "self",
+			| Self::Admin => "admin",
+		}
+	}
+}
+
+fn can_reactivate_deactivated_sso(reason: Option<&str>) -> bool {
+	matches!(reason, Some("self"))
+}
+
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	db: Data,
@@ -48,6 +67,7 @@ struct Data {
 	userid_blurhash: Arc<Map>,
 	userid_dehydrateddevice: Arc<Map>,
 	userid_devicelistversion: Arc<Map>,
+	userid_deactivation_reason: Arc<Map>,
 	userid_displayname: Arc<Map>,
 	userid_lastonetimekeyupdate: Arc<Map>,
 	userid_masterkeyid: Arc<Map>,
@@ -78,6 +98,7 @@ impl crate::Service for Service {
 				userid_blurhash: args.db["userid_blurhash"].clone(),
 				userid_dehydrateddevice: args.db["userid_dehydrateddevice"].clone(),
 				userid_devicelistversion: args.db["userid_devicelistversion"].clone(),
+				userid_deactivation_reason: args.db["userid_deactivation_reason"].clone(),
 				userid_displayname: args.db["userid_displayname"].clone(),
 				userid_lastonetimekeyupdate: args.db["userid_lastonetimekeyupdate"].clone(),
 				userid_masterkeyid: args.db["userid_masterkeyid"].clone(),
@@ -128,7 +149,11 @@ impl Service {
 	}
 
 	/// Deactivate account
-	pub async fn deactivate_account(&self, user_id: &UserId) -> Result {
+	pub async fn deactivate_account(
+		&self,
+		user_id: &UserId,
+		reason: DeactivationReason,
+	) -> Result {
 		// Revoke any SSO authorizations
 		self.services
 			.oauth
@@ -145,6 +170,7 @@ impl Service {
 		// Systems like changing the password without logging in should check if the
 		// account is deactivated.
 		self.set_password(user_id, None).await?;
+		self.set_deactivation_reason(user_id, reason);
 
 		// TODO: Unhook 3PID
 		Ok(())
@@ -178,9 +204,9 @@ impl Service {
 
 	/// Reactivate a deactivated local SSO account.
 	///
-	/// This is used for users who intentionally deactivated and later return
-	/// through the same SSO identity. The account remains the same MXID, but
-	/// can authenticate again.
+	/// This is used for users who self-deactivated and later return through the
+	/// same SSO identity. The account remains the same MXID, but can
+	/// authenticate again.
 	pub async fn maybe_reactivate_deactivated_sso(&self, user_id: &UserId) -> Result<bool> {
 		if !self.services.globals.user_is_local(user_id) {
 			return Ok(false);
@@ -199,7 +225,11 @@ impl Service {
 			return Ok(false);
 		}
 
-		self.set_password(user_id, Some("*")).await?;
+		if !can_reactivate_deactivated_sso(self.deactivation_reason(user_id).await.as_deref()) {
+			return Ok(false);
+		}
+
+		self.set_password(user_id, Some(PASSWORD_SENTINEL)).await?;
 		Ok(true)
 	}
 
@@ -245,6 +275,22 @@ impl Service {
 		self.password_hash(user_id)
 			.map_ok(|value| value != PASSWORD_DISABLED && value != PASSWORD_SENTINEL)
 			.await
+	}
+
+	pub async fn deactivation_reason(&self, user_id: &UserId) -> Option<String> {
+		self.db
+			.userid_deactivation_reason
+			.get(user_id)
+			.await
+			.deserialized()
+			.ok()
+	}
+
+	#[inline]
+	pub fn set_deactivation_reason(&self, user_id: &UserId, reason: DeactivationReason) {
+		self.db
+			.userid_deactivation_reason
+			.insert(user_id, reason.as_str());
 	}
 
 	/// Compatibility repair for legacy SSO users whose origin was accidentally
@@ -294,7 +340,7 @@ impl Service {
 
 	/// Hash and set the user's password to the Argon2 hash
 	pub async fn set_password(&self, user_id: &UserId, password: Option<&str>) -> Result {
-		let keep_existing_origin = matches!(password, Some("*"));
+		let keep_existing_origin = matches!(password, Some(PASSWORD_SENTINEL));
 
 		// Cannot change the password of a LDAP user. There are two special cases :
 		// - a `None` password can be used to deactivate a LDAP user
@@ -328,6 +374,7 @@ impl Service {
 			},
 			| Some(Ok(hash)) => {
 				self.db.userid_password.insert(user_id, hash);
+				self.db.userid_deactivation_reason.remove(user_id);
 				if !keep_existing_origin {
 					self.db.userid_origin.insert(user_id, "password");
 				}
@@ -340,6 +387,11 @@ impl Service {
 		}
 
 		Ok(())
+	}
+
+	#[cfg(test)]
+	fn test_can_reactivate_deactivated_sso(reason: Option<&str>) -> bool {
+		can_reactivate_deactivated_sso(reason)
 	}
 
 	/// Creates a new sync filter. Returns the filter id.
@@ -484,5 +536,18 @@ impl Service {
 				warn!(%user_id, %room_id, "Failed to update/send new profile join membership update in room: {e}");
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::Service;
+
+	#[test]
+	fn sso_reactivation_requires_self_deactivation_reason() {
+		assert!(Service::test_can_reactivate_deactivated_sso(Some("self")));
+		assert!(!Service::test_can_reactivate_deactivated_sso(None));
+		assert!(!Service::test_can_reactivate_deactivated_sso(Some("admin")));
+		assert!(!Service::test_can_reactivate_deactivated_sso(Some("unknown")));
 	}
 }
