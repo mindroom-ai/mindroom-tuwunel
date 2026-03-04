@@ -11,6 +11,7 @@ use crate::{
 pub(super) type Maps = BTreeMap<MapsKey, MapsVal>;
 pub(super) type MapsKey = &'static str;
 pub(super) type MapsVal = Arc<Map>;
+const UIAA_SESSION_TTL_SECS: u64 = 60 * 60 * 24;
 
 pub(super) fn open(engine: &Arc<Engine>) -> Result<Maps> { open_list(engine, MAPS) }
 
@@ -302,6 +303,7 @@ pub(super) static MAPS: &[Descriptor] = &[
 	},
 	Descriptor {
 		name: "sessionid_userdeviceid",
+		ttl: UIAA_SESSION_TTL_SECS,
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
@@ -408,6 +410,7 @@ pub(super) static MAPS: &[Descriptor] = &[
 	},
 	Descriptor {
 		name: "userdevicesessionid_uiaainfo",
+		ttl: UIAA_SESSION_TTL_SECS,
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {

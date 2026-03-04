@@ -301,10 +301,10 @@ fn update_uiaa_session(
 		self
 			.db
 			.sessionid_userdeviceid
-			.put(session, (user_id, device_id));
+			.raw_put(session, (user_id, device_id));
 	} else {
 		self.db.userdevicesessionid_uiaainfo.del(key);
-		self.db.sessionid_userdeviceid.del(session);
+		self.db.sessionid_userdeviceid.remove(session);
 	}
 }
 
@@ -323,4 +323,247 @@ async fn get_uiaa_session(
 		.await
 		.deserialized()
 		.map_err(|_| err!(Request(Forbidden("UIAA session does not exist."))))
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{
+		fs,
+		path::{Path, PathBuf},
+		sync::{
+			Arc, RwLock,
+			atomic::{AtomicU64, Ordering},
+		},
+	};
+
+	use ruma::{
+		CanonicalJsonValue, device_id, user_id,
+		api::client::uiaa::{
+			AuthData, AuthFlow, AuthType, FallbackAcknowledgement, UiaaInfo,
+		},
+	};
+	use tracing::subscriber::NoSubscriber;
+	use tuwunel_core::{
+		Server,
+		config::Config,
+		log::{Logging, capture::State as CaptureState},
+	};
+	use tuwunel_database::{Database, Deserialized};
+
+	use super::{Data, RequestMap, Service};
+
+	static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+	#[tokio::test]
+	async fn complete_stage_persists_across_restart() {
+		let temp_dir = unique_temp_dir();
+		let user_id = user_id!("@alice:example.com");
+		let device_id = device_id!("DEVICE_A");
+		let session = "uiaa-restart-session";
+
+		{
+			let (_server, db) = open_server_db(&temp_dir).await;
+			let service = make_service(&db);
+			let uiaainfo = sso_uiaa_info(session);
+			service.create(
+				user_id,
+				device_id,
+				&uiaainfo,
+				&CanonicalJsonValue::Object(Default::default()),
+			);
+		}
+
+		let (_server, db) = open_server_db(&temp_dir).await;
+		let service = make_service(&db);
+
+		service
+			.complete_stage(user_id, session, AuthType::Sso)
+			.await
+			.expect("stage completion should work after restart");
+
+		let (worked, _) = service
+			.try_auth(
+				user_id,
+				device_id,
+				&AuthData::FallbackAcknowledgement(FallbackAcknowledgement {
+					session: session.to_owned(),
+				}),
+				&UiaaInfo::default(),
+			)
+			.await
+			.expect("fallback acknowledgement should complete session");
+		assert!(worked, "expected fallback acknowledgement to finish UIAA");
+
+		assert!(
+			service.db.sessionid_userdeviceid.get(session).await.is_err(),
+			"reverse UIAA lookup should be removed after completion"
+		);
+		assert!(
+			service
+				.db
+				.userdevicesessionid_uiaainfo
+				.qry(&(user_id, device_id, session))
+				.await
+				.is_err(),
+			"forward UIAA session entry should be removed after completion"
+		);
+
+		cleanup_temp_dir(&temp_dir);
+	}
+
+	#[tokio::test]
+	async fn complete_stage_rejects_user_mismatch() {
+		let temp_dir = unique_temp_dir();
+		let (_server, db) = open_server_db(&temp_dir).await;
+		let service = make_service(&db);
+
+		let session_owner = user_id!("@alice:example.com");
+		let other_user = user_id!("@bob:example.com");
+		let device_id = device_id!("DEVICE_MISMATCH");
+		let session = "uiaa-mismatch-session";
+
+		service.create(
+			session_owner,
+			device_id,
+			&sso_uiaa_info(session),
+			&CanonicalJsonValue::Object(Default::default()),
+		);
+
+		service
+			.complete_stage(other_user, session, AuthType::Sso)
+			.await
+			.expect_err("mismatched user must not complete another user's UIAA session");
+
+		let (stored_user, stored_device): (ruma::OwnedUserId, ruma::OwnedDeviceId) = service
+			.db
+			.sessionid_userdeviceid
+			.get(session)
+			.await
+			.deserialized()
+			.expect("reverse entry should remain after failed completion");
+		assert_eq!(stored_user, session_owner.to_owned(), "session owner must be unchanged");
+		assert_eq!(stored_device, device_id.to_owned(), "session device must be unchanged");
+
+		assert!(
+			service
+				.db
+				.userdevicesessionid_uiaainfo
+				.qry(&(session_owner, device_id, session))
+				.await
+				.is_ok(),
+			"forward UIAA session entry should remain after failed completion"
+		);
+
+		cleanup_temp_dir(&temp_dir);
+	}
+
+	#[tokio::test]
+	async fn fallback_acknowledgement_removes_forward_and_reverse_entries() {
+		let temp_dir = unique_temp_dir();
+		let (_server, db) = open_server_db(&temp_dir).await;
+		let service = make_service(&db);
+
+		let user_id = user_id!("@carol:example.com");
+		let device_id = device_id!("DEVICE_CLEANUP");
+		let session = "uiaa-cleanup-session";
+
+		service.create(
+			user_id,
+			device_id,
+			&sso_uiaa_info(session),
+			&CanonicalJsonValue::Object(Default::default()),
+		);
+
+		service
+			.complete_stage(user_id, session, AuthType::Sso)
+			.await
+			.expect("SSO stage should complete");
+
+		let (worked, _) = service
+			.try_auth(
+				user_id,
+				device_id,
+				&AuthData::FallbackAcknowledgement(FallbackAcknowledgement {
+					session: session.to_owned(),
+				}),
+				&UiaaInfo::default(),
+			)
+			.await
+			.expect("fallback acknowledgement should succeed");
+		assert!(worked, "fallback acknowledgement should complete the flow");
+
+		assert!(
+			service.db.sessionid_userdeviceid.get(session).await.is_err(),
+			"reverse UIAA lookup must be deleted after completion"
+		);
+		assert!(
+			service
+				.db
+				.userdevicesessionid_uiaainfo
+				.qry(&(user_id, device_id, session))
+				.await
+				.is_err(),
+			"forward UIAA session must be deleted after completion"
+		);
+
+		cleanup_temp_dir(&temp_dir);
+	}
+
+	fn make_service(db: &Arc<Database>) -> Arc<Service> {
+		Arc::new(Service {
+			userdevicesessionid_uiaarequest: RwLock::new(RequestMap::new()),
+			db: Data {
+				sessionid_userdeviceid: db["sessionid_userdeviceid"].clone(),
+				userdevicesessionid_uiaainfo: db["userdevicesessionid_uiaainfo"].clone(),
+			},
+			services: Arc::new(crate::services::OnceServices::default()),
+		})
+	}
+
+	async fn open_server_db(temp_dir: &Path) -> (Arc<Server>, Arc<Database>) {
+		let db_path = temp_dir.join("db");
+		let config_path = temp_dir.join("tuwunel.toml");
+
+		fs::create_dir_all(temp_dir).expect("create test temp dir");
+		let config_contents = format!(
+			r#"[global]
+server_name = "example.com"
+database_path = "{}"
+"#,
+			db_path.display(),
+		);
+		fs::write(&config_path, config_contents).expect("write test config");
+
+		let figment = Config::load(std::iter::once(config_path.as_path())).expect("load config");
+		let config = Config::new(&figment).expect("parse config");
+		let log = Logging {
+			reload: Default::default(),
+			capture: Arc::new(CaptureState::new()),
+			subscriber: Arc::new(NoSubscriber::new()),
+		};
+		let server = Arc::new(Server::new(config, Some(tokio::runtime::Handle::current()), log));
+		let db = Database::open(&server).await.expect("open test database");
+
+		(server, db)
+	}
+
+	fn sso_uiaa_info(session: &str) -> UiaaInfo {
+		UiaaInfo {
+			flows: vec![AuthFlow::new([AuthType::Sso].into())],
+			session: Some(session.to_owned()),
+			..Default::default()
+		}
+	}
+
+	fn unique_temp_dir() -> PathBuf {
+		let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+		let pid = std::process::id();
+		let path = std::env::temp_dir().join(format!("tuwunel-uiaa-{pid}-{id}"));
+		fs::create_dir_all(&path).expect("create unique test dir");
+		path
+	}
+
+	fn cleanup_temp_dir(path: &Path) {
+		let _ = fs::remove_dir_all(path);
+	}
 }
