@@ -1,7 +1,7 @@
 use axum::{
 	extract::State,
-	http::Uri,
-	response::{Html, Redirect},
+	http::{HeaderMap, HeaderValue, Uri, header},
+	response::{Html, IntoResponse, Redirect},
 };
 use axum_client_ip::InsecureClientIp;
 use ruma::api::client::uiaa::{AuthType, get_uiaa_fallback_page};
@@ -60,6 +60,12 @@ const SSO_FALLBACK_DONE_HTML: &str = r#"<!doctype html>
   </body>
 </html>
 "#;
+
+// Route-specific CSP for the SSO completion popup:
+// - allow only inline script needed for postMessage + window.close
+// - keep everything else locked down
+const SSO_FALLBACK_DONE_CSP: &str =
+	"default-src 'none';script-src 'unsafe-inline';base-uri 'none';form-action 'none';frame-ancestors 'none'";
 
 const UNSUPPORTED_FALLBACK_HTML: &str = r#"<!doctype html>
 <html>
@@ -145,7 +151,7 @@ pub(crate) async fn get_uiaa_sso_fallback_redirect_route(
 pub(crate) async fn complete_uiaa_sso_fallback_route(
 	State(services): State<crate::State>,
 	uri: Uri,
-) -> Result<Html<String>> {
+) -> Result<impl IntoResponse> {
 	let query = uri.query().unwrap_or_default();
 	let query: UiaaSsoFallbackCompleteQuery = serde_html_form::from_str(query)
 		.map_err(|_| err!(Request(InvalidParam("Missing or invalid UIAA fallback query parameters"))))?;
@@ -166,5 +172,11 @@ pub(crate) async fn complete_uiaa_sso_fallback_route(
 		.await
 		.map_err(|_| err!(Request(Forbidden("UIAA fallback session is invalid"))))?;
 
-	Ok(Html(SSO_FALLBACK_DONE_HTML.to_owned()))
+	let mut headers = HeaderMap::new();
+	headers.insert(
+		header::CONTENT_SECURITY_POLICY,
+		HeaderValue::from_static(SSO_FALLBACK_DONE_CSP),
+	);
+
+	Ok((headers, Html(SSO_FALLBACK_DONE_HTML.to_owned())))
 }
