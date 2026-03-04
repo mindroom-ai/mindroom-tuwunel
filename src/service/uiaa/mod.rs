@@ -18,6 +18,9 @@ use tuwunel_database::{Deserialized, Json, Map};
 
 pub struct Service {
 	userdevicesessionid_uiaarequest: RwLock<RequestMap>,
+	// TODO: Persist or rebuild this reverse index to survive restarts and
+	// support multi-instance deployments.
+	// TODO: Add expiry/eviction for abandoned sessions.
 	sessionid_userdevice: RwLock<SessionMap>,
 	db: Data,
 	services: Arc<crate::services::OnceServices>,

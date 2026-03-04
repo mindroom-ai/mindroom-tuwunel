@@ -59,6 +59,12 @@ where
 		.transpose()?
 	{
 		| Some(AuthData::Jwt(Jwt { ref token, .. })) => {
+			if sender_uses_sso {
+				return Err!(Request(Forbidden(
+					"JWT UIAA is not allowed for SSO-origin users.",
+				)));
+			}
+
 			let sender_user = jwt::validate_user(services, token)?;
 			if !services.users.exists(&sender_user).await {
 				return Err!(Request(NotFound("User {sender_user} is not registered.")));

@@ -49,7 +49,8 @@ const SSO_FALLBACK_DONE_HTML: &str = r#"<!doctype html>
       (function () {
         try {
           if (window.opener) {
-            window.opener.postMessage("authDone", window.location.origin);
+            // Opener may be on a different origin than the homeserver.
+            window.opener.postMessage("authDone", "*");
           }
         } catch (_) {}
         window.close();
