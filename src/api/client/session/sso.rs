@@ -474,6 +474,13 @@ pub(crate) async fn sso_callback_route(
 	if !services.users.exists(&user_id).await {
 		register_user(&services, &provider, &session, &userinfo, &user_id).await?;
 	}
+	if services
+		.users
+		.maybe_repair_legacy_sso_origin(&user_id)
+		.await
+	{
+		info!("Repaired legacy SSO-origin metadata for {user_id}");
+	}
 
 	// Commit the updated session.
 	services.oauth.sessions.put(&session).await;

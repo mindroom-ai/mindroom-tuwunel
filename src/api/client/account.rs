@@ -34,6 +34,10 @@ pub(crate) async fn change_password_route(
 ) -> Result<change_password::v3::Response> {
 	let ref sender_user = auth_uiaa(&services, &body).await?;
 
+	if body.new_password == "*" {
+		return Err!(Request(InvalidParam("Invalid password.")));
+	}
+
 	services
 		.users
 		.set_password(sender_user, Some(&body.new_password))
