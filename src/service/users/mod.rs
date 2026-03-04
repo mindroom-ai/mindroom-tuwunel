@@ -173,6 +173,33 @@ impl Service {
 		self.services.globals.user_is_local(user_id) && self.is_active(user_id).await
 	}
 
+	/// Reactivate a deactivated local SSO account.
+	///
+	/// This is used for users who intentionally deactivated and later return
+	/// through the same SSO identity. The account remains the same MXID, but
+	/// can authenticate again.
+	pub async fn maybe_reactivate_deactivated_sso(&self, user_id: &UserId) -> Result<bool> {
+		if !self.services.globals.user_is_local(user_id) {
+			return Ok(false);
+		}
+
+		if !self.is_deactivated(user_id).await? {
+			return Ok(false);
+		}
+
+		let origin = match self.origin(user_id).await {
+			| Ok(origin) => origin,
+			| Err(_) => return Ok(false),
+		};
+
+		if origin != "sso" {
+			return Ok(false);
+		}
+
+		self.set_password(user_id, Some("*")).await?;
+		Ok(true)
+	}
+
 	/// Returns the number of users registered on this server.
 	#[inline]
 	pub async fn count(&self) -> usize { self.db.userid_password.count().await }
