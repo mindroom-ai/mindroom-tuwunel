@@ -203,6 +203,46 @@ impl Service {
 			.deserialized()
 	}
 
+	/// Sets the origin of the user (password/sso/ldap/...).
+	#[inline]
+	pub fn set_origin(&self, user_id: &UserId, origin: &str) {
+		self.db.userid_origin.insert(user_id, origin);
+	}
+
+	/// Compatibility repair for legacy SSO users whose origin was accidentally
+	/// rewritten to `password` during account creation.
+	pub async fn maybe_repair_legacy_sso_origin(&self, user_id: &UserId) -> bool {
+		let oauth_sessions = self.services.oauth.sessions.get_sess_id_by_user(user_id);
+		futures::pin_mut!(oauth_sessions);
+
+		let Some(Ok(_)) = oauth_sessions.next().await else {
+			return false;
+		};
+
+		let Ok(origin) = self.origin(user_id).await else {
+			return false;
+		};
+
+		if origin != "password" {
+			return false;
+		}
+
+		let Ok(password_hash) = self.password_hash(user_id).await else {
+			return false;
+		};
+
+		if password_hash.is_empty() {
+			return false;
+		}
+
+		if utils::hash::verify_password("*", &password_hash).is_err() {
+			return false;
+		}
+
+		self.set_origin(user_id, "sso");
+		true
+	}
+
 	/// Returns the password hash for the given user.
 	pub async fn password_hash(&self, user_id: &UserId) -> Result<String> {
 		self.db
@@ -214,6 +254,8 @@ impl Service {
 
 	/// Hash and set the user's password to the Argon2 hash
 	pub async fn set_password(&self, user_id: &UserId, password: Option<&str>) -> Result {
+		let keep_existing_origin = matches!(password, Some("*"));
+
 		// Cannot change the password of a LDAP user. There are two special cases :
 		// - a `None` password can be used to deactivate a LDAP user
 		// - a "*" password is used as the default password of an active LDAP user
@@ -242,7 +284,9 @@ impl Service {
 			},
 			| Some(Ok(hash)) => {
 				self.db.userid_password.insert(user_id, hash);
-				self.db.userid_origin.insert(user_id, "password");
+				if !keep_existing_origin {
+					self.db.userid_origin.insert(user_id, "password");
+				}
 			},
 			| Some(Err(e)) => {
 				return Err!(Request(InvalidParam(
