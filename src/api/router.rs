@@ -43,6 +43,14 @@ pub fn build(router: Router<State>, server: &Server) -> Router<State> {
 		.ruma_route(&client::sso_callback_route)
 		.ruma_route(&client::get_uiaa_fallback_page_route)
 		.route(
+			"/_matrix/client/r0/auth/m.login.sso/fallback/web",
+			get(client::get_uiaa_sso_fallback_redirect_route),
+		)
+		.route(
+			"/_matrix/client/v3/auth/m.login.sso/fallback/web",
+			get(client::get_uiaa_sso_fallback_redirect_route),
+		)
+		.route(
 			"/_matrix/client/r0/auth/m.login.sso/fallback/web/complete",
 			get(client::complete_uiaa_sso_fallback_route),
 		)

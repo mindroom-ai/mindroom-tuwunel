@@ -1,12 +1,13 @@
 use axum::{
 	extract::State,
 	http::Uri,
-	response::Html,
+	response::{Html, Redirect},
 };
 use axum_client_ip::InsecureClientIp;
 use ruma::api::client::uiaa::{AuthType, get_uiaa_fallback_page};
 use serde::Deserialize;
 use tuwunel_core::{Result, err};
+use url::Url;
 
 use crate::Ruma;
 
@@ -93,10 +94,47 @@ pub(crate) async fn get_uiaa_fallback_page_route(
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct UiaaSsoFallbackQuery {
+	session: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct UiaaSsoFallbackCompleteQuery {
 	session: String,
 	#[serde(rename = "loginToken")]
 	login_token: String,
+}
+
+/// Redirect endpoint for SSO UIAA fallback.
+///
+/// Some deployments enforce strict CSP that blocks inline scripts on fallback
+/// pages. This route performs a server-side redirect to the SSO login endpoint
+/// to avoid relying on JS.
+#[tracing::instrument(skip_all, name = "uiaa_sso_fallback_redirect")]
+pub(crate) async fn get_uiaa_sso_fallback_redirect_route(
+	State(services): State<crate::State>,
+	uri: Uri,
+) -> Result<Redirect> {
+	let query = uri.query().unwrap_or_default();
+	let query: UiaaSsoFallbackQuery = serde_html_form::from_str(query)
+		.map_err(|_| err!(Request(InvalidParam("Missing or invalid UIAA fallback query parameters"))))?;
+
+	let origin = format!("https://{}", services.globals.server_name());
+	let mut complete_url = Url::parse(&origin)
+		.map_err(|_| err!(Request(Unknown("Invalid homeserver origin"))))?;
+	complete_url.set_path("/_matrix/client/v3/auth/m.login.sso/fallback/web/complete");
+	complete_url
+		.query_pairs_mut()
+		.append_pair("session", &query.session);
+
+	let mut sso_url = Url::parse(&origin)
+		.map_err(|_| err!(Request(Unknown("Invalid homeserver origin"))))?;
+	sso_url.set_path("/_matrix/client/v3/login/sso/redirect");
+	sso_url
+		.query_pairs_mut()
+		.append_pair("redirectUrl", complete_url.as_str());
+
+	Ok(Redirect::temporary(sso_url.as_str()))
 }
 
 /// Completion endpoint for SSO UIAA fallback.
