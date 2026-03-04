@@ -14,7 +14,7 @@ use axum::extract::State;
 use futures::{FutureExt, StreamExt};
 use ruma::{RoomId, RoomOrAliasId, UserId, api::client::membership::joined_rooms};
 use tuwunel_core::{Err, Result, result::LogErr, warn};
-use tuwunel_service::Services;
+use tuwunel_service::{Services, users::DeactivationReason};
 
 pub(crate) use self::{
 	ban::ban_user_route,
@@ -115,7 +115,7 @@ async fn maybe_deactivate(services: &Services, user_id: &UserId, client_ip: IpAd
 
 		services
 			.deactivate
-			.full_deactivate(user_id)
+			.full_deactivate(user_id, DeactivationReason::Admin)
 			.boxed()
 			.await?;
 	}

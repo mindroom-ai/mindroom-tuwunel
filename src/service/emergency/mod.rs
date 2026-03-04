@@ -8,6 +8,7 @@ use ruma::{
 	push::Ruleset,
 };
 use tuwunel_core::{Result, debug_warn, error, warn};
+use crate::users::DeactivationReason;
 
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
@@ -92,7 +93,7 @@ impl Service {
 			// logs out any users still in the server service account and removes sessions
 			self.services
 				.users
-				.deactivate_account(server_user)
+				.deactivate_account(server_user, DeactivationReason::Admin)
 				.await
 		}
 	}
