@@ -15,14 +15,36 @@ where
 	T: IncomingRequest + Send + Sync,
 {
 	let sender_device = body.sender_device()?;
+	let sender_user = body.sender_user.as_deref();
 
-	let flows = [
-		AuthFlow::new([AuthType::Password].into()),
-		AuthFlow::new([AuthType::Jwt].into()),
-	];
+	if let Some(sender_user) = sender_user {
+		services
+			.users
+			.maybe_repair_legacy_sso_origin(sender_user)
+			.await;
+	}
+
+	let sender_uses_sso = if let Some(sender_user) = sender_user {
+		services
+			.users
+			.origin(sender_user)
+			.await
+			.is_ok_and(|origin| origin == "sso")
+	} else {
+		false
+	};
+
+	let flows = if sender_uses_sso {
+		vec![AuthFlow::new([AuthType::Sso].into())]
+	} else {
+		vec![
+			AuthFlow::new([AuthType::Password].into()),
+			AuthFlow::new([AuthType::Jwt].into()),
+		]
+	};
 
 	let mut uiaainfo = UiaaInfo {
-		flows: flows.into(),
+		flows,
 		..Default::default()
 	};
 
@@ -69,11 +91,6 @@ where
 					.sender_user
 					.as_deref()
 					.ok_or_else(|| err!(Request(MissingToken("Missing access token."))))?;
-
-				services
-					.users
-					.maybe_repair_legacy_sso_origin(sender_user)
-					.await;
 
 				uiaainfo.session = Some(utils::random_string(SESSION_ID_LENGTH));
 				services
