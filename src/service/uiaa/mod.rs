@@ -254,7 +254,7 @@ pub async fn complete_stage(
 		return Err!(Request(Forbidden("UIAA session does not exist.")));
 	};
 
-	if session_user.as_ref() != user_id {
+	if session_user.as_str() != user_id.as_str() {
 		return Err!(Request(Forbidden("UIAA session and user mismatch.")));
 	}
 

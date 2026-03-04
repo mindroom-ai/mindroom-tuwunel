@@ -1,5 +1,6 @@
 use axum::{
-	extract::{Query, State},
+	extract::State,
+	http::Uri,
 	response::Html,
 };
 use axum_client_ip::InsecureClientIp;
@@ -104,8 +105,12 @@ pub(crate) struct UiaaSsoFallbackCompleteQuery {
 #[tracing::instrument(skip_all, name = "uiaa_sso_fallback_complete")]
 pub(crate) async fn complete_uiaa_sso_fallback_route(
 	State(services): State<crate::State>,
-	Query(query): Query<UiaaSsoFallbackCompleteQuery>,
+	uri: Uri,
 ) -> Result<Html<String>> {
+	let query = uri.query().unwrap_or_default();
+	let query: UiaaSsoFallbackCompleteQuery = serde_html_form::from_str(query)
+		.map_err(|_| err!(Request(InvalidParam("Missing or invalid UIAA fallback query parameters"))))?;
+
 	let user_id = services
 		.users
 		.find_from_login_token(&query.login_token)

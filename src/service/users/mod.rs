@@ -212,7 +212,10 @@ impl Service {
 	/// Compatibility repair for legacy SSO users whose origin was accidentally
 	/// rewritten to `password` during account creation.
 	pub async fn maybe_repair_legacy_sso_origin(&self, user_id: &UserId) -> bool {
-		let Some(Ok(_)) = self.services.oauth.sessions.get_sess_id_by_user(user_id).next().await else {
+		let oauth_sessions = self.services.oauth.sessions.get_sess_id_by_user(user_id);
+		futures::pin_mut!(oauth_sessions);
+
+		let Some(Ok(_)) = oauth_sessions.next().await else {
 			return false;
 		};
 
