@@ -6,6 +6,7 @@ use ruma::api::client::account::{
 	request_3pid_management_token_via_email, request_3pid_management_token_via_msisdn, whoami,
 };
 use tuwunel_core::{Err, Result, err, info, utils::ReadyExt};
+use tuwunel_service::users::DeactivationReason;
 
 use crate::{Ruma, router::auth_uiaa};
 
@@ -96,7 +97,8 @@ pub(crate) async fn whoami_route(
 ///   last seen ts)
 /// - Forgets all to-device events
 /// - Triggers device list updates
-/// - Removes ability to log in again
+/// - Removes ability to log in again, unless local policy permits SSO
+///   self-reactivation
 #[tracing::instrument(skip_all, fields(%client), name = "deactivate")]
 pub(crate) async fn deactivate_route(
 	State(services): State<crate::State>,
@@ -107,7 +109,7 @@ pub(crate) async fn deactivate_route(
 
 	services
 		.deactivate
-		.full_deactivate(sender_user)
+		.full_deactivate(sender_user, DeactivationReason::SelfService)
 		.boxed()
 		.await?;
 

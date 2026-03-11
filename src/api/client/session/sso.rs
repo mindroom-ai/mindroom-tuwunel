@@ -500,6 +500,14 @@ pub(crate) async fn sso_callback_route(
 		services.oauth.sessions.delete(&old_sess_id).await;
 	}
 
+	if services
+		.users
+		.maybe_reactivate_deactivated_sso(&user_id)
+		.await?
+	{
+		info!("Reactivated deactivated SSO account {user_id}");
+	}
+
 	if !services.users.is_active_local(&user_id).await {
 		return Err!(Request(UserDeactivated("This user has been deactivated.")));
 	}
