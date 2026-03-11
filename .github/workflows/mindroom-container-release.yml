@@ -38,11 +38,11 @@ jobs:
         include:
           - runner: ubuntu-24.04
             arch: x86_64
-            rust_target: x86_64-unknown-linux-gnu
+            platform: linux/amd64
             sys_target: x86_64-v1-linux-gnu
           - runner: ubuntu-24.04-arm
             arch: aarch64
-            rust_target: aarch64-unknown-linux-gnu
+            platform: linux/arm64
             sys_target: aarch64-v8-linux-gnu
 
     steps:
@@ -55,7 +55,43 @@ jobs:
 
       - name: Capture container metadata
         id: meta
-        run: echo "created=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "created=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Download release artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET_NAME: tuwunel-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.tar.gz
+        run: |
+          mkdir -p "dist/${{ matrix.arch }}"
+
+          for attempt in $(seq 1 90); do
+            if gh release download "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber \
+              -D "dist/${{ matrix.arch }}" \
+              -p "$ASSET_NAME" \
+              -p "$ASSET_NAME.sha256"
+            then
+              break
+            fi
+
+            if [ "$attempt" -eq 90 ]; then
+              echo "Timed out waiting for $ASSET_NAME"
+              exit 1
+            fi
+
+            sleep 20
+          done
+
+          (
+            cd "dist/${{ matrix.arch }}"
+            sha256sum -c "$ASSET_NAME.sha256"
+            tar -xzf "$ASSET_NAME"
+            test -f tuwunel
+            chmod +x tuwunel
+          )
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -81,48 +117,28 @@ jobs:
           username: ${{ vars.DOCKER_ACCT }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Bake GHCR image
+      - name: Build and push release image
         env:
-          BUILDX_BUILDER: mindroom-release-${{ matrix.arch }}
-          CI: true
-          bake_target: ghcr_io
-          cargo_profile: release
-          rust_toolchain: stable
-          rust_target: ${{ matrix.rust_target }}
-          feat_set: all
-          sys_name: debian
-          sys_version: testing-slim
-          sys_target: ${{ matrix.sys_target }}
-          git_ref: refs/tags/${{ env.RELEASE_TAG }}
-          git_ref_name: ${{ env.RELEASE_TAG }}
-          git_checkout: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
-          docker_repo: ${{ vars.DOCKER_REPO }}
-          package_version: ${{ env.RELEASE_TAG }}
-          package_revision: ${{ github.sha }}
-          package_last_modified: ${{ steps.meta.outputs.created }}
-        run: docker/bake.sh ghcr_io
+          IMAGE_TAG: ${{ env.RELEASE_TAG }}-release-all-${{ matrix.sys_target }}
+          GHCR_IMAGE: ghcr.io/${{ github.repository }}
+          DOCKERHUB_IMAGE: docker.io/${{ vars.DOCKER_REPO }}
+        run: |
+          tags=("--tag" "${GHCR_IMAGE}:${IMAGE_TAG}")
 
-      - name: Bake Docker Hub image
-        if: ${{ env.DOCKERHUB_ENABLED == 'true' }}
-        env:
-          BUILDX_BUILDER: mindroom-release-${{ matrix.arch }}
-          CI: true
-          bake_target: docker_io
-          cargo_profile: release
-          rust_toolchain: stable
-          rust_target: ${{ matrix.rust_target }}
-          feat_set: all
-          sys_name: debian
-          sys_version: testing-slim
-          sys_target: ${{ matrix.sys_target }}
-          git_ref: refs/tags/${{ env.RELEASE_TAG }}
-          git_ref_name: ${{ env.RELEASE_TAG }}
-          git_checkout: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
-          docker_repo: ${{ vars.DOCKER_REPO }}
-          package_version: ${{ env.RELEASE_TAG }}
-          package_revision: ${{ github.sha }}
-          package_last_modified: ${{ steps.meta.outputs.created }}
-        run: docker/bake.sh docker_io
+          if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
+            tags+=("--tag" "${DOCKERHUB_IMAGE}:${IMAGE_TAG}")
+          fi
+
+          docker buildx build \
+            --builder "mindroom-release-${{ matrix.arch }}" \
+            --file docker/Dockerfile.release-binary \
+            --platform "${{ matrix.platform }}" \
+            --build-arg "PACKAGE_VERSION=${RELEASE_TAG}" \
+            --build-arg "PACKAGE_REVISION=${{ steps.meta.outputs.revision }}" \
+            --build-arg "PACKAGE_CREATED=${{ steps.meta.outputs.created }}" \
+            --push \
+            "${tags[@]}" \
+            "dist/${{ matrix.arch }}"
 
   manifest:
     name: Publish multi-arch tags
