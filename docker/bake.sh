@@ -56,7 +56,7 @@ sys_targets="${env_sys_targets:-$default_sys_targets}"
 sys_versions="${env_sys_versions:-$default_sys_versions}"
 
 docker_dir="$PWD/$BASEDIR"
-builder_name="${GITHUB_ACTOR:-owo}"
+builder_name="${builder_name:-${BUILDX_BUILDER:-}}"
 
 # Translates 'nightly' in `rust_toolchains` to some other value. Needed for
 # github actions to pass some specific nightly. Local users can add the specific
@@ -87,7 +87,9 @@ fi
 
 args=""
 args="$args --provenance=false"
-args="$args --builder ${builder_name}"
+if test -n "$builder_name"; then
+    args="$args --builder ${builder_name}"
+fi
 #args="$args --set *.platform=${sys_platform}"
 
 if test "$CI" = "true"; then
