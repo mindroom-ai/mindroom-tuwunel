@@ -23,31 +23,39 @@ where
 	let sender_device = body.sender_device()?;
 	let sender_user = body.sender_user.as_deref();
 
+	if let Some(sender_user) = sender_user {
+		services
+			.users
+			.maybe_repair_legacy_sso_origin(sender_user)
+			.await;
+	}
+
+	let sender_uses_sso = if let Some(sender_user) = sender_user {
+		services
+			.users
+			.origin(sender_user)
+			.await
+			.is_ok_and(|origin| origin == "sso")
+	} else {
+		false
+	};
+
 	let password_flow = [AuthType::Password];
-	let has_password = sender_user
-		.map_async(|sender_user| {
-			services
-				.users
-				.has_password(sender_user)
-				.unwrap_or(false)
-		})
-		.unwrap_or(false)
-		.await;
+	let has_password = !sender_uses_sso
+		&& sender_user
+			.map_async(|sender_user| {
+				services
+					.users
+					.has_password(sender_user)
+					.unwrap_or(false)
+			})
+			.unwrap_or(false)
+			.await;
 
-	//TODO: UIAA for SSO.
 	let sso_flow = [AuthType::Sso];
-	let has_sso = false;
-	let _has_sso = sender_user
-		.map_async(|sender_user| {
-			services
-				.oauth
-				.sessions
-				.exists_for_user(sender_user)
-		})
-		.unwrap_or(false)
-		.await;
+	let has_sso = sender_uses_sso;
 
-	//NOTE: Not implemented as a fallback/web for now.
+	// NOTE: JWT fallback/web is not implemented for UIAA.
 	let has_jwt = false;
 	let jwt_flow = [AuthType::Jwt];
 
@@ -60,7 +68,6 @@ where
 			.map(Vec::from)
 			.map(AuthFlow::new)
 			.collect(),
-
 		..Default::default()
 	};
 
@@ -75,6 +82,12 @@ where
 		.transpose()?
 	{
 		| Some(AuthData::Jwt(Jwt { ref token, .. })) => {
+			if sender_uses_sso {
+				return Err!(Request(
+					Forbidden("JWT UIAA is not allowed for SSO-origin users.",)
+				));
+			}
+
 			let sender_user = jwt::validate_user(services, token)?;
 			if !services.users.exists(&sender_user).await {
 				return Err!(Request(NotFound("User {sender_user} is not registered.")));
