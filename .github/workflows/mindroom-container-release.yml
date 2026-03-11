@@ -83,6 +83,7 @@ jobs:
 
       - name: Bake GHCR image
         env:
+          BUILDX_BUILDER: mindroom-release-${{ matrix.arch }}
           CI: true
           bake_target: ghcr_io
           cargo_profile: release
@@ -104,6 +105,7 @@ jobs:
       - name: Bake Docker Hub image
         if: ${{ env.DOCKERHUB_ENABLED == 'true' }}
         env:
+          BUILDX_BUILDER: mindroom-release-${{ matrix.arch }}
           CI: true
           bake_target: docker_io
           cargo_profile: release
