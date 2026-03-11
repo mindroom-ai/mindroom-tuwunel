@@ -7,6 +7,8 @@ use ruma::{
 };
 use tuwunel_core::{Event, Result, info, pdu::PduBuilder, utils::ReadyExt, warn};
 
+use crate::users::DeactivationReason;
+
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 }
@@ -27,10 +29,10 @@ impl Service {
 	/// - Removing avatar URL and blurhash
 	/// - Removing all profile data
 	/// - Leaving all rooms (and forgets all of them)
-	pub async fn full_deactivate(&self, user_id: &UserId) -> Result {
+	pub async fn full_deactivate(&self, user_id: &UserId, reason: DeactivationReason) -> Result {
 		self.services
 			.users
-			.deactivate_account(user_id)
+			.deactivate_account(user_id, reason)
 			.await?;
 
 		let all_joined_rooms: Vec<OwnedRoomId> = self
