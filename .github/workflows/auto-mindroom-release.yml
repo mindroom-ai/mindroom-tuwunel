@@ -78,3 +78,15 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --ref main \
             -f tag="$RELEASE_TAG"
+
+      - name: Trigger container publish workflow
+        env:
+          GH_TOKEN: ${{ secrets.PAT || secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          echo "Dispatching MindRoom Release Containers for tag $RELEASE_TAG"
+          gh workflow run mindroom-container-release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f tag="$RELEASE_TAG" \
+            -f publish_latest=true
