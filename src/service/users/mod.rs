@@ -4,6 +4,7 @@ mod keys;
 mod ldap;
 mod profile;
 mod register;
+mod sso;
 
 use std::sync::Arc;
 
@@ -34,6 +35,7 @@ pub use self::{
 	keys::parse_master_key,
 	profile::{Propagation, propagation_default},
 	register::Register,
+	sso::DeactivationReason,
 };
 
 pub const PASSWORD_SENTINEL: &str = "*";
@@ -75,6 +77,7 @@ struct Data {
 	userid_blurhash: Arc<Map>,
 	userid_dehydrateddevice: Arc<Map>,
 	userid_devicelistversion: Arc<Map>,
+	userid_deactivation_reason: Arc<Map>,
 	userid_displayname: Arc<Map>,
 	userid_lastonetimekeyupdate: Arc<Map>,
 	userid_locked: Arc<Map>,
@@ -113,6 +116,7 @@ impl crate::Service for Service {
 				userid_blurhash: args.db["userid_blurhash"].clone(),
 				userid_dehydrateddevice: args.db["userid_dehydrateddevice"].clone(),
 				userid_devicelistversion: args.db["userid_devicelistversion"].clone(),
+				userid_deactivation_reason: args.db["userid_deactivation_reason"].clone(),
 				userid_displayname: args.db["userid_displayname"].clone(),
 				userid_lastonetimekeyupdate: args.db["userid_lastonetimekeyupdate"].clone(),
 				userid_locked: args.db["userid_locked"].clone(),
@@ -176,7 +180,11 @@ impl Service {
 	}
 
 	/// Deactivate account
-	pub async fn deactivate_account(&self, user_id: &UserId) -> Result {
+	pub async fn deactivate_account(
+		&self,
+		user_id: &UserId,
+		reason: DeactivationReason,
+	) -> Result {
 		// Revoke any SSO authorizations
 		self.services
 			.oauth
@@ -193,6 +201,7 @@ impl Service {
 		// Systems like changing the password without logging in should check if the
 		// account is deactivated.
 		self.set_password(user_id, None).await?;
+		self.set_deactivation_reason(user_id, reason);
 
 		// TODO: Unhook 3PID
 		Ok(())
@@ -330,46 +339,6 @@ impl Service {
 			.await
 	}
 
-	/// Compatibility repair for legacy SSO users whose origin was accidentally
-	/// rewritten to `password` during account creation.
-	pub async fn maybe_repair_legacy_sso_origin(&self, user_id: &UserId) -> bool {
-		let oauth_sessions = self
-			.services
-			.oauth
-			.sessions
-			.get_sess_id_by_user(user_id);
-		futures::pin_mut!(oauth_sessions);
-
-		let Some(Ok(_)) = oauth_sessions.next().await else {
-			return false;
-		};
-
-		let Ok(origin) = self.origin(user_id).await else {
-			return false;
-		};
-
-		if origin != "password" {
-			return false;
-		}
-
-		let Ok(password_hash) = self.password_hash(user_id).await else {
-			return false;
-		};
-
-		if password_hash.is_empty() {
-			return false;
-		}
-
-		let is_sentinel_password = password_hash == PASSWORD_SENTINEL
-			|| utils::hash::verify_password(PASSWORD_SENTINEL, &password_hash).is_ok();
-		if !is_sentinel_password {
-			return false;
-		}
-
-		self.set_origin(user_id, "sso");
-		true
-	}
-
 	/// Returns the password hash for the given user.
 	pub async fn password_hash(&self, user_id: &UserId) -> Result<String> {
 		self.db
@@ -381,7 +350,7 @@ impl Service {
 
 	/// Hash and set the user's password to the Argon2 hash
 	pub async fn set_password(&self, user_id: &UserId, password: Option<&str>) -> Result {
-		let keep_existing_origin = matches!(password, Some("*"));
+		let keep_existing_origin = matches!(password, Some(PASSWORD_SENTINEL));
 
 		// Cannot change the password of a LDAP user. There are two special cases :
 		// - a `None` password can be used to deactivate a LDAP user
@@ -415,6 +384,7 @@ impl Service {
 			},
 			| Some(Ok(hash)) => {
 				self.db.userid_password.insert(user_id, hash);
+				self.db.userid_deactivation_reason.remove(user_id);
 				if !keep_existing_origin {
 					self.db.userid_origin.insert(user_id, "password");
 				}
