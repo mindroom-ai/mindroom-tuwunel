@@ -20,7 +20,7 @@ use serde_json::{Value as JsonValue, value::RawValue as RawJsonValue};
 pub use self::{
 	filter::Matches,
 	id::*,
-	relation::{ExtractRelatesToInfo, RelationTypeEqual, RelatesToInfo},
+	relation::{ExtractRelatesToInfo, RelatesToInfo, RelationTypeEqual},
 	state_key::{StateKey, TypeStateKey},
 	type_ext::TypeExt,
 };

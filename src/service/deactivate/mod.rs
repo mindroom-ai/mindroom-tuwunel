@@ -6,6 +6,7 @@ use ruma::{
 	events::{StateEventType, room::power_levels::RoomPowerLevelsEventContent},
 };
 use tuwunel_core::{Event, Result, info, pdu::PduBuilder, utils::ReadyExt, warn};
+
 use crate::users::DeactivationReason;
 
 pub struct Service {

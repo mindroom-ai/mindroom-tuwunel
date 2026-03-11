@@ -8,6 +8,7 @@ use ruma::{
 	push::Ruleset,
 };
 use tuwunel_core::{Result, debug_warn, error, warn};
+
 use crate::users::DeactivationReason;
 
 pub struct Service {

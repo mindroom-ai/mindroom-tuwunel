@@ -2239,7 +2239,8 @@ pub struct Config {
 	///
 	/// This value competes with `mindroom_edit_purge_batch_size * 10`; the
 	/// effective per-cycle scan budget is:
-	/// `max(mindroom_edit_purge_batch_size * 10, mindroom_edit_purge_scan_limit)`.
+	/// `max(mindroom_edit_purge_batch_size * 10,
+	/// mindroom_edit_purge_scan_limit)`.
 	///
 	/// default: 100000
 	#[serde(default = "default_mindroom_edit_purge_scan_limit")]

@@ -42,9 +42,7 @@ impl DeactivationReason {
 	}
 }
 
-fn can_reactivate_deactivated_sso(reason: Option<&str>) -> bool {
-	matches!(reason, Some("self"))
-}
+fn can_reactivate_deactivated_sso(reason: Option<&str>) -> bool { matches!(reason, Some("self")) }
 
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
@@ -229,7 +227,8 @@ impl Service {
 			return Ok(false);
 		}
 
-		self.set_password(user_id, Some(PASSWORD_SENTINEL)).await?;
+		self.set_password(user_id, Some(PASSWORD_SENTINEL))
+			.await?;
 		Ok(true)
 	}
 
@@ -296,7 +295,11 @@ impl Service {
 	/// Compatibility repair for legacy SSO users whose origin was accidentally
 	/// rewritten to `password` during account creation.
 	pub async fn maybe_repair_legacy_sso_origin(&self, user_id: &UserId) -> bool {
-		let oauth_sessions = self.services.oauth.sessions.get_sess_id_by_user(user_id);
+		let oauth_sessions = self
+			.services
+			.oauth
+			.sessions
+			.get_sess_id_by_user(user_id);
 		futures::pin_mut!(oauth_sessions);
 
 		let Some(Ok(_)) = oauth_sessions.next().await else {

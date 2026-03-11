@@ -254,12 +254,7 @@ pub fn get_uiaa_request(
 }
 
 #[implement(Service)]
-pub async fn complete_stage(
-	&self,
-	user_id: &UserId,
-	session: &str,
-	stage: AuthType,
-) -> Result {
+pub async fn complete_stage(&self, user_id: &UserId, session: &str, stage: AuthType) -> Result {
 	let (session_user, session_device): (OwnedUserId, OwnedDeviceId) = self
 		.db
 		.sessionid_userdeviceid
@@ -298,8 +293,7 @@ fn update_uiaa_session(
 		self.db
 			.userdevicesessionid_uiaainfo
 			.put(key, Json(uiaainfo));
-		self
-			.db
+		self.db
 			.sessionid_userdeviceid
 			.raw_put(session, (user_id, device_id));
 	} else {
@@ -337,10 +331,9 @@ mod tests {
 	};
 
 	use ruma::{
-		CanonicalJsonValue, device_id, user_id,
-		api::client::uiaa::{
-			AuthData, AuthFlow, AuthType, FallbackAcknowledgement, UiaaInfo,
-		},
+		CanonicalJsonValue,
+		api::client::uiaa::{AuthData, AuthFlow, AuthType, FallbackAcknowledgement, UiaaInfo},
+		device_id, user_id,
 	};
 	use tracing::subscriber::NoSubscriber;
 	use tuwunel_core::{
@@ -395,7 +388,12 @@ mod tests {
 		assert!(worked, "expected fallback acknowledgement to finish UIAA");
 
 		assert!(
-			service.db.sessionid_userdeviceid.get(session).await.is_err(),
+			service
+				.db
+				.sessionid_userdeviceid
+				.get(session)
+				.await
+				.is_err(),
 			"reverse UIAA lookup should be removed after completion"
 		);
 		assert!(
@@ -493,7 +491,12 @@ mod tests {
 		assert!(worked, "fallback acknowledgement should complete the flow");
 
 		assert!(
-			service.db.sessionid_userdeviceid.get(session).await.is_err(),
+			service
+				.db
+				.sessionid_userdeviceid
+				.get(session)
+				.await
+				.is_err(),
 			"reverse UIAA lookup must be deleted after completion"
 		);
 		assert!(
@@ -542,7 +545,9 @@ database_path = "{}"
 			subscriber: Arc::new(NoSubscriber::new()),
 		};
 		let server = Arc::new(Server::new(config, Some(tokio::runtime::Handle::current()), log));
-		let db = Database::open(&server).await.expect("open test database");
+		let db = Database::open(&server)
+			.await
+			.expect("open test database");
 
 		(server, db)
 	}
@@ -563,7 +568,5 @@ database_path = "{}"
 		path
 	}
 
-	fn cleanup_temp_dir(path: &Path) {
-		let _ = fs::remove_dir_all(path);
-	}
+	fn cleanup_temp_dir(path: &Path) { let _ = fs::remove_dir_all(path); }
 }

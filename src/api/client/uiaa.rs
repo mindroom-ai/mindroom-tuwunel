@@ -64,8 +64,8 @@ const SSO_FALLBACK_DONE_HTML: &str = r#"<!doctype html>
 // Route-specific CSP for the SSO completion popup:
 // - allow only inline script needed for postMessage + window.close
 // - keep everything else locked down
-const SSO_FALLBACK_DONE_CSP: &str =
-	"default-src 'none';script-src 'unsafe-inline';base-uri 'none';form-action 'none';frame-ancestors 'none'";
+const SSO_FALLBACK_DONE_CSP: &str = "default-src 'none';script-src 'unsafe-inline';base-uri \
+                                     'none';form-action 'none';frame-ancestors 'none'";
 
 const UNSUPPORTED_FALLBACK_HTML: &str = r#"<!doctype html>
 <html>
@@ -122,19 +122,20 @@ pub(crate) async fn get_uiaa_sso_fallback_redirect_route(
 	uri: Uri,
 ) -> Result<Redirect> {
 	let query = uri.query().unwrap_or_default();
-	let query: UiaaSsoFallbackQuery = serde_html_form::from_str(query)
-		.map_err(|_| err!(Request(InvalidParam("Missing or invalid UIAA fallback query parameters"))))?;
+	let query: UiaaSsoFallbackQuery = serde_html_form::from_str(query).map_err(|_| {
+		err!(Request(InvalidParam("Missing or invalid UIAA fallback query parameters")))
+	})?;
 
 	let origin = format!("https://{}", services.globals.server_name());
-	let mut complete_url = Url::parse(&origin)
-		.map_err(|_| err!(Request(Unknown("Invalid homeserver origin"))))?;
+	let mut complete_url =
+		Url::parse(&origin).map_err(|_| err!(Request(Unknown("Invalid homeserver origin"))))?;
 	complete_url.set_path("/_matrix/client/v3/auth/m.login.sso/fallback/web/complete");
 	complete_url
 		.query_pairs_mut()
 		.append_pair("session", &query.session);
 
-	let mut sso_url = Url::parse(&origin)
-		.map_err(|_| err!(Request(Unknown("Invalid homeserver origin"))))?;
+	let mut sso_url =
+		Url::parse(&origin).map_err(|_| err!(Request(Unknown("Invalid homeserver origin"))))?;
 	sso_url.set_path("/_matrix/client/v3/login/sso/redirect");
 	sso_url
 		.query_pairs_mut()
@@ -153,8 +154,9 @@ pub(crate) async fn complete_uiaa_sso_fallback_route(
 	uri: Uri,
 ) -> Result<impl IntoResponse> {
 	let query = uri.query().unwrap_or_default();
-	let query: UiaaSsoFallbackCompleteQuery = serde_html_form::from_str(query)
-		.map_err(|_| err!(Request(InvalidParam("Missing or invalid UIAA fallback query parameters"))))?;
+	let query: UiaaSsoFallbackCompleteQuery = serde_html_form::from_str(query).map_err(|_| {
+		err!(Request(InvalidParam("Missing or invalid UIAA fallback query parameters")))
+	})?;
 
 	let user_id = services
 		.users
@@ -173,10 +175,8 @@ pub(crate) async fn complete_uiaa_sso_fallback_route(
 		.map_err(|_| err!(Request(Forbidden("UIAA fallback session is invalid"))))?;
 
 	let mut headers = HeaderMap::new();
-	headers.insert(
-		header::CONTENT_SECURITY_POLICY,
-		HeaderValue::from_static(SSO_FALLBACK_DONE_CSP),
-	);
+	headers
+		.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(SSO_FALLBACK_DONE_CSP));
 
 	Ok((headers, Html(SSO_FALLBACK_DONE_HTML.to_owned())))
 }

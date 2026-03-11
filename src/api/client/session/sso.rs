@@ -67,10 +67,9 @@ struct GrantCookie<'a> {
 static GRANT_SESSION_COOKIE: &str = "tuwunel_grant_session";
 
 fn decode_apple_userinfo_from_id_token(session: &Session) -> Result<UserInfo> {
-	let id_token = session
-		.id_token
-		.as_deref()
-		.ok_or_else(|| err!(Request(Unauthorized("Missing Apple id_token in token response."))))?;
+	let id_token = session.id_token.as_deref().ok_or_else(|| {
+		err!(Request(Unauthorized("Missing Apple id_token in token response.")))
+	})?;
 
 	let payload_b64 = id_token
 		.split('.')
@@ -87,7 +86,9 @@ fn decode_apple_userinfo_from_id_token(session: &Session) -> Result<UserInfo> {
 	let sub = payload
 		.get("sub")
 		.and_then(JsonValue::as_str)
-		.ok_or_else(|| err!(Request(Unauthorized("Apple id_token missing required sub claim."))))?;
+		.ok_or_else(|| {
+			err!(Request(Unauthorized("Apple id_token missing required sub claim.")))
+		})?;
 
 	let email = payload
 		.get("email")
@@ -429,15 +430,14 @@ pub(crate) async fn sso_callback_route(
 				"Failed to fetch Apple userinfo endpoint; falling back to id_token claims.",
 			);
 
-			decode_apple_userinfo_from_id_token(&session)
-				.map_err(|decode_error| {
-					debug_warn!(
-						?decode_error,
-						idp_id = provider.id(),
-						"Failed to decode Apple id_token fallback.",
-					);
-					error
-				})
+			decode_apple_userinfo_from_id_token(&session).map_err(|decode_error| {
+				debug_warn!(
+					?decode_error,
+					idp_id = provider.id(),
+					"Failed to decode Apple id_token fallback.",
+				);
+				error
+			})
 		})?;
 
 	let unique_id = unique_id_sub((&provider, &userinfo.sub))?;

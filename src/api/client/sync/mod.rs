@@ -58,7 +58,11 @@ async fn load_timeline(
 	let limited = non_timeline_pdus.next().await.is_some();
 
 	// Collapse superseded m.replace events when enabled
-	let timeline_pdus = if services.server.config.mindroom_compact_edits_enabled {
+	let timeline_pdus = if services
+		.server
+		.config
+		.mindroom_compact_edits_enabled
+	{
 		collapse_superseded_edits(timeline_pdus)
 	} else {
 		timeline_pdus
@@ -187,7 +191,9 @@ mod tests {
 		let pdu = PduEvent {
 			kind: ruma::events::TimelineEventType::RoomMessage,
 			content: RawValue::from_string(content).expect("valid JSON"),
-			event_id: EventId::parse(event_id).expect("valid event_id").into(),
+			event_id: EventId::parse(event_id)
+				.expect("valid event_id")
+				.into(),
 			room_id: OwnedRoomId::try_from("!test:example.com").expect("valid room_id"),
 			sender: OwnedUserId::try_from(sender).expect("valid user_id"),
 			state_key: None,
@@ -257,7 +263,10 @@ mod tests {
 		let result = collapse_superseded_edits(events);
 		assert_eq!(result.len(), 4);
 
-		let event_ids: Vec<&str> = result.iter().map(|(_, pdu)| pdu.event_id.as_str()).collect();
+		let event_ids: Vec<&str> = result
+			.iter()
+			.map(|(_, pdu)| pdu.event_id.as_str())
+			.collect();
 		assert!(event_ids.contains(&"$msg1:example.com"));
 		assert!(event_ids.contains(&"$edit1b:example.com"));
 		assert!(event_ids.contains(&"$msg2:example.com"));
@@ -317,10 +326,7 @@ mod tests {
 
 		let result = collapse_superseded_edits(events);
 		assert_eq!(result.len(), 2);
-		assert_eq!(
-			result[1].1.event_id.as_str(),
-			"$edit_old_ts_newer_count:example.com"
-		);
+		assert_eq!(result[1].1.event_id.as_str(), "$edit_old_ts_newer_count:example.com");
 	}
 
 	#[test]
@@ -350,7 +356,10 @@ mod tests {
 		let result = collapse_superseded_edits(events);
 		assert_eq!(result.len(), 3);
 
-		let event_ids: Vec<&str> = result.iter().map(|(_, pdu)| pdu.event_id.as_str()).collect();
+		let event_ids: Vec<&str> = result
+			.iter()
+			.map(|(_, pdu)| pdu.event_id.as_str())
+			.collect();
 		assert!(event_ids.contains(&"$msg1:example.com"));
 		assert!(event_ids.contains(&"$edit_a2:example.com"));
 		assert!(event_ids.contains(&"$edit_b1:example.com"));
@@ -366,7 +375,9 @@ mod tests {
 			let pdu = PduEvent {
 				kind: ruma::events::TimelineEventType::RoomMessage,
 				content: RawValue::from_string(content).expect("valid JSON"),
-				event_id: EventId::parse(event_id).expect("valid event_id").into(),
+				event_id: EventId::parse(event_id)
+					.expect("valid event_id")
+					.into(),
 				room_id: OwnedRoomId::try_from("!test:example.com").expect("valid room_id"),
 				sender: OwnedUserId::try_from("@user:example.com").expect("valid user_id"),
 				state_key: None,

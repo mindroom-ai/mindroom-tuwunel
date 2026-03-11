@@ -73,7 +73,11 @@ impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		let db = &args.db;
 		Ok(Arc::new(Self {
-			interval: Duration::from_secs(args.server.config.mindroom_edit_purge_interval_secs),
+			interval: Duration::from_secs(
+				args.server
+					.config
+					.mindroom_edit_purge_interval_secs,
+			),
 			interrupt: Notify::new(),
 			pduid_pdu: db["pduid_pdu"].clone(),
 			eventid_pduid: db["eventid_pduid"].clone(),
@@ -91,23 +95,35 @@ impl crate::Service for Service {
 
 	#[tracing::instrument(skip_all, name = "edit_purge", level = "debug")]
 	async fn worker(self: Arc<Self>) -> Result {
-		if !self.services.server.config.mindroom_edit_purge_enabled {
+		if !self
+			.services
+			.server
+			.config
+			.mindroom_edit_purge_enabled
+		{
 			debug!("MindRoom edit purge disabled");
 			return Ok(());
 		}
 
 		if self.services.db.is_read_only() {
-			warn!(
-				"MindRoom edit purge enabled but database is read-only; skipping purge worker"
-			);
+			warn!("MindRoom edit purge enabled but database is read-only; skipping purge worker");
 			return Ok(());
 		}
 
 		info!(
 			"MindRoom edit purge worker started (interval={}s, min_age={}s, batch={})",
-			self.services.server.config.mindroom_edit_purge_interval_secs,
-			self.services.server.config.mindroom_edit_purge_min_age_secs,
-			self.services.server.config.mindroom_edit_purge_batch_size,
+			self.services
+				.server
+				.config
+				.mindroom_edit_purge_interval_secs,
+			self.services
+				.server
+				.config
+				.mindroom_edit_purge_min_age_secs,
+			self.services
+				.server
+				.config
+				.mindroom_edit_purge_batch_size,
 		);
 
 		let mut i = interval(self.interval);
@@ -142,7 +158,9 @@ impl Service {
 	#[tracing::instrument(skip_all, level = "debug")]
 	async fn purge_cycle(&self) -> Result {
 		let config = &self.services.server.config;
-		let min_age_ms = config.mindroom_edit_purge_min_age_secs.saturating_mul(1000);
+		let min_age_ms = config
+			.mindroom_edit_purge_min_age_secs
+			.saturating_mul(1000);
 		let batch_size = config.mindroom_edit_purge_batch_size;
 		let scan_limit = config
 			.mindroom_edit_purge_batch_size
@@ -159,9 +177,14 @@ impl Service {
 		// compare m.replace events against per-(target, sender) latest state that
 		// persists across cycles during a full-table scan pass.
 		let mut superseded_candidates: Vec<(OwnedEventId, ReplaceCandidate)> = Vec::new();
-		let pending_len = self.pending_superseded_candidates.lock().await.len();
+		let pending_len = self
+			.pending_superseded_candidates
+			.lock()
+			.await
+			.len();
 		let should_scan = pending_len < backlog_cap;
-		let mut latest_replace_by_target_sender = self.latest_replace_by_target_sender.lock().await;
+		let mut latest_replace_by_target_sender =
+			self.latest_replace_by_target_sender.lock().await;
 
 		let mut last_key: Option<Vec<u8>> = None;
 		let mut scanned: usize = 0;
@@ -268,7 +291,8 @@ impl Service {
 		{
 			let mut cursor = self.last_scan_key.lock().await;
 			if !should_scan {
-				// Preserve existing cursor when skipping scans due to backlog pressure.
+				// Preserve existing cursor when skipping scans due to backlog
+				// pressure.
 			} else if reached_end || reset_scan_state {
 				*cursor = None;
 				latest_replace_by_target_sender.clear();
@@ -321,12 +345,17 @@ impl Service {
 		}
 
 		let target_count = target_ids.len();
-		let remaining_backlog = self.pending_superseded_candidates.lock().await.len();
+		let remaining_backlog = self
+			.pending_superseded_candidates
+			.lock()
+			.await
+			.len();
 
 		if purge_count > 0 || target_count > 0 || remaining_backlog > 0 {
 			info!(
-				"MindRoom edit purge: {}purged {purge_count} superseded edits \
-				 for {target_count} target events (scanned {scanned} PDUs, backlog {remaining_backlog})",
+				"MindRoom edit purge: {}purged {purge_count} superseded edits for \
+				 {target_count} target events (scanned {scanned} PDUs, backlog \
+				 {remaining_backlog})",
 				if dry_run { "[dry-run] would have " } else { "" },
 			);
 		} else {
@@ -342,7 +371,10 @@ impl Service {
 	/// Returns false when purge should retry this candidate in a later cycle.
 	fn delete_event(&self, candidate: &ReplaceCandidate) -> bool {
 		// Remove from pduid_pdu (the main event storage)
-		if let Err(e) = self.pduid_pdu.remove_fallible(&candidate.pdu_id_bytes) {
+		if let Err(e) = self
+			.pduid_pdu
+			.remove_fallible(&candidate.pdu_id_bytes)
+		{
 			warn!(
 				%e,
 				event_id = %candidate.event_id,
@@ -369,7 +401,9 @@ impl Service {
 		if let Ok(short_bytes) = self
 			.eventid_shorteventid
 			.get_blocking(candidate.event_id.as_bytes())
-			&& let Err(e) = self.shorteventid_eventid.remove_fallible(&*short_bytes)
+			&& let Err(e) = self
+				.shorteventid_eventid
+				.remove_fallible(&*short_bytes)
 		{
 			warn!(
 				%e,
@@ -413,13 +447,13 @@ mod tests {
 		time::Duration,
 	};
 
-	use tracing::subscriber::NoSubscriber;
 	use ruma::{EventId, OwnedEventId, OwnedRoomId, OwnedUserId, UInt};
 	use serde_json::value::RawValue;
 	use tokio::{
 		sync::{Mutex, Notify},
 		time::timeout,
 	};
+	use tracing::subscriber::NoSubscriber;
 	use tuwunel_core::{
 		Server,
 		config::Config,
@@ -472,10 +506,7 @@ mod tests {
 		let temp_dir = unique_temp_dir();
 
 		if cfg.read_only {
-			let bootstrap_cfg = HarnessConfig {
-				read_only: false,
-				..cfg
-			};
+			let bootstrap_cfg = HarnessConfig { read_only: false, ..cfg };
 			let (bootstrap_server, bootstrap_db) = open_server_db(&temp_dir, bootstrap_cfg).await;
 			drop(bootstrap_db);
 			drop(bootstrap_server);
@@ -495,10 +526,7 @@ mod tests {
 			services: Services { server, db },
 		});
 
-		TestHarness {
-			service,
-			_temp_dir: temp_dir,
-		}
+		TestHarness { service, _temp_dir: temp_dir }
 	}
 
 	async fn open_server_db(temp_dir: &Path, cfg: HarnessConfig) -> (Arc<Server>, Arc<Database>) {
@@ -540,7 +568,9 @@ rocksdb_read_only = {}
 			subscriber: Arc::new(NoSubscriber::new()),
 		};
 		let server = Arc::new(Server::new(config, Some(tokio::runtime::Handle::current()), log));
-		let db = Database::open(&server).await.expect("open test database");
+		let db = Database::open(&server)
+			.await
+			.expect("open test database");
 
 		(server, db)
 	}
@@ -567,7 +597,9 @@ rocksdb_read_only = {}
 		PduEvent {
 			kind: ruma::events::TimelineEventType::RoomMessage,
 			content: RawValue::from_string(content).expect("valid JSON content"),
-			event_id: EventId::parse(event_id).expect("valid event id").into(),
+			event_id: EventId::parse(event_id)
+				.expect("valid event id")
+				.into(),
 			room_id: OwnedRoomId::try_from("!room:example.com").expect("valid room id"),
 			sender: OwnedUserId::try_from(sender).expect("valid sender"),
 			state_key: None,
@@ -598,7 +630,9 @@ rocksdb_read_only = {}
 		let value = serde_json::to_vec(&pdu).expect("serialize pdu");
 
 		service.pduid_pdu.insert(&key, value);
-		service.eventid_pduid.insert(event_id.as_bytes(), &key);
+		service
+			.eventid_pduid
+			.insert(event_id.as_bytes(), &key);
 		service
 			.eventid_shorteventid
 			.insert(event_id.as_bytes(), &short_key);
@@ -606,16 +640,15 @@ rocksdb_read_only = {}
 			.shorteventid_eventid
 			.insert(&short_key, event_id.as_bytes());
 
-		StoredEvent {
-			event_id,
-			pdu_key: key,
-			short_key,
-		}
+		StoredEvent { event_id, pdu_key: key, short_key }
 	}
 
 	fn assert_event_present(service: &Service, event: &StoredEvent) {
 		assert!(
-			service.pduid_pdu.get_blocking(&event.pdu_key).is_ok(),
+			service
+				.pduid_pdu
+				.get_blocking(&event.pdu_key)
+				.is_ok(),
 			"expected pduid_pdu entry for {}",
 			event.event_id,
 		);
@@ -647,7 +680,10 @@ rocksdb_read_only = {}
 
 	fn assert_event_absent(service: &Service, event: &StoredEvent) {
 		assert!(
-			service.pduid_pdu.get_blocking(&event.pdu_key).is_err(),
+			service
+				.pduid_pdu
+				.get_blocking(&event.pdu_key)
+				.is_err(),
 			"expected no pduid_pdu entry for {}",
 			event.event_id,
 		);
@@ -715,7 +751,10 @@ rocksdb_read_only = {}
 			Some("$target_basic:example.com"),
 		);
 
-		service.purge_cycle().await.expect("purge cycle succeeds");
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
 
 		assert_event_present(service, &target);
 		assert_event_absent(service, &edit1);
@@ -753,7 +792,10 @@ rocksdb_read_only = {}
 			Some("$target_order:example.com"),
 		);
 
-		service.purge_cycle().await.expect("purge cycle succeeds");
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
 
 		assert_event_present(service, &target);
 		assert_event_present(service, &newer_by_count_older_ts);
@@ -795,7 +837,10 @@ rocksdb_read_only = {}
 			Some("$target_min_age:example.com"),
 		);
 
-		service.purge_cycle().await.expect("purge cycle succeeds");
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
 
 		assert_event_present(service, &target);
 		assert_event_present(service, &recent_edit1);
@@ -848,7 +893,10 @@ rocksdb_read_only = {}
 			Some("$target_sender:example.com"),
 		);
 
-		service.purge_cycle().await.expect("purge cycle succeeds");
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
 
 		assert_event_present(service, &target);
 		assert_event_absent(service, &alice_edit1);
@@ -912,7 +960,10 @@ rocksdb_read_only = {}
 			Some("$target_multi_b:example.com"),
 		);
 
-		service.purge_cycle().await.expect("purge cycle succeeds");
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
 
 		assert_event_present(service, &target1);
 		assert_event_present(service, &target2);
@@ -944,7 +995,10 @@ rocksdb_read_only = {}
 			Some("$target_single:example.com"),
 		);
 
-		service.purge_cycle().await.expect("purge cycle succeeds");
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
 
 		assert_event_present(service, &target);
 		assert_event_present(service, &single_edit);
@@ -984,7 +1038,10 @@ rocksdb_read_only = {}
 			Some("$target_dry_run:example.com"),
 		);
 
-		service.purge_cycle().await.expect("purge cycle succeeds");
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
 
 		assert_event_present(service, &target);
 		assert_event_present(service, &edit1);
@@ -1041,7 +1098,10 @@ rocksdb_read_only = {}
 			Some("$target_batch:example.com"),
 		);
 
-		service.purge_cycle().await.expect("purge cycle succeeds");
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
 
 		assert_event_present(service, &target);
 		assert_event_absent(service, &edit1);
@@ -1089,7 +1149,9 @@ rocksdb_read_only = {}
 		{
 			let _cork = service.services.db.cork_and_flush();
 			for i in 2..=1_000_u32 {
-				service.pduid_pdu.insert(&pdu_key(i), br#"not-json"#);
+				service
+					.pduid_pdu
+					.insert(&pdu_key(i), br#"not-json"#);
 			}
 		}
 
@@ -1102,7 +1164,10 @@ rocksdb_read_only = {}
 			Some("$target_windows:example.com"),
 		);
 
-		service.purge_cycle().await.expect("first purge cycle succeeds");
+		service
+			.purge_cycle()
+			.await
+			.expect("first purge cycle succeeds");
 		assert_event_present(service, &target);
 		assert_event_present(service, &older_edit);
 		assert!(service.last_scan_key.lock().await.is_some());
