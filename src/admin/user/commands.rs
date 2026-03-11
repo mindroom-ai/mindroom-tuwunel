@@ -22,7 +22,10 @@ use tuwunel_core::{
 		stream::{BroadbandExt, IterStream},
 	},
 };
-use tuwunel_service::{Services, users::Register};
+use tuwunel_service::{
+	Services,
+	users::{DeactivationReason, Register},
+};
 
 use crate::{
 	admin_command, get_room_info,
@@ -247,11 +250,14 @@ async fn deactivate_user(services: &Services, user_id: &UserId, no_leave_rooms: 
 	if !no_leave_rooms {
 		services
 			.deactivate
-			.full_deactivate(user_id, false)
+			.full_deactivate(user_id, false, DeactivationReason::Admin)
 			.boxed()
 			.await?;
 	} else {
-		services.users.deactivate_account(user_id).await?;
+		services
+			.users
+			.deactivate_account(user_id, DeactivationReason::Admin)
+			.await?;
 	}
 
 	Ok(())
