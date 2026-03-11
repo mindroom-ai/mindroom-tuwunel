@@ -521,9 +521,7 @@ pub(crate) async fn sso_callback_route(
 		services.oauth.sessions.delete(old_sess_id).await;
 	}
 
-	if !services.users.is_active_local(&user_id).await {
-		return Err!(Request(UserDeactivated("This user has been deactivated.")));
-	}
+	ensure_sso_account_active(&services, &user_id).await?;
 
 	let cookie = Cookie::build((GRANT_SESSION_COOKIE, EMPTY))
 		.removal()
@@ -580,6 +578,22 @@ pub(crate) async fn sso_callback_route(
 		.to_string();
 
 	Ok(sso_callback::unstable::Response { location, cookie: Some(cookie) })
+}
+
+async fn ensure_sso_account_active(services: &Services, user_id: &UserId) -> Result {
+	if services
+		.users
+		.maybe_reactivate_deactivated_sso(user_id)
+		.await?
+	{
+		info!("Reactivated deactivated SSO account {user_id}");
+	}
+
+	if !services.users.is_active_local(user_id).await {
+		return Err!(Request(UserDeactivated("This user has been deactivated.")));
+	}
+
+	Ok(())
 }
 
 async fn handle_uiaa(
@@ -916,8 +930,8 @@ mod tests {
 
 	use super::*;
 
-	fn apple_session_with_claims(claims: serde_json::Value) -> Session {
-		let payload = b64.encode(serde_json::to_vec(&claims).expect("serialize claims"));
+	fn apple_session_with_claims(claims: &serde_json::Value) -> Session {
+		let payload = b64.encode(serde_json::to_vec(claims).expect("serialize claims"));
 
 		Session {
 			id_token: Some(format!("header.{payload}.signature")),
@@ -927,7 +941,7 @@ mod tests {
 
 	#[test]
 	fn decode_apple_userinfo_from_id_token_extracts_expected_claims() {
-		let session = apple_session_with_claims(json!({
+		let session = apple_session_with_claims(&json!({
 			"sub": "apple-user-123",
 			"email": "alice@example.com",
 			"name": "Alice Example",
@@ -949,7 +963,7 @@ mod tests {
 
 	#[test]
 	fn decode_apple_userinfo_from_id_token_requires_sub_claim() {
-		let session = apple_session_with_claims(json!({
+		let session = apple_session_with_claims(&json!({
 			"email": "alice@example.com"
 		}));
 

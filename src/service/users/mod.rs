@@ -48,6 +48,23 @@ pub struct Moderation {
 	pub by: OwnedUserId,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeactivationReason {
+	SelfService,
+	Admin,
+}
+
+impl DeactivationReason {
+	const fn as_str(self) -> &'static str {
+		match self {
+			| Self::SelfService => "self",
+			| Self::Admin => "admin",
+		}
+	}
+}
+
+fn can_reactivate_deactivated_sso(reason: Option<&str>) -> bool { matches!(reason, Some("self")) }
+
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	db: Data,
@@ -72,6 +89,7 @@ struct Data {
 	userid_blurhash: Arc<Map>,
 	userid_dehydrateddevice: Arc<Map>,
 	userid_devicelistversion: Arc<Map>,
+	userid_deactivation_reason: Arc<Map>,
 	userid_displayname: Arc<Map>,
 	userid_lastonetimekeyupdate: Arc<Map>,
 	userid_locked: Arc<Map>,
@@ -107,6 +125,7 @@ impl crate::Service for Service {
 				userid_blurhash: args.db["userid_blurhash"].clone(),
 				userid_dehydrateddevice: args.db["userid_dehydrateddevice"].clone(),
 				userid_devicelistversion: args.db["userid_devicelistversion"].clone(),
+				userid_deactivation_reason: args.db["userid_deactivation_reason"].clone(),
 				userid_displayname: args.db["userid_displayname"].clone(),
 				userid_lastonetimekeyupdate: args.db["userid_lastonetimekeyupdate"].clone(),
 				userid_locked: args.db["userid_locked"].clone(),
@@ -170,7 +189,11 @@ impl Service {
 	}
 
 	/// Deactivate account
-	pub async fn deactivate_account(&self, user_id: &UserId) -> Result {
+	pub async fn deactivate_account(
+		&self,
+		user_id: &UserId,
+		reason: DeactivationReason,
+	) -> Result {
 		// Revoke any SSO authorizations
 		self.services
 			.oauth
@@ -187,6 +210,7 @@ impl Service {
 		// Systems like changing the password without logging in should check if the
 		// account is deactivated.
 		self.set_password(user_id, None).await?;
+		self.set_deactivation_reason(user_id, reason);
 
 		// TODO: Unhook 3PID
 		Ok(())
@@ -280,6 +304,37 @@ impl Service {
 
 	pub fn clear_locked(&self, user_id: &UserId) { self.db.userid_locked.remove(user_id); }
 
+	/// Reactivate a deactivated local SSO account.
+	///
+	/// This is used for users who self-deactivated and later return through the
+	/// same SSO identity. The account remains the same MXID, but can
+	/// authenticate again.
+	pub async fn maybe_reactivate_deactivated_sso(&self, user_id: &UserId) -> Result<bool> {
+		if !self.services.globals.user_is_local(user_id) {
+			return Ok(false);
+		}
+
+		if !self.is_deactivated(user_id).await? {
+			return Ok(false);
+		}
+
+		let Ok(origin) = self.origin(user_id).await else {
+			return Ok(false);
+		};
+
+		if origin != "sso" {
+			return Ok(false);
+		}
+
+		if !can_reactivate_deactivated_sso(self.deactivation_reason(user_id).await.as_deref()) {
+			return Ok(false);
+		}
+
+		self.set_password(user_id, Some(PASSWORD_SENTINEL))
+			.await?;
+		Ok(true)
+	}
+
 	/// Returns the number of users registered on this server.
 	#[inline]
 	pub async fn count(&self) -> usize { self.db.userid_password.count().await }
@@ -322,6 +377,22 @@ impl Service {
 		self.password_hash(user_id)
 			.map_ok(|value| value != PASSWORD_DISABLED && value != PASSWORD_SENTINEL)
 			.await
+	}
+
+	pub async fn deactivation_reason(&self, user_id: &UserId) -> Option<String> {
+		self.db
+			.userid_deactivation_reason
+			.get(user_id)
+			.await
+			.deserialized()
+			.ok()
+	}
+
+	#[inline]
+	pub fn set_deactivation_reason(&self, user_id: &UserId, reason: DeactivationReason) {
+		self.db
+			.userid_deactivation_reason
+			.insert(user_id, reason.as_str());
 	}
 
 	/// Compatibility repair for legacy SSO users whose origin was accidentally
@@ -375,7 +446,7 @@ impl Service {
 
 	/// Hash and set the user's password to the Argon2 hash
 	pub async fn set_password(&self, user_id: &UserId, password: Option<&str>) -> Result {
-		let keep_existing_origin = matches!(password, Some("*"));
+		let keep_existing_origin = matches!(password, Some(PASSWORD_SENTINEL));
 
 		// Cannot change the password of a LDAP user. There are two special cases :
 		// - a `None` password can be used to deactivate a LDAP user
@@ -409,6 +480,7 @@ impl Service {
 			},
 			| Some(Ok(hash)) => {
 				self.db.userid_password.insert(user_id, hash);
+				self.db.userid_deactivation_reason.remove(user_id);
 				if !keep_existing_origin {
 					self.db.userid_origin.insert(user_id, "password");
 				}
@@ -421,6 +493,11 @@ impl Service {
 		}
 
 		Ok(())
+	}
+
+	#[cfg(test)]
+	fn test_can_reactivate_deactivated_sso(reason: Option<&str>) -> bool {
+		can_reactivate_deactivated_sso(reason)
 	}
 
 	/// Creates a new sync filter. Returns the filter id.
@@ -599,4 +676,213 @@ impl Service {
 			})
 			.await;
 	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{
+		fs,
+		path::{Path, PathBuf},
+		sync::{
+			Arc,
+			atomic::{AtomicU64, Ordering},
+		},
+	};
+
+	use ruma::user_id;
+	use tracing::subscriber::NoSubscriber;
+	use tuwunel_core::{
+		Server,
+		config::Config,
+		log::{Logging, capture::State as CaptureState},
+		metrics::Metrics,
+	};
+
+	use super::{DeactivationReason, PASSWORD_SENTINEL, Service};
+	use crate::Services;
+
+	static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+	#[test]
+	fn sso_reactivation_requires_self_deactivation_reason() {
+		assert!(Service::test_can_reactivate_deactivated_sso(Some("self")));
+		assert!(!Service::test_can_reactivate_deactivated_sso(None));
+		assert!(!Service::test_can_reactivate_deactivated_sso(Some("admin")));
+		assert!(!Service::test_can_reactivate_deactivated_sso(Some("unknown")));
+	}
+
+	#[tokio::test]
+	async fn self_deactivated_sso_account_reactivates() {
+		let temp_dir = unique_temp_dir();
+		let services = open_services(&temp_dir).await;
+		let user_id = user_id!("@alice:example.com");
+
+		services
+			.users
+			.create(user_id, Some(PASSWORD_SENTINEL), Some("sso"))
+			.await
+			.expect("create SSO user");
+		services
+			.users
+			.deactivate_account(user_id, DeactivationReason::SelfService)
+			.await
+			.expect("deactivate SSO user");
+
+		let reactivated = services
+			.users
+			.maybe_reactivate_deactivated_sso(user_id)
+			.await
+			.expect("reactivation check should succeed");
+
+		assert!(reactivated, "self-deactivated SSO user should reactivate");
+		assert!(
+			!services
+				.users
+				.is_deactivated(user_id)
+				.await
+				.expect("deactivation state"),
+			"user should no longer be deactivated"
+		);
+		assert_eq!(
+			services
+				.users
+				.origin(user_id)
+				.await
+				.expect("origin"),
+			"sso",
+			"reactivation should preserve SSO origin"
+		);
+		assert_eq!(
+			services
+				.users
+				.password_hash(user_id)
+				.await
+				.expect("password hash"),
+			PASSWORD_SENTINEL,
+			"reactivation should restore the sentinel password"
+		);
+
+		cleanup_temp_dir(&temp_dir);
+	}
+
+	#[tokio::test]
+	async fn admin_deactivated_sso_account_does_not_reactivate() {
+		let temp_dir = unique_temp_dir();
+		let services = open_services(&temp_dir).await;
+		let user_id = user_id!("@alice:example.com");
+
+		services
+			.users
+			.create(user_id, Some(PASSWORD_SENTINEL), Some("sso"))
+			.await
+			.expect("create SSO user");
+		services
+			.users
+			.deactivate_account(user_id, DeactivationReason::Admin)
+			.await
+			.expect("deactivate SSO user");
+
+		let reactivated = services
+			.users
+			.maybe_reactivate_deactivated_sso(user_id)
+			.await
+			.expect("reactivation check should succeed");
+
+		assert!(!reactivated, "admin-deactivated SSO user must stay deactivated");
+		assert!(
+			services
+				.users
+				.is_deactivated(user_id)
+				.await
+				.expect("deactivation state"),
+			"user should remain deactivated"
+		);
+
+		cleanup_temp_dir(&temp_dir);
+	}
+
+	#[tokio::test]
+	async fn self_deactivated_password_account_does_not_reactivate_as_sso() {
+		let temp_dir = unique_temp_dir();
+		let services = open_services(&temp_dir).await;
+		let user_id = user_id!("@alice:example.com");
+
+		services
+			.users
+			.create(user_id, Some("password"), Some("password"))
+			.await
+			.expect("create password user");
+		services
+			.users
+			.deactivate_account(user_id, DeactivationReason::SelfService)
+			.await
+			.expect("deactivate password user");
+
+		let reactivated = services
+			.users
+			.maybe_reactivate_deactivated_sso(user_id)
+			.await
+			.expect("reactivation check should succeed");
+
+		assert!(!reactivated, "password-origin user must not reactivate via SSO path");
+		assert!(
+			services
+				.users
+				.is_deactivated(user_id)
+				.await
+				.expect("deactivation state"),
+			"user should remain deactivated"
+		);
+		assert_eq!(
+			services
+				.users
+				.origin(user_id)
+				.await
+				.expect("origin"),
+			"password",
+			"SSO reactivation check should not change user origin"
+		);
+
+		cleanup_temp_dir(&temp_dir);
+	}
+
+	async fn open_services(temp_dir: &Path) -> Arc<Services> {
+		let db_path = temp_dir.join("db");
+		let config_path = temp_dir.join("tuwunel.toml");
+
+		fs::create_dir_all(temp_dir).expect("create test temp dir");
+		let config_contents = format!(
+			r#"[global]
+server_name = "example.com"
+database_path = "{}"
+"#,
+			db_path.display(),
+		);
+		fs::write(&config_path, config_contents).expect("write test config");
+
+		let figment = Config::load(std::iter::once(config_path.as_path())).expect("load config");
+		let config = Config::new(&figment).expect("parse config");
+		let log = Logging {
+			reload: Default::default(),
+			capture: Arc::new(CaptureState::new()),
+			subscriber: Arc::new(NoSubscriber::new()),
+		};
+		let runtime = tokio::runtime::Handle::current();
+		let metrics = Metrics::new(Some(&runtime));
+		let server = Arc::new(Server::new(config, Some(&runtime), log, metrics));
+
+		Services::build(server)
+			.await
+			.expect("build services")
+	}
+
+	fn unique_temp_dir() -> PathBuf {
+		let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+		let pid = std::process::id();
+		let path = std::env::temp_dir().join(format!("tuwunel-users-{pid}-{id}"));
+		fs::create_dir_all(&path).expect("create unique test dir");
+		path
+	}
+
+	fn cleanup_temp_dir(path: &Path) { let _: std::io::Result<()> = fs::remove_dir_all(path); }
 }
