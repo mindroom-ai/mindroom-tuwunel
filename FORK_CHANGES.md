@@ -81,16 +81,29 @@ Behavior:
 - Persists a deactivation reason so policy decisions can distinguish self
   service from administrative actions.
 
+#### 5) `config/rooms: add default room power level override`
+Files:
+- `src/api/client/room/create.rs`
+- `src/core/config/check.rs`
+- `src/core/config/mod.rs`
+
+Behavior:
+- Adds a global room-creation config override for `m.room.power_levels`.
+- Applies the server default before any per-request `createRoom`
+  `power_level_content_override`.
+- Supports defaults such as `users_default = 50` for newly created rooms.
+- Validates at startup that the override is an object/table-shaped value.
+
 ### Operational Changes
 
-#### 5) `ci: add GitHub release workflow for ARM and x86_64 binaries`
+#### 6) `ci: add GitHub release workflow for ARM and x86_64 binaries`
 Files:
 - `.github/workflows/mindroom-release.yml`
 
 Behavior:
 - Adds tagged binary publishing for Linux `x86_64` and `aarch64`.
 
-#### 6) `ci(release): auto-tag main pushes and create releases`
+#### 7) `ci(release): auto-tag main pushes and create releases`
 Files:
 - `.github/workflows/auto-mindroom-release.yml`
 - `scripts/fork_release_tag.py`
@@ -99,7 +112,7 @@ Behavior:
 - Computes `v<base_version>-mindroom.<n>` tags on `main`.
 - Creates or reuses the corresponding GitHub Release.
 
-#### 7) `ci(container): publish release containers`
+#### 8) `ci(container): publish release containers`
 Files:
 - `.github/workflows/auto-mindroom-release.yml`
 - `.github/workflows/mindroom-container-release.yml`
@@ -109,7 +122,7 @@ Behavior:
 - Dispatches container publication for MindRoom release tags.
 - Uses the configured buildx builder for release container builds.
 
-#### 8) `docs: summarize fork runtime and release additions`
+#### 9) `docs: summarize fork runtime and release additions`
 Files:
 - `README.md`
 
@@ -136,6 +149,12 @@ mindroom_edit_purge_scan_limit = 100000
 mindroom_edit_purge_dry_run = false
 ```
 
+### Default room power levels
+```toml
+[global.default_power_level_content_override]
+users_default = 50
+```
+
 ## Recommended Rollout
 1. Enable `mindroom_compact_edits_enabled` first.
 2. Enable purge in dry-run mode with `mindroom_edit_purge_dry_run = true`.
@@ -150,6 +169,8 @@ mindroom_edit_purge_dry_run = false
 - UIAA SSO fallback supports strict-CSP deployments that cannot rely on inline
   browser logic in the default flow.
 - Returning SSO users are reactivated only when they self-deactivated.
+- Newly created rooms can inherit a homeserver-wide default power-level
+  override.
 
 ## Operational Summary
 - Main-branch pushes can auto-create MindRoom release tags and GitHub Releases.
@@ -162,3 +183,4 @@ mindroom_edit_purge_dry_run = false
   mode is enabled.
 - Superseded edits can be permanently removed when purge is enabled.
 - Admin-deactivated SSO accounts stay deactivated on future login attempts.
+- The default power-level override only affects newly created rooms.
