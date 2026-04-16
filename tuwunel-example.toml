@@ -641,6 +641,22 @@
 #
 #default_room_version =
 
+# Default power-level overrides applied when this homeserver creates a new
+# room.
+#
+# This uses the same top-level shape as the client `/createRoom`
+# `power_level_content_override` parameter and is merged before any
+# per-request override from the client. It only affects newly created rooms
+# and does not retroactively change existing rooms.
+#
+# Example:
+# ```toml
+# [global.default_power_level_content_override]
+# users_default = 50
+# ```
+#
+#default_power_level_content_override = false
+
 # This item is undocumented. Please contribute documentation for it.
 #
 #allow_jaeger = false

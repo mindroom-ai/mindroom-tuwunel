@@ -34,7 +34,7 @@ use ruma::{
 };
 use serde::Deserialize;
 use serde_json::{
-	json,
+	Map as JsonMap, Value as JsonValue, json,
 	value::{RawValue, to_raw_value},
 };
 use tuwunel_core::{
@@ -177,6 +177,7 @@ pub(crate) async fn create_room_route(
 
 	let power_levels_content = default_power_levels_content(
 		&version_rules,
+		services.config.default_power_level_content_override.as_ref(),
 		body.power_level_content_override.as_ref(),
 		&body.visibility,
 		users,
@@ -644,10 +645,11 @@ async fn create_create_event_legacy(
 /// creates the power_levels_content for the PDU builder
 fn default_power_levels_content(
 	version_rules: &RoomVersionRules,
+	default_power_level_content_override: Option<&JsonValue>,
 	power_level_content_override: Option<&Raw<RoomPowerLevelsEventContent>>,
 	visibility: &room::Visibility,
 	users: BTreeMap<OwnedUserId, Int>,
-) -> Result<serde_json::Value> {
+) -> Result<JsonValue> {
 	use serde_json::to_value;
 
 	let mut power_levels_content = RoomPowerLevelsEventContent::new(&version_rules.authorization);
@@ -686,16 +688,73 @@ fn default_power_levels_content(
 		power_levels_content["events"]["org.matrix.msc3401.call.member"] = json!(50);
 	}
 
+	if let Some(default_power_level_content_override) = default_power_level_content_override {
+		let json = default_power_level_content_override
+			.as_object()
+			.expect("default_power_level_content_override is validated at startup");
+		merge_power_level_content_override(&mut power_levels_content, json);
+	}
+
 	if let Some(power_level_content_override) = power_level_content_override {
 		let json: JsonObject = serde_json::from_str(power_level_content_override.json().get())
 			.map_err(|e| err!(Request(BadJson("Invalid power_level_content_override: {e:?}"))))?;
 
-		for (key, value) in json {
-			power_levels_content[key] = value;
-		}
+		merge_power_level_content_override(&mut power_levels_content, &json);
 	}
 
 	Ok(power_levels_content)
+}
+
+fn merge_power_level_content_override(
+	power_levels_content: &mut JsonValue,
+	override_json: &JsonMap<String, JsonValue>,
+) {
+	let target = power_levels_content
+		.as_object_mut()
+		.expect("power levels content must serialize to an object");
+
+	for (key, value) in override_json {
+		target.insert(key.clone(), value.clone());
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn default_power_levels_content_applies_server_default_override() {
+		let rules = room_version::rules(&RoomVersionId::V11).expect("supported room version");
+
+		let content = default_power_levels_content(
+			&rules,
+			Some(&json!({ "users_default": 50 })),
+			None,
+			&room::Visibility::Private,
+			BTreeMap::new(),
+		)
+		.expect("power levels content");
+
+		assert_eq!(content["users_default"], json!(50));
+	}
+
+	#[test]
+	fn request_override_wins_over_server_default_override() {
+		let rules = room_version::rules(&RoomVersionId::V11).expect("supported room version");
+		let request_override =
+			Raw::from_json(to_raw_value(&json!({ "users_default": 75 })).expect("raw json"));
+
+		let content = default_power_levels_content(
+			&rules,
+			Some(&json!({ "users_default": 50 })),
+			Some(&request_override),
+			&room::Visibility::Private,
+			BTreeMap::new(),
+		)
+		.expect("power levels content");
+
+		assert_eq!(content["users_default"], json!(75));
+	}
 }
 
 /// if a room is being created with a room alias, run our checks
