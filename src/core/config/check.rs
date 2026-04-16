@@ -217,6 +217,17 @@ pub fn check(config: &Config) -> Result {
 		));
 	}
 
+	if config
+		.default_power_level_content_override
+		.as_ref()
+		.is_some_and(|value| !value.is_object())
+	{
+		return Err!(Config(
+			"default_power_level_content_override",
+			"default_power_level_content_override must be a TOML table / JSON object."
+		));
+	}
+
 	// check if user specified valid IP CIDR ranges on startup
 	for cidr in &config.ip_range_denylist {
 		if let Err(e) = ipaddress::IPAddress::parse(cidr) {
