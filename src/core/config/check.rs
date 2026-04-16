@@ -1,3 +1,5 @@
+mod mindroom;
+
 use std::{env::consts::OS, fs::read_to_string, net::SocketAddr};
 
 use either::Either;
@@ -51,6 +53,7 @@ pub fn check(config: &Config) -> Result {
 	check_observability(config)?;
 	check_network(config)?;
 	check_storage(config)?;
+	mindroom::check(config)?;
 	check_registration(config)?;
 	check_turn_and_media_misc(config)?;
 	check_url_previews(config)?;
@@ -166,27 +169,6 @@ fn check_storage(config: &Config) -> Result {
 		return Err!(Config(
 			"max_log_files",
 			"rocksdb_max_log_files cannot be 0. Please set a value at least 1."
-		));
-	}
-
-	if config.mindroom_edit_purge_interval_secs == 0 {
-		return Err!(Config(
-			"mindroom_edit_purge_interval_secs",
-			"mindroom_edit_purge_interval_secs must be at least 1 second."
-		));
-	}
-
-	if config.mindroom_edit_purge_batch_size == 0 {
-		return Err!(Config(
-			"mindroom_edit_purge_batch_size",
-			"mindroom_edit_purge_batch_size must be at least 1."
-		));
-	}
-
-	if config.mindroom_edit_purge_scan_limit == 0 {
-		return Err!(Config(
-			"mindroom_edit_purge_scan_limit",
-			"mindroom_edit_purge_scan_limit must be at least 1."
 		));
 	}
 
