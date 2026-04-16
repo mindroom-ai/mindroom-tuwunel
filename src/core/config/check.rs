@@ -257,6 +257,17 @@ fn check_registration(config: &Config) -> Result {
 	let no_token =
 		config.registration_token.is_none() && config.registration_token_file.is_none();
 
+	if config
+		.default_power_level_content_override
+		.as_ref()
+		.is_some_and(|value| !value.is_object())
+	{
+		return Err!(Config(
+			"default_power_level_content_override",
+			"default_power_level_content_override must be a TOML table / JSON object."
+		));
+	}
+
 	if config.allow_registration
 		&& no_token
 		&& !config.yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse
