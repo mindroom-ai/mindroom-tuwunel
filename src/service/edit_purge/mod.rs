@@ -6,7 +6,8 @@ use std::{
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use ruma::{OwnedEventId, OwnedUserId};
+use ruma::{Mxc, OwnedEventId, OwnedMxcUri, OwnedUserId, ServerName, UserId};
+use serde_json::Value as JsonValue;
 use tokio::{
 	sync::{Mutex, Notify},
 	time::{MissedTickBehavior, interval},
@@ -44,6 +45,39 @@ pub struct Service {
 struct Services {
 	server: Arc<Server>,
 	db: Arc<Database>,
+	media: SidecarMedia,
+}
+
+enum SidecarMedia {
+	Runtime(Arc<crate::services::OnceServices>),
+	#[cfg(test)]
+	Test(Arc<dyn TestSidecarMedia>),
+}
+
+impl SidecarMedia {
+	async fn mxc_is_owned_by_user(&self, mxc: &Mxc<'_>, user: &UserId) -> bool {
+		match self {
+			| Self::Runtime(services) => services.media.mxc_is_owned_by_user(mxc, user).await,
+			#[cfg(test)]
+			| Self::Test(media) => media.mxc_is_owned_by_user(mxc, user).await,
+		}
+	}
+
+	async fn delete_owned_by(&self, mxc: &Mxc<'_>, user: &UserId) -> Result<bool> {
+		match self {
+			| Self::Runtime(services) => services.media.delete_owned_by(mxc, user).await,
+			#[cfg(test)]
+			| Self::Test(media) => media.delete_owned_by(mxc, user).await,
+		}
+	}
+}
+
+#[cfg(test)]
+#[async_trait]
+trait TestSidecarMedia: Send + Sync {
+	async fn mxc_is_owned_by_user(&self, mxc: &Mxc<'_>, user: &UserId) -> bool;
+
+	async fn delete_owned_by(&self, mxc: &Mxc<'_>, user: &UserId) -> Result<bool>;
 }
 
 /// A candidate replacement event with its metadata.
@@ -51,8 +85,12 @@ struct Services {
 struct ReplaceCandidate {
 	/// event_id for deterministic tie-breaks.
 	event_id: OwnedEventId,
+	/// Sender of the replacement event, used to verify media ownership.
+	sender: OwnedUserId,
 	/// The raw PduId bytes for deletion from pduid_pdu.
 	pdu_id_bytes: Vec<u8>,
+	/// MindRoom long-text sidecar media referenced by this replacement event.
+	sidecar_mxcs: Vec<OwnedMxcUri>,
 }
 
 fn compare_replace_candidates(a: &ReplaceCandidate, b: &ReplaceCandidate) -> std::cmp::Ordering {
@@ -89,6 +127,7 @@ impl crate::Service for Service {
 			services: Services {
 				server: args.server.clone(),
 				db: args.db.clone(),
+				media: SidecarMedia::Runtime(args.services.clone()),
 			},
 		}))
 	}
@@ -223,7 +262,9 @@ impl Service {
 						let group_key = (target_event_id.clone(), pdu.sender.clone());
 						let candidate = ReplaceCandidate {
 							event_id: pdu.event_id.clone(),
+							sender: pdu.sender.clone(),
 							pdu_id_bytes: key.to_vec(),
+							sidecar_mxcs: extract_mindroom_long_text_sidecar_mxcs(&pdu),
 						};
 
 						match latest_replace_by_target_sender.entry(group_key) {
@@ -302,12 +343,13 @@ impl Service {
 		let purge_batch: Vec<_> = pending_superseded.drain(..purge_budget).collect();
 		drop(pending_superseded);
 
-		let _cork = if !dry_run {
+		let cork = if !dry_run {
 			Some(self.services.db.cork_and_flush())
 		} else {
 			None
 		};
 
+		let mut sidecar_cleanup_candidates: Vec<(OwnedEventId, ReplaceCandidate)> = Vec::new();
 		for (target_event_id, candidate) in purge_batch {
 			if dry_run {
 				info!(
@@ -316,7 +358,8 @@ impl Service {
 					"[dry-run] Would purge superseded edit"
 				);
 				purge_count += 1;
-				target_ids.insert(target_event_id);
+				target_ids.insert(target_event_id.clone());
+				sidecar_cleanup_candidates.push((target_event_id, candidate));
 				continue;
 			}
 
@@ -327,11 +370,21 @@ impl Service {
 					"Purged superseded edit event"
 				);
 				purge_count += 1;
-				target_ids.insert(target_event_id);
+				target_ids.insert(target_event_id.clone());
+				sidecar_cleanup_candidates.push((target_event_id, candidate));
 			} else {
 				let mut pending = self.pending_superseded_candidates.lock().await;
 				pending.push_back((target_event_id, candidate));
 			}
+		}
+		drop(cork);
+
+		let protected_mxcs = self
+			.retained_referenced_mxcs(&sidecar_cleanup_candidates)
+			.await;
+		for (target_event_id, candidate) in sidecar_cleanup_candidates {
+			self.process_sidecar_media(&target_event_id, &candidate, dry_run, &protected_mxcs)
+				.await;
 		}
 
 		let target_count = target_ids.len();
@@ -422,6 +475,258 @@ impl Service {
 		// fail to find the PDU and skip it.
 		true
 	}
+
+	async fn process_sidecar_media(
+		&self,
+		target_event_id: &OwnedEventId,
+		candidate: &ReplaceCandidate,
+		dry_run: bool,
+		protected_mxcs: &HashSet<OwnedMxcUri>,
+	) {
+		if candidate.sidecar_mxcs.is_empty() {
+			return;
+		}
+
+		let local_server_name: &ServerName = self.services.server.name.as_ref();
+		if candidate.sender.server_name() != local_server_name {
+			warn!(
+				event_id = %candidate.event_id,
+				sender = %candidate.sender,
+				target = %target_event_id,
+				"Skipping MindRoom long-text sidecar cleanup for non-local edit sender"
+			);
+			return;
+		}
+
+		for mxc_uri in &candidate.sidecar_mxcs {
+			if protected_mxcs.contains(mxc_uri) {
+				debug!(
+					event_id = %candidate.event_id,
+					target = %target_event_id,
+					mxc = %mxc_uri,
+					"Skipping MindRoom long-text sidecar media deletion; MXC is still \
+					 referenced by a retained event"
+				);
+				continue;
+			}
+
+			let Ok(mxc_server_name) = mxc_uri.server_name() else {
+				warn!(
+					event_id = %candidate.event_id,
+					target = %target_event_id,
+					mxc = %mxc_uri,
+					"Skipping invalid MindRoom long-text sidecar MXC"
+				);
+				continue;
+			};
+
+			if mxc_server_name != local_server_name {
+				debug!(
+					event_id = %candidate.event_id,
+					target = %target_event_id,
+					mxc = %mxc_uri,
+					"Skipping remote MindRoom long-text sidecar MXC"
+				);
+				continue;
+			}
+
+			let Ok(mxc) = Mxc::try_from(mxc_uri.as_str()) else {
+				warn!(
+					event_id = %candidate.event_id,
+					target = %target_event_id,
+					mxc = %mxc_uri,
+					"Skipping unparsable MindRoom long-text sidecar MXC"
+				);
+				continue;
+			};
+
+			if dry_run {
+				if self
+					.services
+					.media
+					.mxc_is_owned_by_user(&mxc, &candidate.sender)
+					.await
+				{
+					info!(
+						event_id = %candidate.event_id,
+						target = %target_event_id,
+						mxc = %mxc_uri,
+						"[dry-run] Would delete MindRoom long-text sidecar media"
+					);
+				} else {
+					warn!(
+						event_id = %candidate.event_id,
+						target = %target_event_id,
+						mxc = %mxc_uri,
+						sender = %candidate.sender,
+						"[dry-run] Would not delete MindRoom long-text sidecar media; \
+						 ownership check failed"
+					);
+				}
+				continue;
+			}
+
+			match self
+				.services
+				.media
+				.delete_owned_by(&mxc, &candidate.sender)
+				.await
+			{
+				| Ok(true) => {
+					debug!(
+						event_id = %candidate.event_id,
+						target = %target_event_id,
+						mxc = %mxc_uri,
+						"Deleted MindRoom long-text sidecar media for purged edit"
+					);
+				},
+				| Ok(false) => {
+					warn!(
+						event_id = %candidate.event_id,
+						target = %target_event_id,
+						mxc = %mxc_uri,
+						sender = %candidate.sender,
+						"Skipping MindRoom long-text sidecar media deletion; ownership check \
+						 failed"
+					);
+				},
+				| Err(e) => {
+					warn!(
+						%e,
+						event_id = %candidate.event_id,
+						target = %target_event_id,
+						mxc = %mxc_uri,
+						"Failed to delete MindRoom long-text sidecar media for purged edit"
+					);
+				},
+			}
+		}
+	}
+
+	async fn retained_referenced_mxcs(
+		&self,
+		cleanup_candidates: &[(OwnedEventId, ReplaceCandidate)],
+	) -> HashSet<OwnedMxcUri> {
+		let candidate_mxcs: HashSet<OwnedMxcUri> = cleanup_candidates
+			.iter()
+			.flat_map(|(_, candidate)| candidate.sidecar_mxcs.iter().cloned())
+			.collect();
+
+		if candidate_mxcs.is_empty() {
+			return HashSet::new();
+		}
+
+		let ignored_event_ids: HashSet<OwnedEventId> = cleanup_candidates
+			.iter()
+			.map(|(_, candidate)| candidate.event_id.clone())
+			.collect();
+		let mut protected_mxcs = HashSet::new();
+		let stream = self.pduid_pdu.raw_stream();
+		tokio::pin!(stream);
+
+		while let Some(kv) = stream.next().await {
+			let Ok((_key, value)) = kv else {
+				continue;
+			};
+
+			let Ok(pdu) = serde_json::from_slice::<PduEvent>(&value) else {
+				continue;
+			};
+
+			if ignored_event_ids.contains(&pdu.event_id) {
+				continue;
+			}
+
+			let content = pdu.get_content_as_value();
+			collect_referenced_candidate_mxcs(&content, &candidate_mxcs, &mut protected_mxcs);
+
+			if protected_mxcs.len() == candidate_mxcs.len() {
+				break;
+			}
+		}
+
+		protected_mxcs
+	}
+}
+
+fn extract_mindroom_long_text_sidecar_mxcs(pdu: &PduEvent) -> Vec<OwnedMxcUri> {
+	let content = pdu.get_content_as_value();
+	let mut mxcs = Vec::new();
+
+	collect_mindroom_long_text_sidecar_mxcs(&content, &mut mxcs);
+	if let Some(new_content) = content.get("m.new_content") {
+		collect_mindroom_long_text_sidecar_mxcs(new_content, &mut mxcs);
+	}
+
+	mxcs
+}
+
+fn collect_mindroom_long_text_sidecar_mxcs(
+	content: &JsonValue,
+	mxcs: &mut Vec<OwnedMxcUri>,
+) {
+	if content
+		.get("msgtype")
+		.and_then(JsonValue::as_str)
+		!= Some("m.file")
+	{
+		return;
+	}
+
+	let Some(long_text) = content.get("io.mindroom.long_text") else {
+		return;
+	};
+
+	if long_text
+		.get("version")
+		.and_then(JsonValue::as_u64)
+		!= Some(2)
+		|| long_text
+			.get("encoding")
+			.and_then(JsonValue::as_str)
+			!= Some("matrix_event_content_json")
+	{
+		return;
+	}
+
+	let url = content.get("url").and_then(JsonValue::as_str);
+	let encrypted_url = content
+		.get("file")
+		.and_then(|file| file.get("url"))
+		.and_then(JsonValue::as_str);
+
+	for mxc in url.into_iter().chain(encrypted_url) {
+		let mxc = OwnedMxcUri::from(mxc.to_owned());
+		if mxc.is_valid() && !mxcs.iter().any(|existing| existing == &mxc) {
+			mxcs.push(mxc);
+		}
+	}
+}
+
+fn collect_referenced_candidate_mxcs(
+	value: &JsonValue,
+	candidate_mxcs: &HashSet<OwnedMxcUri>,
+	protected_mxcs: &mut HashSet<OwnedMxcUri>,
+) {
+	match value {
+		| JsonValue::String(s) if s.starts_with("mxc://") => {
+			let mxc = OwnedMxcUri::from(s.to_owned());
+			if candidate_mxcs.contains(&mxc) {
+				protected_mxcs.insert(mxc);
+			}
+		},
+		| JsonValue::Array(items) => {
+			for item in items {
+				collect_referenced_candidate_mxcs(item, candidate_mxcs, protected_mxcs);
+			}
+		},
+		| JsonValue::Object(map) => {
+			for item in map.values() {
+				collect_referenced_candidate_mxcs(item, candidate_mxcs, protected_mxcs);
+			}
+		},
+		| _ => {},
+	}
 }
 
 #[cfg(test)]
@@ -433,11 +738,13 @@ mod tests {
 		sync::{
 			Arc,
 			atomic::{AtomicU64, Ordering},
+			Mutex as StdMutex, OnceLock,
 		},
 		time::Duration,
 	};
 
-	use ruma::{EventId, OwnedEventId, OwnedRoomId, OwnedUserId, UInt};
+	use async_trait::async_trait;
+	use ruma::{EventId, Mxc, OwnedEventId, OwnedRoomId, OwnedUserId, UInt, UserId};
 	use serde_json::value::RawValue;
 	use tokio::{
 		sync::{Mutex, Notify},
@@ -445,7 +752,7 @@ mod tests {
 	};
 	use tracing::subscriber::NoSubscriber;
 	use tuwunel_core::{
-		Server,
+		Result, Server,
 		config::Config,
 		log::{Logging, capture::State as CaptureState},
 		matrix::pdu::{EventHash, PduEvent},
@@ -454,9 +761,10 @@ mod tests {
 	};
 	use tuwunel_database::Database;
 
-	use super::{Service, Services};
+	use super::{Service, Services, SidecarMedia, TestSidecarMedia};
 
 	static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+	static TEST_DB_OPEN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 	#[derive(Clone, Copy)]
 	struct HarnessConfig {
@@ -483,7 +791,38 @@ mod tests {
 
 	struct TestHarness {
 		service: Arc<Service>,
+		media: Arc<TestMedia>,
 		_temp_dir: PathBuf,
+	}
+
+	#[derive(Default)]
+	struct TestMedia {
+		owners: StdMutex<HashMap<String, OwnedUserId>>,
+	}
+
+	#[async_trait]
+	impl TestSidecarMedia for TestMedia {
+		async fn mxc_is_owned_by_user(&self, mxc: &Mxc<'_>, user: &UserId) -> bool {
+			self.owners
+				.lock()
+				.expect("test media lock")
+				.get(&mxc.to_string())
+				.is_some_and(|owner| owner == user)
+		}
+
+		async fn delete_owned_by(&self, mxc: &Mxc<'_>, user: &UserId) -> Result<bool> {
+			let mxc = mxc.to_string();
+			let mut owners = self.owners.lock().expect("test media lock");
+			if !owners
+				.get(&mxc)
+				.is_some_and(|owner| owner == user)
+			{
+				return Ok(false);
+			}
+
+			owners.remove(&mxc);
+			Ok(true)
+		}
 	}
 
 	#[derive(Clone)]
@@ -504,6 +843,7 @@ mod tests {
 		}
 
 		let (server, db) = open_server_db(&temp_dir, cfg).await;
+		let media = Arc::new(TestMedia::default());
 		let service = Arc::new(Service {
 			interval: Duration::from_secs(server.config.mindroom_edit_purge_interval_secs),
 			interrupt: Notify::new(),
@@ -514,10 +854,14 @@ mod tests {
 			last_scan_key: Mutex::new(None),
 			latest_replace_by_target_sender: Mutex::new(HashMap::new()),
 			pending_superseded_candidates: Mutex::new(VecDeque::new()),
-			services: Services { server, db },
+			services: Services {
+				server,
+				db,
+				media: SidecarMedia::Test(media.clone()),
+			},
 		});
 
-		TestHarness { service, _temp_dir: temp_dir }
+		TestHarness { service, media, _temp_dir: temp_dir }
 	}
 
 	async fn open_server_db(temp_dir: &Path, cfg: HarnessConfig) -> (Arc<Server>, Arc<Database>) {
@@ -561,6 +905,10 @@ rocksdb_read_only = {}
 		let runtime = tokio::runtime::Handle::current();
 		let metrics = Metrics::new(Some(&runtime));
 		let server = Arc::new(Server::new(config, Some(&runtime), log, metrics));
+		let _db_open_guard = TEST_DB_OPEN_LOCK
+			.get_or_init(|| Mutex::new(()))
+			.lock()
+			.await;
 		let db = Database::open(&server)
 			.await
 			.expect("open test database");
@@ -587,6 +935,10 @@ rocksdb_read_only = {}
 			r#"{"body":"original"}"#.to_owned()
 		};
 
+		make_pdu_with_content(event_id, sender, ts, content)
+	}
+
+	fn make_pdu_with_content(event_id: &str, sender: &str, ts: u64, content: String) -> PduEvent {
 		PduEvent {
 			kind: ruma::events::TimelineEventType::RoomMessage,
 			content: RawValue::from_string(content)
@@ -610,6 +962,56 @@ rocksdb_read_only = {}
 		}
 	}
 
+	fn long_text_sidecar_content(target: &str, mxc: &str) -> String {
+		format!(
+			r#"{{
+				"body":"message-content.json",
+				"msgtype":"m.file",
+				"url":"{mxc}",
+				"io.mindroom.long_text":{{
+					"version":2,
+					"encoding":"matrix_event_content_json"
+				}},
+				"m.relates_to":{{
+					"rel_type":"m.replace",
+					"event_id":"{target}"
+				}}
+			}}"#
+		)
+	}
+
+	fn encrypted_long_text_sidecar_content(target: &str, mxc: &str) -> String {
+		format!(
+			r#"{{
+				"body":"message-content.json",
+				"msgtype":"m.file",
+				"file":{{"url":"{mxc}"}},
+				"io.mindroom.long_text":{{
+					"version":2,
+					"encoding":"matrix_event_content_json"
+				}},
+				"m.relates_to":{{
+					"rel_type":"m.replace",
+					"event_id":"{target}"
+				}}
+			}}"#
+		)
+	}
+
+	fn normal_file_content(target: &str, mxc: &str) -> String {
+		format!(
+			r#"{{
+				"body":"ordinary-file.bin",
+				"msgtype":"m.file",
+				"url":"{mxc}",
+				"m.relates_to":{{
+					"rel_type":"m.replace",
+					"event_id":"{target}"
+				}}
+			}}"#
+		)
+	}
+
 	fn insert_event(
 		service: &Service,
 		key_index: u32,
@@ -619,6 +1021,34 @@ rocksdb_read_only = {}
 		replace_target: Option<&str>,
 	) -> StoredEvent {
 		let pdu = make_pdu(event_id, sender, ts, replace_target);
+		let event_id = pdu.event_id.clone();
+		let key = pdu_key(key_index);
+		let short_key = key_index.to_be_bytes().to_vec();
+		let value = serde_json::to_vec(&pdu).expect("serialize pdu");
+
+		service.pduid_pdu.insert(&key, value);
+		service
+			.eventid_pduid
+			.insert(event_id.as_bytes(), &key);
+		service
+			.eventid_shorteventid
+			.insert(event_id.as_bytes(), &short_key);
+		service
+			.shorteventid_eventid
+			.insert(&short_key, event_id.as_bytes());
+
+		StoredEvent { event_id, pdu_key: key, short_key }
+	}
+
+	fn insert_event_with_content(
+		service: &Service,
+		key_index: u32,
+		event_id: &str,
+		sender: &str,
+		ts: u64,
+		content: String,
+	) -> StoredEvent {
+		let pdu = make_pdu_with_content(event_id, sender, ts, content);
 		let event_id = pdu.event_id.clone();
 		let key = pdu_key(key_index);
 		let short_key = key_index.to_be_bytes().to_vec();
@@ -705,6 +1135,43 @@ rocksdb_read_only = {}
 				.is_err(),
 			"expected no shorteventid_eventid entry for {}",
 			event.event_id,
+		);
+	}
+
+	async fn create_media_for_user(harness: &TestHarness, mxc: &str, user: &str) {
+		Mxc::try_from(mxc).expect("valid MXC");
+		let user = OwnedUserId::try_from(user).expect("valid user id");
+		harness
+			.media
+			.owners
+			.lock()
+			.expect("test media lock")
+			.insert(mxc.to_owned(), user);
+	}
+
+	async fn assert_media_present(harness: &TestHarness, mxc: &str) {
+		Mxc::try_from(mxc).expect("valid MXC");
+		assert!(
+			harness
+				.media
+				.owners
+				.lock()
+				.expect("test media lock")
+				.contains_key(mxc),
+			"expected media {mxc} to exist",
+		);
+	}
+
+	async fn assert_media_absent(harness: &TestHarness, mxc: &str) {
+		Mxc::try_from(mxc).expect("valid MXC");
+		assert!(
+			!harness
+				.media
+				.owners
+				.lock()
+				.expect("test media lock")
+				.contains_key(mxc),
+			"expected media {mxc} to be absent",
 		);
 	}
 
@@ -1007,6 +1474,7 @@ rocksdb_read_only = {}
 		})
 		.await;
 		let service = &harness.service;
+		let sidecar_mxc = "mxc://example.com/dryRunSidecar";
 
 		let target = insert_event(
 			service,
@@ -1016,13 +1484,14 @@ rocksdb_read_only = {}
 			100,
 			None,
 		);
-		let edit1 = insert_event(
+		create_media_for_user(&harness, sidecar_mxc, "@alice:example.com").await;
+		let edit1 = insert_event_with_content(
 			service,
 			1,
 			"$edit_dry_run_1:example.com",
 			"@alice:example.com",
 			1_000,
-			Some("$target_dry_run:example.com"),
+			long_text_sidecar_content("$target_dry_run:example.com", sidecar_mxc),
 		);
 		let edit2 = insert_event(
 			service,
@@ -1041,6 +1510,390 @@ rocksdb_read_only = {}
 		assert_event_present(service, &target);
 		assert_event_present(service, &edit1);
 		assert_event_present(service, &edit2);
+		assert_media_present(&harness, sidecar_mxc).await;
+	}
+
+	#[tokio::test]
+	async fn purge_deletes_superseded_mindroom_long_text_sidecar_media() {
+		let harness = make_harness(HarnessConfig::default()).await;
+		let service = &harness.service;
+		let sidecar_mxc = "mxc://example.com/supersededSidecar";
+
+		let target = insert_event(
+			service,
+			0,
+			"$target_sidecar_delete:example.com",
+			"@alice:example.com",
+			100,
+			None,
+		);
+		create_media_for_user(&harness, sidecar_mxc, "@alice:example.com").await;
+		let old_edit = insert_event_with_content(
+			service,
+			1,
+			"$edit_sidecar_delete_old:example.com",
+			"@alice:example.com",
+			1_000,
+			long_text_sidecar_content("$target_sidecar_delete:example.com", sidecar_mxc),
+		);
+		let latest_edit = insert_event(
+			service,
+			2,
+			"$edit_sidecar_delete_latest:example.com",
+			"@alice:example.com",
+			2_000,
+			Some("$target_sidecar_delete:example.com"),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_absent(service, &old_edit);
+		assert_event_present(service, &latest_edit);
+		assert_media_absent(&harness, sidecar_mxc).await;
+	}
+
+	#[tokio::test]
+	async fn purge_preserves_latest_edit_sidecar_media() {
+		let harness = make_harness(HarnessConfig::default()).await;
+		let service = &harness.service;
+		let old_mxc = "mxc://example.com/oldSidecar";
+		let latest_mxc = "mxc://example.com/latestSidecar";
+
+		let target = insert_event(
+			service,
+			0,
+			"$target_sidecar_latest:example.com",
+			"@alice:example.com",
+			100,
+			None,
+		);
+		create_media_for_user(&harness, old_mxc, "@alice:example.com").await;
+		create_media_for_user(&harness, latest_mxc, "@alice:example.com").await;
+		let old_edit = insert_event_with_content(
+			service,
+			1,
+			"$edit_sidecar_latest_old:example.com",
+			"@alice:example.com",
+			1_000,
+			long_text_sidecar_content("$target_sidecar_latest:example.com", old_mxc),
+		);
+		let latest_edit = insert_event_with_content(
+			service,
+			2,
+			"$edit_sidecar_latest_new:example.com",
+			"@alice:example.com",
+			2_000,
+			encrypted_long_text_sidecar_content("$target_sidecar_latest:example.com", latest_mxc),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_absent(service, &old_edit);
+		assert_event_present(service, &latest_edit);
+		assert_media_absent(&harness, old_mxc).await;
+		assert_media_present(&harness, latest_mxc).await;
+	}
+
+	#[tokio::test]
+	async fn purge_preserves_sidecar_reused_by_latest_edit() {
+		let harness = make_harness(HarnessConfig::default()).await;
+		let service = &harness.service;
+		let shared_mxc = "mxc://example.com/reusedLatestSidecar";
+
+		let target = insert_event(
+			service,
+			0,
+			"$target_sidecar_reused:example.com",
+			"@alice:example.com",
+			100,
+			None,
+		);
+		create_media_for_user(&harness, shared_mxc, "@alice:example.com").await;
+		let old_edit = insert_event_with_content(
+			service,
+			1,
+			"$edit_sidecar_reused_old:example.com",
+			"@alice:example.com",
+			1_000,
+			long_text_sidecar_content("$target_sidecar_reused:example.com", shared_mxc),
+		);
+		let latest_edit = insert_event_with_content(
+			service,
+			2,
+			"$edit_sidecar_reused_new:example.com",
+			"@alice:example.com",
+			2_000,
+			long_text_sidecar_content("$target_sidecar_reused:example.com", shared_mxc),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_absent(service, &old_edit);
+		assert_event_present(service, &latest_edit);
+		assert_media_present(&harness, shared_mxc).await;
+	}
+
+	#[tokio::test]
+	async fn purge_preserves_sidecar_reused_by_pending_edit() {
+		let harness = make_harness(HarnessConfig {
+			batch_size: 1,
+			..HarnessConfig::default()
+		})
+		.await;
+		let service = &harness.service;
+		let shared_mxc = "mxc://example.com/reusedPendingSidecar";
+
+		let target = insert_event(
+			service,
+			0,
+			"$target_sidecar_pending:example.com",
+			"@alice:example.com",
+			100,
+			None,
+		);
+		create_media_for_user(&harness, shared_mxc, "@alice:example.com").await;
+		let old_edit = insert_event_with_content(
+			service,
+			1,
+			"$edit_sidecar_pending_old:example.com",
+			"@alice:example.com",
+			1_000,
+			long_text_sidecar_content("$target_sidecar_pending:example.com", shared_mxc),
+		);
+		let pending_edit = insert_event_with_content(
+			service,
+			2,
+			"$edit_sidecar_pending_mid:example.com",
+			"@alice:example.com",
+			2_000,
+			long_text_sidecar_content("$target_sidecar_pending:example.com", shared_mxc),
+		);
+		let latest_edit = insert_event(
+			service,
+			3,
+			"$edit_sidecar_pending_latest:example.com",
+			"@alice:example.com",
+			3_000,
+			Some("$target_sidecar_pending:example.com"),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_absent(service, &old_edit);
+		assert_event_present(service, &pending_edit);
+		assert_event_present(service, &latest_edit);
+		assert_media_present(&harness, shared_mxc).await;
+
+		service
+			.purge_cycle()
+			.await
+			.expect("second purge cycle succeeds");
+
+		assert_event_absent(service, &pending_edit);
+		assert_event_present(service, &latest_edit);
+		assert_media_absent(&harness, shared_mxc).await;
+	}
+
+	#[tokio::test]
+	async fn purge_preserves_sidecar_reused_by_recent_edit() {
+		let harness = make_harness(HarnessConfig {
+			min_age_secs: 60,
+			..HarnessConfig::default()
+		})
+		.await;
+		let service = &harness.service;
+		let now_ms = utils::millis_since_unix_epoch();
+		let shared_mxc = "mxc://example.com/reusedRecentSidecar";
+
+		let target = insert_event(
+			service,
+			0,
+			"$target_sidecar_recent:example.com",
+			"@alice:example.com",
+			now_ms.saturating_sub(130_000),
+			None,
+		);
+		create_media_for_user(&harness, shared_mxc, "@alice:example.com").await;
+		let old_edit = insert_event_with_content(
+			service,
+			1,
+			"$edit_sidecar_recent_old:example.com",
+			"@alice:example.com",
+			now_ms.saturating_sub(120_000),
+			long_text_sidecar_content("$target_sidecar_recent:example.com", shared_mxc),
+		);
+		let older_latest_edit = insert_event(
+			service,
+			2,
+			"$edit_sidecar_recent_mid:example.com",
+			"@alice:example.com",
+			now_ms.saturating_sub(110_000),
+			Some("$target_sidecar_recent:example.com"),
+		);
+		let recent_edit = insert_event_with_content(
+			service,
+			3,
+			"$edit_sidecar_recent_new:example.com",
+			"@alice:example.com",
+			now_ms.saturating_sub(1_000),
+			long_text_sidecar_content("$target_sidecar_recent:example.com", shared_mxc),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_absent(service, &old_edit);
+		assert_event_present(service, &older_latest_edit);
+		assert_event_present(service, &recent_edit);
+		assert_media_present(&harness, shared_mxc).await;
+	}
+
+	#[tokio::test]
+	async fn purge_does_not_delete_normal_file_attachment_media() {
+		let harness = make_harness(HarnessConfig::default()).await;
+		let service = &harness.service;
+		let attachment_mxc = "mxc://example.com/ordinaryAttachment";
+
+		let target = insert_event(
+			service,
+			0,
+			"$target_normal_file:example.com",
+			"@alice:example.com",
+			100,
+			None,
+		);
+		create_media_for_user(&harness, attachment_mxc, "@alice:example.com").await;
+		let old_edit = insert_event_with_content(
+			service,
+			1,
+			"$edit_normal_file_old:example.com",
+			"@alice:example.com",
+			1_000,
+			normal_file_content("$target_normal_file:example.com", attachment_mxc),
+		);
+		let latest_edit = insert_event(
+			service,
+			2,
+			"$edit_normal_file_latest:example.com",
+			"@alice:example.com",
+			2_000,
+			Some("$target_normal_file:example.com"),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_absent(service, &old_edit);
+		assert_event_present(service, &latest_edit);
+		assert_media_present(&harness, attachment_mxc).await;
+	}
+
+	#[tokio::test]
+	async fn purge_does_not_delete_sidecar_owned_by_different_user() {
+		let harness = make_harness(HarnessConfig::default()).await;
+		let service = &harness.service;
+		let sidecar_mxc = "mxc://example.com/notAliceSidecar";
+
+		let target = insert_event(
+			service,
+			0,
+			"$target_sidecar_owner:example.com",
+			"@alice:example.com",
+			100,
+			None,
+		);
+		create_media_for_user(&harness, sidecar_mxc, "@bob:example.com").await;
+		let old_edit = insert_event_with_content(
+			service,
+			1,
+			"$edit_sidecar_owner_old:example.com",
+			"@alice:example.com",
+			1_000,
+			long_text_sidecar_content("$target_sidecar_owner:example.com", sidecar_mxc),
+		);
+		let latest_edit = insert_event(
+			service,
+			2,
+			"$edit_sidecar_owner_latest:example.com",
+			"@alice:example.com",
+			2_000,
+			Some("$target_sidecar_owner:example.com"),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_absent(service, &old_edit);
+		assert_event_present(service, &latest_edit);
+		assert_media_present(&harness, sidecar_mxc).await;
+	}
+
+	#[tokio::test]
+	async fn purge_does_not_delete_remote_sidecar_media() {
+		let harness = make_harness(HarnessConfig::default()).await;
+		let service = &harness.service;
+		let remote_mxc = "mxc://remote.example/remoteSidecar";
+
+		let target = insert_event(
+			service,
+			0,
+			"$target_sidecar_remote:example.com",
+			"@alice:example.com",
+			100,
+			None,
+		);
+		create_media_for_user(&harness, remote_mxc, "@alice:example.com").await;
+		let old_edit = insert_event_with_content(
+			service,
+			1,
+			"$edit_sidecar_remote_old:example.com",
+			"@alice:example.com",
+			1_000,
+			long_text_sidecar_content("$target_sidecar_remote:example.com", remote_mxc),
+		);
+		let latest_edit = insert_event(
+			service,
+			2,
+			"$edit_sidecar_remote_latest:example.com",
+			"@alice:example.com",
+			2_000,
+			Some("$target_sidecar_remote:example.com"),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_absent(service, &old_edit);
+		assert_event_present(service, &latest_edit);
+		assert_media_present(&harness, remote_mxc).await;
 	}
 
 	#[tokio::test]
