@@ -106,12 +106,6 @@ fn next_scan_start_key(key: &[u8]) -> Vec<u8> {
 	next
 }
 
-fn remove_protected_sidecars(candidate: &mut ReplaceCandidate, protected: &[OwnedMxcUri]) {
-	candidate
-		.sidecar_mxcs
-		.retain(|mxc| !protected.iter().any(|protected| protected == mxc));
-}
-
 #[async_trait]
 impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
@@ -323,11 +317,6 @@ impl Service {
 			reset_scan_state = true;
 		}
 
-		let protected_sidecar_mxcs: Vec<OwnedMxcUri> = latest_replace_by_target_sender
-			.values()
-			.flat_map(|candidate| candidate.sidecar_mxcs.iter().cloned())
-			.collect();
-
 		// Update the cursor: if we reached the end, reset to None (start
 		// over next cycle). Otherwise, save the last key for resuming.
 		{
@@ -350,19 +339,17 @@ impl Service {
 		let mut target_ids: HashSet<OwnedEventId> = HashSet::new();
 		let mut pending_superseded = self.pending_superseded_candidates.lock().await;
 		pending_superseded.extend(superseded_candidates);
-		for (_, candidate) in pending_superseded.iter_mut() {
-			remove_protected_sidecars(candidate, &protected_sidecar_mxcs);
-		}
 		let purge_budget = pending_superseded.len().min(batch_size);
 		let purge_batch: Vec<_> = pending_superseded.drain(..purge_budget).collect();
 		drop(pending_superseded);
 
-		let _cork = if !dry_run {
+		let cork = if !dry_run {
 			Some(self.services.db.cork_and_flush())
 		} else {
 			None
 		};
 
+		let mut sidecar_cleanup_candidates: Vec<(OwnedEventId, ReplaceCandidate)> = Vec::new();
 		for (target_event_id, candidate) in purge_batch {
 			if dry_run {
 				info!(
@@ -370,10 +357,9 @@ impl Service {
 					target = %target_event_id,
 					"[dry-run] Would purge superseded edit"
 				);
-				self.process_sidecar_media(&target_event_id, &candidate, true)
-					.await;
 				purge_count += 1;
-				target_ids.insert(target_event_id);
+				target_ids.insert(target_event_id.clone());
+				sidecar_cleanup_candidates.push((target_event_id, candidate));
 				continue;
 			}
 
@@ -383,14 +369,22 @@ impl Service {
 					target = %target_event_id,
 					"Purged superseded edit event"
 				);
-				self.process_sidecar_media(&target_event_id, &candidate, false)
-					.await;
 				purge_count += 1;
-				target_ids.insert(target_event_id);
+				target_ids.insert(target_event_id.clone());
+				sidecar_cleanup_candidates.push((target_event_id, candidate));
 			} else {
 				let mut pending = self.pending_superseded_candidates.lock().await;
 				pending.push_back((target_event_id, candidate));
 			}
+		}
+		drop(cork);
+
+		let protected_mxcs = self
+			.retained_referenced_mxcs(&sidecar_cleanup_candidates)
+			.await;
+		for (target_event_id, candidate) in sidecar_cleanup_candidates {
+			self.process_sidecar_media(&target_event_id, &candidate, dry_run, &protected_mxcs)
+				.await;
 		}
 
 		let target_count = target_ids.len();
@@ -487,6 +481,7 @@ impl Service {
 		target_event_id: &OwnedEventId,
 		candidate: &ReplaceCandidate,
 		dry_run: bool,
+		protected_mxcs: &HashSet<OwnedMxcUri>,
 	) {
 		if candidate.sidecar_mxcs.is_empty() {
 			return;
@@ -504,6 +499,17 @@ impl Service {
 		}
 
 		for mxc_uri in &candidate.sidecar_mxcs {
+			if protected_mxcs.contains(mxc_uri) {
+				debug!(
+					event_id = %candidate.event_id,
+					target = %target_event_id,
+					mxc = %mxc_uri,
+					"Skipping MindRoom long-text sidecar media deletion; MXC is still \
+					 referenced by a retained event"
+				);
+				continue;
+			}
+
 			let Ok(mxc_server_name) = mxc_uri.server_name() else {
 				warn!(
 					event_id = %candidate.event_id,
@@ -596,6 +602,51 @@ impl Service {
 			}
 		}
 	}
+
+	async fn retained_referenced_mxcs(
+		&self,
+		cleanup_candidates: &[(OwnedEventId, ReplaceCandidate)],
+	) -> HashSet<OwnedMxcUri> {
+		let candidate_mxcs: HashSet<OwnedMxcUri> = cleanup_candidates
+			.iter()
+			.flat_map(|(_, candidate)| candidate.sidecar_mxcs.iter().cloned())
+			.collect();
+
+		if candidate_mxcs.is_empty() {
+			return HashSet::new();
+		}
+
+		let ignored_event_ids: HashSet<OwnedEventId> = cleanup_candidates
+			.iter()
+			.map(|(_, candidate)| candidate.event_id.clone())
+			.collect();
+		let mut protected_mxcs = HashSet::new();
+		let stream = self.pduid_pdu.raw_stream();
+		tokio::pin!(stream);
+
+		while let Some(kv) = stream.next().await {
+			let Ok((_key, value)) = kv else {
+				continue;
+			};
+
+			let Ok(pdu) = serde_json::from_slice::<PduEvent>(&value) else {
+				continue;
+			};
+
+			if ignored_event_ids.contains(&pdu.event_id) {
+				continue;
+			}
+
+			let content = pdu.get_content_as_value();
+			collect_referenced_candidate_mxcs(&content, &candidate_mxcs, &mut protected_mxcs);
+
+			if protected_mxcs.len() == candidate_mxcs.len() {
+				break;
+			}
+		}
+
+		protected_mxcs
+	}
 }
 
 fn extract_mindroom_long_text_sidecar_mxcs(pdu: &PduEvent) -> Vec<OwnedMxcUri> {
@@ -649,6 +700,32 @@ fn collect_mindroom_long_text_sidecar_mxcs(
 		if mxc.is_valid() && !mxcs.iter().any(|existing| existing == &mxc) {
 			mxcs.push(mxc);
 		}
+	}
+}
+
+fn collect_referenced_candidate_mxcs(
+	value: &JsonValue,
+	candidate_mxcs: &HashSet<OwnedMxcUri>,
+	protected_mxcs: &mut HashSet<OwnedMxcUri>,
+) {
+	match value {
+		| JsonValue::String(s) if s.starts_with("mxc://") => {
+			let mxc = OwnedMxcUri::from(s.to_owned());
+			if candidate_mxcs.contains(&mxc) {
+				protected_mxcs.insert(mxc);
+			}
+		},
+		| JsonValue::Array(items) => {
+			for item in items {
+				collect_referenced_candidate_mxcs(item, candidate_mxcs, protected_mxcs);
+			}
+		},
+		| JsonValue::Object(map) => {
+			for item in map.values() {
+				collect_referenced_candidate_mxcs(item, candidate_mxcs, protected_mxcs);
+			}
+		},
+		| _ => {},
 	}
 }
 
@@ -1565,6 +1642,128 @@ rocksdb_read_only = {}
 		assert_event_present(service, &target);
 		assert_event_absent(service, &old_edit);
 		assert_event_present(service, &latest_edit);
+		assert_media_present(&harness, shared_mxc).await;
+	}
+
+	#[tokio::test]
+	async fn purge_preserves_sidecar_reused_by_pending_edit() {
+		let harness = make_harness(HarnessConfig {
+			batch_size: 1,
+			..HarnessConfig::default()
+		})
+		.await;
+		let service = &harness.service;
+		let shared_mxc = "mxc://example.com/reusedPendingSidecar";
+
+		let target = insert_event(
+			service,
+			0,
+			"$target_sidecar_pending:example.com",
+			"@alice:example.com",
+			100,
+			None,
+		);
+		create_media_for_user(&harness, shared_mxc, "@alice:example.com").await;
+		let old_edit = insert_event_with_content(
+			service,
+			1,
+			"$edit_sidecar_pending_old:example.com",
+			"@alice:example.com",
+			1_000,
+			long_text_sidecar_content("$target_sidecar_pending:example.com", shared_mxc),
+		);
+		let pending_edit = insert_event_with_content(
+			service,
+			2,
+			"$edit_sidecar_pending_mid:example.com",
+			"@alice:example.com",
+			2_000,
+			long_text_sidecar_content("$target_sidecar_pending:example.com", shared_mxc),
+		);
+		let latest_edit = insert_event(
+			service,
+			3,
+			"$edit_sidecar_pending_latest:example.com",
+			"@alice:example.com",
+			3_000,
+			Some("$target_sidecar_pending:example.com"),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_absent(service, &old_edit);
+		assert_event_present(service, &pending_edit);
+		assert_event_present(service, &latest_edit);
+		assert_media_present(&harness, shared_mxc).await;
+
+		service
+			.purge_cycle()
+			.await
+			.expect("second purge cycle succeeds");
+
+		assert_event_absent(service, &pending_edit);
+		assert_event_present(service, &latest_edit);
+		assert_media_absent(&harness, shared_mxc).await;
+	}
+
+	#[tokio::test]
+	async fn purge_preserves_sidecar_reused_by_recent_edit() {
+		let harness = make_harness(HarnessConfig {
+			min_age_secs: 60,
+			..HarnessConfig::default()
+		})
+		.await;
+		let service = &harness.service;
+		let now_ms = utils::millis_since_unix_epoch();
+		let shared_mxc = "mxc://example.com/reusedRecentSidecar";
+
+		let target = insert_event(
+			service,
+			0,
+			"$target_sidecar_recent:example.com",
+			"@alice:example.com",
+			now_ms.saturating_sub(130_000),
+			None,
+		);
+		create_media_for_user(&harness, shared_mxc, "@alice:example.com").await;
+		let old_edit = insert_event_with_content(
+			service,
+			1,
+			"$edit_sidecar_recent_old:example.com",
+			"@alice:example.com",
+			now_ms.saturating_sub(120_000),
+			long_text_sidecar_content("$target_sidecar_recent:example.com", shared_mxc),
+		);
+		let older_latest_edit = insert_event(
+			service,
+			2,
+			"$edit_sidecar_recent_mid:example.com",
+			"@alice:example.com",
+			now_ms.saturating_sub(110_000),
+			Some("$target_sidecar_recent:example.com"),
+		);
+		let recent_edit = insert_event_with_content(
+			service,
+			3,
+			"$edit_sidecar_recent_new:example.com",
+			"@alice:example.com",
+			now_ms.saturating_sub(1_000),
+			long_text_sidecar_content("$target_sidecar_recent:example.com", shared_mxc),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_absent(service, &old_edit);
+		assert_event_present(service, &older_latest_edit);
+		assert_event_present(service, &recent_edit);
 		assert_media_present(&harness, shared_mxc).await;
 	}
 
