@@ -106,9 +106,16 @@ Behavior:
 - Adds `POST /_matrix/client/unstable/org.mindroom.login/apple`.
 - Verifies native Sign in with Apple identity tokens against Apple's JWKS,
   issuer, audience, expiration, and nonce.
+- Rejects native Apple tokens that include a nonce when the request omits the
+  raw nonce, and rejects requests that supply a nonce when the token omits one.
+- Caches Apple's JWKS briefly in memory so repeated native Apple logins do not
+  fetch signing keys on every request, while refreshing once when a cached set
+  does not contain the token's key ID.
 - Accepts configured native app bundle IDs through
   `global.identity_provider.native_client_ids` while preserving the existing
   web Services ID as a valid audience.
+- Selects the native Apple provider from an explicit `providerId`, or from the
+  single configured AppleOIDC provider when there is exactly one.
 - Reuses the normal SSO account mapping, registration, reactivation, and
   Matrix `loginToken` creation path.
 
@@ -204,6 +211,17 @@ native_client_ids = ["chat.mindroom.app"]
 - Main-branch pushes can auto-create MindRoom release tags and GitHub Releases.
 - Tagged releases publish Linux binaries for `x86_64` and `aarch64`.
 - Release tags can also trigger container publication.
+
+## Current Status
+- PR #3 native Apple review follow-up has been addressed.
+- `refresh_apple_jwks` rechecks the write-locked JWKS cache for the requested
+  Apple key ID before fetching, so concurrent unknown-key refreshes can reuse a
+  cache update from another request.
+- Apple JWKS key lookup uses the key ID already validated by
+  `apple_id_token_header`; missing-key-ID auth errors remain at header
+  validation.
+- Verification completed for this follow-up: focused SSO tests, the requested
+  API/core/service cargo check, and `git diff --check`.
 
 ## Compatibility Notes
 - Matrix event formats remain standard.
