@@ -4,8 +4,10 @@ use std::{
 	borrow::Cow,
 	collections::{BTreeMap, BTreeSet},
 	fmt::Write as _,
+	future::Future,
 	net::IpAddr,
-	time::Duration,
+	sync::OnceLock,
+	time::{Duration, Instant},
 };
 
 use axum::{Json, extract::State, response::IntoResponse};
@@ -23,13 +25,14 @@ use ruma::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use tokio::sync::RwLock;
 use tuwunel_core::{
 	Err, Result, at,
 	config::IdentityProvider,
 	debug::INFO_SPAN_LEVEL,
 	debug_info, debug_warn, err, info, is_not_equal_to,
 	itertools::Itertools,
-	jwt::{Algorithm, DecodingKey, Validation, decode, decode_header},
+	jwt::{Algorithm, DecodingKey, Header, Validation, decode, decode_header},
 	utils,
 	utils::{
 		OptionExt,
@@ -82,11 +85,16 @@ struct GrantCookie<'a> {
 static GRANT_SESSION_COOKIE: &str = "tuwunel_grant_session";
 static APPLE_ISSUER: &str = "https://appleid.apple.com";
 static APPLE_JWKS_URL: &str = "https://appleid.apple.com/auth/keys";
+static APPLE_JWKS_CACHE: OnceLock<RwLock<Option<CachedAppleJwks>>> = OnceLock::new();
+
+const APPLE_JWKS_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NativeAppleLoginRequest {
 	identity_token: String,
+	// Kept for auditability and future code-exchange/revocation checks; the
+	// current exchange validates the identity token directly.
 	authorization_code: Option<String>,
 	nonce: Option<String>,
 	provider_id: Option<String>,
@@ -99,12 +107,12 @@ struct NativeAppleLoginResponse {
 	expires_in_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct AppleJwks {
 	keys: Vec<AppleJwk>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct AppleJwk {
 	alg: Option<String>,
 	e: String,
@@ -130,6 +138,12 @@ struct AppleIdTokenClaims {
 	nonce: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct CachedAppleJwks {
+	jwks: AppleJwks,
+	fetched_at: Instant,
+}
+
 fn apple_native_audiences(provider: &Provider) -> BTreeSet<String> {
 	let mut audiences = provider.native_client_ids.clone();
 	audiences.insert(provider.client_id.clone());
@@ -137,7 +151,7 @@ fn apple_native_audiences(provider: &Provider) -> BTreeSet<String> {
 }
 
 fn sha256_hex(value: &str) -> String {
-	let digest = sha256::hash(value);
+	let digest = sha256::hash(value.as_bytes());
 	let mut output = String::new();
 
 	for byte in digest {
@@ -162,11 +176,22 @@ fn apple_userinfo_from_validated_claims(
 		)));
 	}
 
-	if let Some(raw_nonce) = raw_nonce {
-		let expected_nonce = sha256_hex(raw_nonce);
-		if claims.nonce.as_deref() != Some(expected_nonce.as_str()) {
-			return Err!(Request(Unauthorized("Apple id_token nonce does not match.")));
-		}
+	match (claims.nonce.as_deref(), raw_nonce) {
+		| (Some(token_nonce), Some(raw_nonce)) => {
+			let expected_nonce = sha256_hex(raw_nonce);
+			if token_nonce != expected_nonce.as_str() {
+				return Err!(Request(Unauthorized("Apple id_token nonce does not match.")));
+			}
+		},
+		| (Some(_), None) => {
+			return Err!(Request(Unauthorized(
+				"Apple id_token nonce is present but no request nonce was supplied."
+			)));
+		},
+		| (None, Some(_)) => {
+			return Err!(Request(Unauthorized("Apple id_token nonce is missing.")));
+		},
+		| (None, None) => {},
 	}
 
 	Ok(apple_userinfo_from_claim_values(
@@ -252,7 +277,7 @@ fn decode_apple_userinfo_from_id_token(session: &Session) -> Result<UserInfo> {
 	))
 }
 
-fn apple_decoding_key_for_token(token: &str, jwks: &AppleJwks) -> Result<DecodingKey> {
+fn apple_id_token_header(token: &str) -> Result<Header> {
 	let header = decode_header(token)
 		.map_err(|e| err!(Request(Unauthorized("Apple id_token header is invalid: {e}"))))?;
 
@@ -260,16 +285,17 @@ fn apple_decoding_key_for_token(token: &str, jwks: &AppleJwks) -> Result<Decodin
 		return Err!(Request(Unauthorized("Apple id_token uses unsupported signing algorithm.")));
 	}
 
-	let kid = header
-		.kid
-		.as_deref()
-		.ok_or_else(|| err!(Request(Unauthorized("Apple id_token missing key id."))))?;
+	if header.kid.is_none() {
+		return Err!(Request(Unauthorized("Apple id_token missing key id.")));
+	}
 
-	let jwk = jwks
-		.keys
-		.iter()
-		.find(|key| key.kid == kid)
-		.ok_or_else(|| err!(Request(Unauthorized("Apple id_token key id is not trusted."))))?;
+	Ok(header)
+}
+
+fn apple_decoding_key_for_kid(kid: &str, jwks: &AppleJwks) -> Result<Option<DecodingKey>> {
+	let Some(jwk) = jwks.keys.iter().find(|key| key.kid == kid) else {
+		return Ok(None);
+	};
 
 	if jwk.kty != "RSA"
 		|| jwk
@@ -281,7 +307,16 @@ fn apple_decoding_key_for_token(token: &str, jwks: &AppleJwks) -> Result<Decodin
 	}
 
 	DecodingKey::from_rsa_components(&jwk.n, &jwk.e)
+		.map(Some)
 		.map_err(|e| err!(Request(Unauthorized("Apple id_token signing key is invalid: {e}"))))
+}
+
+fn apple_jwks_contains_kid(jwks: &AppleJwks, kid: &str) -> bool {
+	jwks.keys.iter().any(|key| key.kid == kid)
+}
+
+fn cached_apple_jwks_is_fresh(cached: &CachedAppleJwks) -> bool {
+	cached.fetched_at.elapsed() < APPLE_JWKS_CACHE_TTL
 }
 
 fn apple_id_token_validation(provider: &Provider) -> Validation {
@@ -299,6 +334,34 @@ fn apple_id_token_validation(provider: &Provider) -> Validation {
 	validation
 }
 
+fn native_apple_provider_id(
+	requested_provider_id: Option<&str>,
+	identity_providers: &BTreeMap<String, IdentityProvider>,
+) -> Result<String> {
+	if let Some(provider_id) = requested_provider_id {
+		return Ok(provider_id.to_owned());
+	}
+
+	let mut apple_providers = identity_providers
+		.values()
+		.filter(|provider| provider.brand == "appleoidc")
+		.map(IdentityProvider::id);
+	let Some(provider_id) = apple_providers.next() else {
+		return Err!(Request(NotFound(
+			"No AppleOIDC identity provider is configured for native Apple login."
+		)));
+	};
+
+	if apple_providers.next().is_some() {
+		return Err!(Request(InvalidParam(
+			"Native Apple login requires provider_id when multiple AppleOIDC identity providers \
+			 are configured."
+		)));
+	}
+
+	Ok(provider_id.to_owned())
+}
+
 async fn fetch_apple_jwks(services: &Services) -> Result<AppleJwks> {
 	services
 		.client
@@ -312,13 +375,84 @@ async fn fetch_apple_jwks(services: &Services) -> Result<AppleJwks> {
 		.map_err(Into::into)
 }
 
+async fn cached_apple_jwks(services: &Services) -> Result<AppleJwks> {
+	let cache = APPLE_JWKS_CACHE.get_or_init(|| RwLock::new(None));
+
+	{
+		let cached = cache.read().await;
+		if let Some(cached) = cached
+			.as_ref()
+			.filter(|cached| cached_apple_jwks_is_fresh(cached))
+		{
+			return Ok(cached.jwks.clone());
+		}
+	}
+
+	let mut cached = cache.write().await;
+	if let Some(cached) = cached
+		.as_ref()
+		.filter(|cached| cached_apple_jwks_is_fresh(cached))
+	{
+		return Ok(cached.jwks.clone());
+	}
+
+	let jwks = fetch_apple_jwks(services).await?;
+	*cached = Some(CachedAppleJwks {
+		jwks: jwks.clone(),
+		fetched_at: Instant::now(),
+	});
+
+	Ok(jwks)
+}
+
+async fn refresh_apple_jwks_from_cache(
+	cache: &RwLock<Option<CachedAppleJwks>>,
+	kid: &str,
+	fetch: impl Future<Output = Result<AppleJwks>>,
+) -> Result<AppleJwks> {
+	let mut cached = cache.write().await;
+
+	if let Some(cached) = cached
+		.as_ref()
+		.filter(|cached| cached_apple_jwks_is_fresh(cached))
+		.filter(|cached| apple_jwks_contains_kid(&cached.jwks, kid))
+	{
+		return Ok(cached.jwks.clone());
+	}
+
+	let jwks = fetch.await?;
+	*cached = Some(CachedAppleJwks {
+		jwks: jwks.clone(),
+		fetched_at: Instant::now(),
+	});
+
+	Ok(jwks)
+}
+
+async fn refresh_apple_jwks(services: &Services, kid: &str) -> Result<AppleJwks> {
+	let cache = APPLE_JWKS_CACHE.get_or_init(|| RwLock::new(None));
+
+	refresh_apple_jwks_from_cache(cache, kid, fetch_apple_jwks(services)).await
+}
+
 async fn validate_apple_identity_token(
 	services: &Services,
 	provider: &Provider,
 	identity_token: &str,
 ) -> Result<AppleIdTokenClaims> {
-	let jwks = fetch_apple_jwks(services).await?;
-	let decoding_key = apple_decoding_key_for_token(identity_token, &jwks)?;
+	let header = apple_id_token_header(identity_token)?;
+	let kid = header
+		.kid
+		.as_deref()
+		.expect("apple_id_token_header validates kid");
+	let jwks = cached_apple_jwks(services).await?;
+	let decoding_key = if let Some(decoding_key) = apple_decoding_key_for_kid(kid, &jwks)? {
+		decoding_key
+	} else {
+		let jwks = refresh_apple_jwks(services, kid).await?;
+		apple_decoding_key_for_kid(kid, &jwks)?
+			.ok_or_else(|| err!(Request(Unauthorized("Apple id_token key id is not trusted."))))?
+	};
 	let validation = apple_id_token_validation(provider);
 
 	decode::<AppleIdTokenClaims>(identity_token, &decoding_key, &validation)
@@ -331,11 +465,11 @@ pub(crate) async fn native_apple_login_route(
 	State(services): State<crate::State>,
 	Json(body): Json<NativeAppleLoginRequest>,
 ) -> Result<impl IntoResponse> {
-	let provider = services
-		.oauth
-		.providers
-		.get(body.provider_id.as_deref().unwrap_or("appleoidc"))
-		.await?;
+	let provider_id = native_apple_provider_id(
+		body.provider_id.as_deref(),
+		&services.config.identity_provider,
+	)?;
+	let provider = services.oauth.providers.get(&provider_id).await?;
 
 	if provider.brand != "appleoidc" {
 		return Err!(Request(InvalidParam(
@@ -1201,7 +1335,10 @@ fn parse_user_id(server_name: &ServerName, username: &str) -> Result<OwnedUserId
 
 #[cfg(test)]
 mod tests {
-	use std::collections::{BTreeMap, BTreeSet};
+	use std::{
+		collections::{BTreeMap, BTreeSet},
+		sync::atomic::{AtomicUsize, Ordering},
+	};
 
 	use serde_json::json;
 
@@ -1266,6 +1403,86 @@ mod tests {
 			id_token: Some(format!("header.{payload}.signature")),
 			..Default::default()
 		}
+	}
+
+	fn apple_test_jwk(kid: &str) -> AppleJwk {
+		AppleJwk {
+			alg: Some("RS256".to_owned()),
+			e: "AQAB".to_owned(),
+			kid: kid.to_owned(),
+			kty: "RSA".to_owned(),
+			n: "yRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTLUTv4l4sggh5_CYYi_cvI-SXVT9kPWSKXxJXBXd_4LkvcPuUakBoAkfh-eiFVMh2VrUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8HoGfG_AtH89BIE9jDBHZ9dLelK9a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBIMc4lQzDKL5gvmiXLXB1AGLm8KBjfE8s3L5xqi-yUod-j8MtvIj812dkS4QMiRVN_by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQ".to_owned(),
+		}
+	}
+
+	fn apple_test_jwks(kids: &[&str]) -> AppleJwks {
+		AppleJwks {
+			keys: kids
+				.iter()
+				.map(|kid| apple_test_jwk(kid))
+				.collect(),
+		}
+	}
+
+	#[test]
+	fn apple_decoding_key_lookup_allows_refresh_when_kid_is_unknown() {
+		let cached_jwks = apple_test_jwks(&["cached-key"]);
+		let fresh_jwks = apple_test_jwks(&["rotated-key"]);
+
+		assert!(
+			apple_decoding_key_for_kid("rotated-key", &cached_jwks)
+				.expect("unknown kid should not be a hard failure before refresh")
+				.is_none()
+		);
+		assert!(
+			apple_decoding_key_for_kid("rotated-key", &fresh_jwks)
+				.expect("refreshed JWKS should resolve rotated kid")
+				.is_some()
+		);
+	}
+
+	#[tokio::test]
+	async fn refresh_apple_jwks_reuses_cache_when_waited_refresh_contains_kid() {
+		let cache = RwLock::new(Some(CachedAppleJwks {
+			jwks: apple_test_jwks(&["rotated-key"]),
+			fetched_at: Instant::now(),
+		}));
+		let fetches = AtomicUsize::new(0);
+
+		let jwks = refresh_apple_jwks_from_cache(&cache, "rotated-key", async {
+			fetches.fetch_add(1, Ordering::SeqCst);
+			Ok(apple_test_jwks(&["unused-network-key"]))
+		})
+		.await
+		.expect("cached key should be reused without fetching");
+
+		assert!(apple_jwks_contains_kid(&jwks, "rotated-key"));
+		assert_eq!(fetches.load(Ordering::SeqCst), 0);
+	}
+
+	#[tokio::test]
+	async fn refresh_apple_jwks_fetches_when_locked_cache_still_misses_kid() {
+		let cache = RwLock::new(Some(CachedAppleJwks {
+			jwks: apple_test_jwks(&["cached-key"]),
+			fetched_at: Instant::now(),
+		}));
+		let fetches = AtomicUsize::new(0);
+
+		let jwks = refresh_apple_jwks_from_cache(&cache, "rotated-key", async {
+			fetches.fetch_add(1, Ordering::SeqCst);
+			Ok(apple_test_jwks(&["rotated-key"]))
+		})
+		.await
+		.expect("missing key should trigger one refresh");
+
+		assert!(apple_jwks_contains_kid(&jwks, "rotated-key"));
+		assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+		let cached = cache.read().await;
+		let cached = cached
+			.as_ref()
+			.expect("refreshed JWKS should be cached");
+		assert!(apple_jwks_contains_kid(&cached.jwks, "rotated-key"));
 	}
 
 	#[test]
@@ -1387,5 +1604,86 @@ mod tests {
 
 		let message = format!("{error}");
 		assert!(message.contains("nonce"), "unexpected error: {message}");
+	}
+
+	#[test]
+	fn native_apple_claims_reject_token_nonce_without_request_nonce() {
+		let provider = apple_provider_with_native_clients(&["chat.mindroom.app"]);
+		let claims = apple_claims("chat.mindroom.app");
+
+		let error = apple_userinfo_from_validated_claims(&provider, claims, None)
+			.expect_err("token nonce without request nonce should be rejected");
+
+		let message = format!("{error}");
+		assert!(message.contains("nonce"), "unexpected error: {message}");
+	}
+
+	#[test]
+	fn native_apple_claims_reject_request_nonce_without_token_nonce() {
+		let provider = apple_provider_with_native_clients(&["chat.mindroom.app"]);
+		let mut claims = apple_claims("chat.mindroom.app");
+		claims.nonce = None;
+
+		let error = apple_userinfo_from_validated_claims(&provider, claims, Some("native-nonce"))
+			.expect_err("request nonce without token nonce should be rejected");
+
+		let message = format!("{error}");
+		assert!(message.contains("nonce"), "unexpected error: {message}");
+	}
+
+	#[test]
+	fn native_apple_provider_id_uses_explicit_provider_id() {
+		let providers =
+			[("apple".to_owned(), apple_provider_with_native_clients(&["chat.mindroom.app"]))]
+				.into();
+
+		assert_eq!(
+			native_apple_provider_id(Some("chat.mindroom.matrix.apple"), &providers)
+				.expect("explicit provider id should pass through"),
+			"chat.mindroom.matrix.apple"
+		);
+	}
+
+	#[test]
+	fn native_apple_provider_id_falls_back_to_single_apple_provider() {
+		let providers =
+			[("apple".to_owned(), apple_provider_with_native_clients(&["chat.mindroom.app"]))]
+				.into();
+
+		assert_eq!(
+			native_apple_provider_id(None, &providers)
+				.expect("single Apple provider should be selected"),
+			"chat.mindroom.matrix.apple"
+		);
+	}
+
+	#[test]
+	fn native_apple_provider_id_rejects_missing_apple_provider() {
+		let mut provider = apple_provider_with_native_clients(&["chat.mindroom.app"]);
+		provider.brand = "google".to_owned();
+		let providers = [("google".to_owned(), provider)].into();
+
+		let error = native_apple_provider_id(None, &providers)
+			.expect_err("missing Apple provider should fail");
+
+		let message = format!("{error}");
+		assert!(message.contains("AppleOIDC"), "unexpected error: {message}");
+	}
+
+	#[test]
+	fn native_apple_provider_id_rejects_ambiguous_apple_providers() {
+		let mut second_provider = apple_provider_with_native_clients(&["chat.mindroom.dev"]);
+		second_provider.client_id = "chat.mindroom.matrix.apple.dev".to_owned();
+		let providers = [
+			("apple".to_owned(), apple_provider_with_native_clients(&["chat.mindroom.app"])),
+			("apple-dev".to_owned(), second_provider),
+		]
+		.into();
+
+		let error = native_apple_provider_id(None, &providers)
+			.expect_err("multiple Apple providers should require provider_id");
+
+		let message = format!("{error}");
+		assert!(message.contains("provider_id"), "unexpected error: {message}");
 	}
 }
