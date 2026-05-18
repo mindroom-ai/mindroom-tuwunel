@@ -94,16 +94,34 @@ Behavior:
 - Supports defaults such as `users_default = 50` for newly created rooms.
 - Validates at startup that the override is an object/table-shaped value.
 
+#### 6) `auth/apple: add native iOS Apple login exchange`
+Files:
+- `src/api/client/session/mod.rs`
+- `src/api/client/session/sso.rs`
+- `src/api/router.rs`
+- `src/core/config/mod.rs`
+- `tuwunel-example.toml`
+
+Behavior:
+- Adds `POST /_matrix/client/unstable/org.mindroom.login/apple`.
+- Verifies native Sign in with Apple identity tokens against Apple's JWKS,
+  issuer, audience, expiration, and nonce.
+- Accepts configured native app bundle IDs through
+  `global.identity_provider.native_client_ids` while preserving the existing
+  web Services ID as a valid audience.
+- Reuses the normal SSO account mapping, registration, reactivation, and
+  Matrix `loginToken` creation path.
+
 ### Operational Changes
 
-#### 6) `ci: add GitHub release workflow for ARM and x86_64 binaries`
+#### 7) `ci: add GitHub release workflow for ARM and x86_64 binaries`
 Files:
 - `.github/workflows/mindroom-release.yml`
 
 Behavior:
 - Adds tagged binary publishing for Linux `x86_64` and `aarch64`.
 
-#### 7) `ci(release): auto-tag main pushes and create releases`
+#### 8) `ci(release): auto-tag main pushes and create releases`
 Files:
 - `.github/workflows/auto-mindroom-release.yml`
 - `scripts/fork_release_tag.py`
@@ -112,7 +130,7 @@ Behavior:
 - Computes `v<base_version>-mindroom.<n>` tags on `main`.
 - Creates or reuses the corresponding GitHub Release.
 
-#### 8) `ci(container): publish release containers`
+#### 9) `ci(container): publish release containers`
 Files:
 - `.github/workflows/auto-mindroom-release.yml`
 - `.github/workflows/mindroom-container-release.yml`
@@ -122,7 +140,7 @@ Behavior:
 - Dispatches container publication for MindRoom release tags.
 - Uses the configured buildx builder for release container builds.
 
-#### 9) `docs: summarize fork runtime and release additions`
+#### 10) `docs: summarize fork runtime and release additions`
 Files:
 - `README.md`
 
@@ -155,6 +173,14 @@ mindroom_edit_purge_dry_run = false
 users_default = 50
 ```
 
+### Native Sign in with Apple
+```toml
+[[global.identity_provider]]
+brand = "AppleOIDC"
+client_id = "chat.mindroom.matrix.apple"
+native_client_ids = ["chat.mindroom.app"]
+```
+
 ## Recommended Rollout
 1. Enable `mindroom_compact_edits_enabled` first.
 2. Enable purge in dry-run mode with `mindroom_edit_purge_dry_run = true`.
@@ -166,6 +192,8 @@ users_default = 50
   reclaim storage by purging superseded historical edits.
 - Apple OAuth fallback improves sign-in robustness when `userinfo` is
   unavailable.
+- Native iOS Apple login can exchange a signed app-bundle ID token for the same
+  short-lived Matrix login token used by browser SSO.
 - UIAA SSO fallback supports strict-CSP deployments that cannot rely on inline
   browser logic in the default flow.
 - Returning SSO users are reactivated only when they self-deactivated.
@@ -184,3 +212,5 @@ users_default = 50
 - Superseded edits can be permanently removed when purge is enabled.
 - Admin-deactivated SSO accounts stay deactivated on future login attempts.
 - The default power-level override only affects newly created rooms.
+- Native Apple login requires the app bundle ID to be listed in
+  `native_client_ids` for the Apple provider.
