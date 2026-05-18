@@ -1,11 +1,18 @@
 mod uiaa;
 
-use std::{borrow::Cow, collections::BTreeMap, net::IpAddr, time::Duration};
+use std::{
+	borrow::Cow,
+	collections::{BTreeMap, BTreeSet},
+	fmt::Write as _,
+	net::IpAddr,
+	time::Duration,
+};
 
-use axum::extract::State;
+use axum::{Json, extract::State, response::IntoResponse};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as b64};
 use futures::{FutureExt, StreamExt, TryFutureExt, future::try_join};
+use http::StatusCode;
 use reqwest::header::{CONTENT_TYPE, HeaderValue};
 use ruma::{
 	Mxc, OwnedMxcUri, OwnedRoomId, OwnedUserId, ServerName, UserId,
@@ -22,6 +29,7 @@ use tuwunel_core::{
 	debug::INFO_SPAN_LEVEL,
 	debug_info, debug_warn, err, info, is_not_equal_to,
 	itertools::Itertools,
+	jwt::{Algorithm, DecodingKey, Validation, decode, decode_header},
 	utils,
 	utils::{
 		OptionExt,
@@ -72,6 +80,130 @@ struct GrantCookie<'a> {
 }
 
 static GRANT_SESSION_COOKIE: &str = "tuwunel_grant_session";
+static APPLE_ISSUER: &str = "https://appleid.apple.com";
+static APPLE_JWKS_URL: &str = "https://appleid.apple.com/auth/keys";
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NativeAppleLoginRequest {
+	identity_token: String,
+	authorization_code: Option<String>,
+	nonce: Option<String>,
+	provider_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeAppleLoginResponse {
+	login_token: String,
+	expires_in_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppleJwks {
+	keys: Vec<AppleJwk>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppleJwk {
+	alg: Option<String>,
+	e: String,
+	kid: String,
+	kty: String,
+	n: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppleIdTokenClaims {
+	iss: String,
+	aud: String,
+	#[expect(
+		dead_code,
+		reason = "jsonwebtoken validates this registered claim"
+	)]
+	exp: u64,
+	sub: String,
+	email: Option<String>,
+	name: Option<String>,
+	given_name: Option<String>,
+	family_name: Option<String>,
+	nonce: Option<String>,
+}
+
+fn apple_native_audiences(provider: &Provider) -> BTreeSet<String> {
+	let mut audiences = provider.native_client_ids.clone();
+	audiences.insert(provider.client_id.clone());
+	audiences
+}
+
+fn sha256_hex(value: &str) -> String {
+	let digest = sha256::hash(value);
+	let mut output = String::new();
+
+	for byte in digest {
+		write!(&mut output, "{byte:02x}").expect("write to string");
+	}
+
+	output
+}
+
+fn apple_userinfo_from_validated_claims(
+	provider: &Provider,
+	claims: AppleIdTokenClaims,
+	raw_nonce: Option<&str>,
+) -> Result<UserInfo> {
+	if claims.iss != APPLE_ISSUER {
+		return Err!(Request(Unauthorized("Apple id_token issuer is not trusted.")));
+	}
+
+	if !apple_native_audiences(provider).contains(&claims.aud) {
+		return Err!(Request(Unauthorized(
+			"Apple id_token audience is not configured for this provider."
+		)));
+	}
+
+	if let Some(raw_nonce) = raw_nonce {
+		let expected_nonce = sha256_hex(raw_nonce);
+		if claims.nonce.as_deref() != Some(expected_nonce.as_str()) {
+			return Err!(Request(Unauthorized("Apple id_token nonce does not match.")));
+		}
+	}
+
+	Ok(apple_userinfo_from_claim_values(
+		claims.sub,
+		claims.email,
+		claims.name,
+		claims.given_name,
+		claims.family_name,
+	))
+}
+
+fn apple_userinfo_from_claim_values(
+	sub: String,
+	email: Option<String>,
+	name: Option<String>,
+	given_name: Option<String>,
+	family_name: Option<String>,
+) -> UserInfo {
+	let preferred_username = email
+		.as_deref()
+		.and_then(|value| value.split_once('@'))
+		.map(at!(0))
+		.map(ToOwned::to_owned);
+
+	UserInfo {
+		sub,
+		preferred_username: preferred_username.clone(),
+		username: preferred_username,
+		nickname: None,
+		name,
+		given_name,
+		family_name,
+		email,
+		avatar_url: None,
+		picture: None,
+	}
+}
 
 fn decode_apple_userinfo_from_id_token(session: &Session) -> Result<UserInfo> {
 	let id_token = session.id_token.as_deref().ok_or_else(|| {
@@ -102,33 +234,142 @@ fn decode_apple_userinfo_from_id_token(session: &Session) -> Result<UserInfo> {
 		.and_then(JsonValue::as_str)
 		.map(ToOwned::to_owned);
 
-	let preferred_username = email
-		.as_deref()
-		.and_then(|value| value.split_once('@'))
-		.map(at!(0))
-		.map(ToOwned::to_owned);
-
-	Ok(UserInfo {
-		sub: sub.to_owned(),
-		preferred_username: preferred_username.clone(),
-		username: preferred_username,
-		nickname: None,
-		name: payload
+	Ok(apple_userinfo_from_claim_values(
+		sub.to_owned(),
+		email,
+		payload
 			.get("name")
 			.and_then(JsonValue::as_str)
 			.map(ToOwned::to_owned),
-		given_name: payload
+		payload
 			.get("given_name")
 			.and_then(JsonValue::as_str)
 			.map(ToOwned::to_owned),
-		family_name: payload
+		payload
 			.get("family_name")
 			.and_then(JsonValue::as_str)
 			.map(ToOwned::to_owned),
-		email,
-		avatar_url: None,
-		picture: None,
-	})
+	))
+}
+
+fn apple_decoding_key_for_token(token: &str, jwks: &AppleJwks) -> Result<DecodingKey> {
+	let header = decode_header(token)
+		.map_err(|e| err!(Request(Unauthorized("Apple id_token header is invalid: {e}"))))?;
+
+	if header.alg != Algorithm::RS256 {
+		return Err!(Request(Unauthorized("Apple id_token uses unsupported signing algorithm.")));
+	}
+
+	let kid = header
+		.kid
+		.as_deref()
+		.ok_or_else(|| err!(Request(Unauthorized("Apple id_token missing key id."))))?;
+
+	let jwk = jwks
+		.keys
+		.iter()
+		.find(|key| key.kid == kid)
+		.ok_or_else(|| err!(Request(Unauthorized("Apple id_token key id is not trusted."))))?;
+
+	if jwk.kty != "RSA"
+		|| jwk
+			.alg
+			.as_deref()
+			.is_some_and(|alg| alg != "RS256")
+	{
+		return Err!(Request(Unauthorized("Apple id_token key is not an RSA signing key.")));
+	}
+
+	DecodingKey::from_rsa_components(&jwk.n, &jwk.e)
+		.map_err(|e| err!(Request(Unauthorized("Apple id_token signing key is invalid: {e}"))))
+}
+
+fn apple_id_token_validation(provider: &Provider) -> Validation {
+	let audiences = apple_native_audiences(provider)
+		.into_iter()
+		.collect::<Vec<_>>();
+	let issuers = [APPLE_ISSUER.to_owned()];
+	let required_spec_claims: Vec<_> = ["iss", "aud", "exp", "sub"].into();
+	let mut validation = Validation::new(Algorithm::RS256);
+
+	validation.set_audience(&audiences);
+	validation.set_issuer(&issuers);
+	validation.set_required_spec_claims(&required_spec_claims);
+
+	validation
+}
+
+async fn fetch_apple_jwks(services: &Services) -> Result<AppleJwks> {
+	services
+		.client
+		.oauth
+		.get(APPLE_JWKS_URL)
+		.send()
+		.await?
+		.error_for_status()?
+		.json()
+		.await
+		.map_err(Into::into)
+}
+
+async fn validate_apple_identity_token(
+	services: &Services,
+	provider: &Provider,
+	identity_token: &str,
+) -> Result<AppleIdTokenClaims> {
+	let jwks = fetch_apple_jwks(services).await?;
+	let decoding_key = apple_decoding_key_for_token(identity_token, &jwks)?;
+	let validation = apple_id_token_validation(provider);
+
+	decode::<AppleIdTokenClaims>(identity_token, &decoding_key, &validation)
+		.map(|decoded| decoded.claims)
+		.map_err(|e| err!(Request(Unauthorized("Apple id_token is invalid: {e}"))))
+}
+
+#[tracing::instrument(name = "native_apple_login", level = "info", skip_all)]
+pub(crate) async fn native_apple_login_route(
+	State(services): State<crate::State>,
+	Json(body): Json<NativeAppleLoginRequest>,
+) -> Result<impl IntoResponse> {
+	let provider = services
+		.oauth
+		.providers
+		.get(body.provider_id.as_deref().unwrap_or("appleoidc"))
+		.await?;
+
+	if provider.brand != "appleoidc" {
+		return Err!(Request(InvalidParam(
+			"Native Apple login requires an AppleOIDC identity provider."
+		)));
+	}
+
+	let claims =
+		validate_apple_identity_token(&services, &provider, &body.identity_token).await?;
+	let userinfo =
+		apple_userinfo_from_validated_claims(&provider, claims, body.nonce.as_deref())?;
+	let sess_id = utils::random_string(SESSION_ID_LENGTH);
+	let session = Session {
+		idp_id: Some(provider.id().to_owned()),
+		sess_id: Some(sess_id),
+		id_token: Some(body.identity_token),
+		..Default::default()
+	};
+
+	if let Some(authorization_code) = body.authorization_code.as_deref() {
+		debug_info!(
+			code_len = authorization_code.len(),
+			provider = provider.id(),
+			"Received native Apple authorization code alongside id_token.",
+		);
+	}
+
+	let (user_id, _) = complete_sso_session(&services, &provider, session, userinfo).await?;
+	let login_token = utils::random_string(TOKEN_LENGTH);
+	let expires_in_ms = services
+		.users
+		.create_login_token(&user_id, &login_token);
+
+	Ok((StatusCode::OK, Json(NativeAppleLoginResponse { login_token, expires_in_ms })))
 }
 
 /// # `GET /_matrix/client/v3/login/sso/redirect`
@@ -416,50 +657,8 @@ pub(crate) async fn sso_callback_route(
 			})
 		})?;
 
-	let unique_id = unique_id_sub((&provider, &userinfo.sub))?;
-
-	let (old_user_id, old_sess_id) = existing_identity_session(&services, &unique_id).await?;
-
-	let session = Session {
-		user_info: Some(userinfo.clone()),
-		..session
-	};
-
-	let user_id = match (session.user_id, old_user_id) {
-		| (Some(user_id), ..) | (None, Some(user_id)) => user_id,
-		| (None, None) => decide_user_id(&services, &provider, &userinfo, &unique_id).await?,
-	};
-
-	let session = Session {
-		user_id: Some(user_id.clone()),
-		..session
-	};
-
-	if !services.users.exists(&user_id).await {
-		if !provider.registration {
-			return Err!(Request(Forbidden("Registration from this provider is disabled")));
-		}
-
-		register_user(&services, &provider, &session, &userinfo, &user_id).await?;
-	}
-
-	services.oauth.sessions.put(&session).await;
-	if services
-		.users
-		.maybe_repair_legacy_sso_origin(&user_id)
-		.await
-	{
-		info!("Repaired legacy SSO-origin metadata for {user_id}");
-	}
-
-	if let Some(old_sess_id) = old_sess_id
-		.as_deref()
-		.filter(is_not_equal_to!(&sess_id))
-	{
-		services.oauth.sessions.delete(old_sess_id).await;
-	}
-
-	ensure_sso_account_active(&services, &user_id).await?;
+	let (user_id, session) =
+		complete_sso_session(&services, &provider, session, userinfo).await?;
 
 	let cookie = Cookie::build((GRANT_SESSION_COOKIE, EMPTY))
 		.removal()
@@ -605,20 +804,70 @@ fn finalize_login_redirect(
 	Ok(location)
 }
 
-async fn ensure_sso_account_active(services: &Services, user_id: &UserId) -> Result {
+async fn complete_sso_session(
+	services: &Services,
+	provider: &Provider,
+	mut session: Session,
+	userinfo: UserInfo,
+) -> Result<(OwnedUserId, Session)> {
+	let sess_id = session
+		.sess_id
+		.clone()
+		.ok_or_else(|| err!(Request(InvalidParam("Missing SSO session id."))))?;
+	let unique_id = unique_id_sub((provider, &userinfo.sub))?;
+
+	let (old_user_id, old_sess_id) = existing_identity_session(services, &unique_id).await?;
+
+	session.user_info = Some(userinfo.clone());
+
+	// Keep the user_id from the old session as best as possible.
+	let user_id = match (session.user_id.take(), old_user_id) {
+		| (Some(user_id), ..) | (None, Some(user_id)) => user_id,
+		| (None, None) => decide_user_id(services, provider, &userinfo, &unique_id).await?,
+	};
+
+	session.user_id = Some(user_id.clone());
+
+	// Attempt to register a non-existing user.
+	if !services.users.exists(&user_id).await {
+		if !provider.registration {
+			return Err!(Request(Forbidden("Registration from this provider is disabled")));
+		}
+
+		register_user(services, provider, &session, &userinfo, &user_id).await?;
+	}
+
+	// Commit the updated session.
+	services.oauth.sessions.put(&session).await;
 	if services
 		.users
-		.maybe_reactivate_deactivated_sso(user_id)
+		.maybe_repair_legacy_sso_origin(&user_id)
+		.await
+	{
+		info!("Repaired legacy SSO-origin metadata for {user_id}");
+	}
+
+	// Delete any old session.
+	if let Some(old_sess_id) = old_sess_id
+		.as_deref()
+		.filter(is_not_equal_to!(&sess_id))
+	{
+		services.oauth.sessions.delete(old_sess_id).await;
+	}
+
+	if services
+		.users
+		.maybe_reactivate_deactivated_sso(&user_id)
 		.await?
 	{
 		info!("Reactivated deactivated SSO account {user_id}");
 	}
 
-	if !services.users.is_active_local(user_id).await {
+	if !services.users.is_active_local(&user_id).await {
 		return Err!(Request(UserDeactivated("This user has been deactivated.")));
 	}
 
-	Ok(())
+	Ok((user_id, session))
 }
 
 async fn handle_uiaa(
@@ -952,9 +1201,63 @@ fn parse_user_id(server_name: &ServerName, username: &str) -> Result<OwnedUserId
 
 #[cfg(test)]
 mod tests {
+	use std::collections::{BTreeMap, BTreeSet};
+
 	use serde_json::json;
 
 	use super::*;
+
+	fn apple_provider_with_native_clients(native_client_ids: &[&str]) -> Provider {
+		Provider {
+			brand: "appleoidc".to_owned(),
+			client_id: "chat.mindroom.matrix.apple".to_owned(),
+			client_secret: None,
+			client_secret_file: None,
+			issuer_url: Some(
+				"https://appleid.apple.com"
+					.parse()
+					.expect("issuer URL"),
+			),
+			callback_url: None,
+			default: false,
+			name: Some("Apple".to_owned()),
+			icon: None,
+			scope: BTreeSet::new(),
+			userid_claims: BTreeSet::new(),
+			trusted: false,
+			unique_id_fallbacks: true,
+			registration: true,
+			base_path: None,
+			discovery_url: None,
+			authorization_url: None,
+			token_url: None,
+			revocation_url: None,
+			introspection_url: None,
+			userinfo_url: None,
+			discovery: true,
+			grant_session_duration: Some(300),
+			check_cookie: true,
+			extra_authorization_parameters: BTreeMap::new(),
+			native_client_ids: native_client_ids
+				.iter()
+				.map(ToString::to_string)
+				.collect::<BTreeSet<_>>(),
+		}
+	}
+
+	fn apple_claims(audience: &str) -> AppleIdTokenClaims {
+		AppleIdTokenClaims {
+			iss: "https://appleid.apple.com".to_owned(),
+			aud: audience.to_owned(),
+			exp: 4_102_444_800,
+			sub: "apple-user-123".to_owned(),
+			email: Some("alice@example.com".to_owned()),
+			name: None,
+			given_name: None,
+			family_name: None,
+			nonce: Some(sha256_hex("native-nonce")),
+		}
+	}
 
 	fn apple_session_with_claims(claims: &serde_json::Value) -> Session {
 		let payload = b64.encode(serde_json::to_vec(claims).expect("serialize claims"));
@@ -1023,5 +1326,66 @@ mod tests {
 
 		let message = format!("{error}");
 		assert!(message.contains("invalid base64"), "unexpected error: {message}");
+	}
+
+	#[test]
+	fn native_apple_claims_accept_configured_bundle_audience() {
+		let provider = apple_provider_with_native_clients(&["chat.mindroom.app"]);
+		let claims = apple_claims("chat.mindroom.app");
+
+		let userinfo =
+			apple_userinfo_from_validated_claims(&provider, claims, Some("native-nonce"))
+				.expect("configured native bundle audience should be accepted");
+
+		assert_eq!(userinfo.sub, "apple-user-123");
+		assert_eq!(userinfo.email.as_deref(), Some("alice@example.com"));
+		assert_eq!(userinfo.preferred_username.as_deref(), Some("alice"));
+	}
+
+	#[test]
+	fn native_apple_claims_accept_web_services_audience_for_compatibility() {
+		let provider = apple_provider_with_native_clients(&[]);
+		let claims = apple_claims("chat.mindroom.matrix.apple");
+
+		apple_userinfo_from_validated_claims(&provider, claims, Some("native-nonce"))
+			.expect("provider client_id audience should remain accepted");
+	}
+
+	#[test]
+	fn native_apple_claims_reject_unconfigured_audience() {
+		let provider = apple_provider_with_native_clients(&[]);
+		let claims = apple_claims("chat.mindroom.app");
+
+		let error = apple_userinfo_from_validated_claims(&provider, claims, Some("native-nonce"))
+			.expect_err("unconfigured native bundle audience should be rejected");
+
+		let message = format!("{error}");
+		assert!(message.contains("audience"), "unexpected error: {message}");
+	}
+
+	#[test]
+	fn native_apple_claims_reject_wrong_issuer() {
+		let provider = apple_provider_with_native_clients(&["chat.mindroom.app"]);
+		let mut claims = apple_claims("chat.mindroom.app");
+		claims.iss = "https://example.com".to_owned();
+
+		let error = apple_userinfo_from_validated_claims(&provider, claims, Some("native-nonce"))
+			.expect_err("wrong issuer should be rejected");
+
+		let message = format!("{error}");
+		assert!(message.contains("issuer"), "unexpected error: {message}");
+	}
+
+	#[test]
+	fn native_apple_claims_reject_nonce_mismatch() {
+		let provider = apple_provider_with_native_clients(&["chat.mindroom.app"]);
+		let claims = apple_claims("chat.mindroom.app");
+
+		let error =
+			apple_userinfo_from_validated_claims(&provider, claims, Some("different-nonce"))
+				.expect_err("nonce mismatch should be rejected");
+
+		let message = format!("{error}");
+		assert!(message.contains("nonce"), "unexpected error: {message}");
 	}
 }
