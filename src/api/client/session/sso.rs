@@ -230,8 +230,17 @@ fn apple_userinfo_from_claim_values(
 	}
 }
 
-fn grant_session_cookie_path() -> &'static str {
-	GRANT_SESSION_COOKIE_PATH
+fn grant_session_cookie_path(callback_url: Option<&Url>) -> &str {
+	let Some(callback_url) = callback_url else {
+		return "/";
+	};
+
+	let callback_path = callback_url.path();
+	if callback_path.starts_with(GRANT_SESSION_COOKIE_PATH) {
+		return GRANT_SESSION_COOKIE_PATH;
+	}
+
+	callback_path
 }
 
 fn decode_apple_userinfo_from_id_token(session: &Session) -> Result<UserInfo> {
@@ -647,7 +656,7 @@ async fn handle_sso_login(
 		.expect("std::time::Duration to time::Duration conversion failure");
 
 	let cookie = Cookie::build((GRANT_SESSION_COOKIE, serde_html_form::to_string(&cookie_val)?))
-		.path(grant_session_cookie_path())
+		.path(grant_session_cookie_path(provider.callback_url.as_ref()))
 		.max_age(cookie_max_age)
 		.same_site(SameSite::None)
 		.secure(true)
@@ -830,6 +839,7 @@ pub(crate) async fn sso_callback_route(
 		complete_sso_session(&services, &provider, session, userinfo).await?;
 
 	let cookie = Cookie::build((GRANT_SESSION_COOKIE, EMPTY))
+		.path(grant_session_cookie_path(provider.callback_url.as_ref()))
 		.removal()
 		.build()
 		.to_string()
@@ -1432,7 +1442,34 @@ mod tests {
 
 	#[test]
 	fn grant_session_cookie_path_covers_matrix_client_callbacks() {
-		assert_eq!(grant_session_cookie_path(), "/_matrix/client/");
+		let stable_callback =
+			Url::parse("https://matrix.example/_matrix/client/v3/login/sso/callback/provider")
+				.expect("valid URL");
+		let unstable_callback = Url::parse(
+			"https://matrix.example/_matrix/client/unstable/login/sso/callback/provider",
+		)
+		.expect("valid URL");
+
+		assert_eq!(
+			grant_session_cookie_path(Some(&stable_callback)),
+			"/_matrix/client/"
+		);
+		assert_eq!(
+			grant_session_cookie_path(Some(&unstable_callback)),
+			"/_matrix/client/"
+		);
+	}
+
+	#[test]
+	fn grant_session_cookie_path_preserves_custom_callback_paths() {
+		let callback =
+			Url::parse("https://matrix.example/custom/sso/callback").expect("valid URL");
+
+		assert_eq!(
+			grant_session_cookie_path(Some(&callback)),
+			"/custom/sso/callback"
+		);
+		assert_eq!(grant_session_cookie_path(None), "/");
 	}
 
 	#[test]
