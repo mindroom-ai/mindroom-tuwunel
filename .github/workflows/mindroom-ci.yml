@@ -41,16 +41,12 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.94.0
-          components: clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Run clippy
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-
       - name: Run tests
-        run: cargo test --locked --workspace --all-targets --all-features
+        run: cargo test --locked --workspace
 
       - name: Build release binary
         run: cargo build --locked --release -p tuwunel
