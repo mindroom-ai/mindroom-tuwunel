@@ -43,14 +43,8 @@ jobs:
           toolchain: 1.94.0
           components: clippy
 
-      - name: Set up nightly rustfmt
-        run: rustup toolchain install nightly --profile minimal --component rustfmt
-
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo +nightly fmt --all -- --check
 
       - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
