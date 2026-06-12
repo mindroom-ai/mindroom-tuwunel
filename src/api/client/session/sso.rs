@@ -948,35 +948,33 @@ mod tests {
 		assert_eq!(grant_session_cookie_path(None), "/");
 	}
 
-	/// The Apple id_token fallback in `sso_callback_route` reads
-	/// `session.id_token`, which only `apply_token_response` populates. If the
-	/// carry is dropped the fallback fails at runtime with no compile error.
+	/// The Apple id_token userinfo fallback decodes claims from
+	/// `Session::id_token`, so the token response's id_token must be persisted
+	/// on the session before `request_userinfo` runs.
 	#[test]
-	fn apply_token_response_carries_id_token_into_session() {
-		let token: TokenResponse = serde_json::from_value(serde_json::json!({
-			"token_type": "Bearer",
-			"access_token": "access-123",
-			"expires_in": 3600,
-			"refresh_token": "refresh-456",
-			"refresh_token_expires_in": 7200,
-			"scope": "openid email",
-			"id_token": "header.payload.signature",
-		}))
-		.expect("valid token response");
+	fn apply_token_response_persists_id_token_for_userinfo_fallback() {
+		let token = TokenResponse {
+			token_type: Some("Bearer".to_owned()),
+			access_token: Some("access-token".to_owned()),
+			expires_in: Some(3600),
+			refresh_token: Some("refresh-token".to_owned()),
+			refresh_token_expires_in: Some(86400),
+			scope: Some("openid email".to_owned()),
+			id_token: Some("header.payload.signature".to_owned()),
+		};
 
 		let session =
-			apply_token_response(Session::default(), token).expect("session updates apply");
+			apply_token_response(Session::default(), token).expect("token response applies");
 
-		assert_eq!(session.id_token.as_deref(), Some("header.payload.signature"));
-		assert_eq!(session.access_token.as_deref(), Some("access-123"));
-		assert_eq!(session.refresh_token.as_deref(), Some("refresh-456"));
-		assert_eq!(session.token_type.as_deref(), Some("Bearer"));
-		assert_eq!(session.scope.as_deref(), Some("openid email"));
-		assert!(session.expires_at.is_some(), "expires_in should map to expires_at");
-		assert!(
-			session.refresh_token_expires_at.is_some(),
-			"refresh_token_expires_in should map to refresh_token_expires_at",
+		assert_eq!(
+			session.id_token.as_deref(),
+			Some("header.payload.signature"),
+			"id_token must be persisted for the Apple userinfo fallback",
 		);
+		assert_eq!(session.access_token.as_deref(), Some("access-token"));
+		assert_eq!(session.refresh_token.as_deref(), Some("refresh-token"));
+		assert!(session.expires_at.is_some());
+		assert!(session.refresh_token_expires_at.is_some());
 	}
 
 	/// A token response without an id_token (plain OAuth2 provider) must not

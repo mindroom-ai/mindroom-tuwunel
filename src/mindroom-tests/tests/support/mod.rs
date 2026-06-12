@@ -50,6 +50,23 @@ impl Harness {
 		})
 	}
 
+	/// Serve an arbitrary axum router on an ephemeral local port, for tests
+	/// that need a richer identity-provider mock than `discovery_server`.
+	pub(crate) fn mock_server(&self, app: Router) -> Result<MockServer> {
+		self.runtime.block_on(async move {
+			let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+			let addr = listener.local_addr()?;
+			let handle = tokio::spawn(async move {
+				let _: std::io::Result<()> = axum::serve(listener, app).await;
+			});
+
+			Ok(MockServer {
+				base_url: format!("http://{addr}"),
+				handle,
+			})
+		})
+	}
+
 	pub(crate) fn with_services<F, Fut>(&self, test: F) -> Result
 	where
 		F: FnOnce(Arc<Services>) -> Fut,
@@ -71,5 +88,10 @@ impl Harness {
 
 pub(crate) struct DiscoveryServer {
 	pub(crate) url: String,
+	pub(crate) handle: tokio::task::JoinHandle<()>,
+}
+
+pub(crate) struct MockServer {
+	pub(crate) base_url: String,
 	pub(crate) handle: tokio::task::JoinHandle<()>,
 }
