@@ -947,4 +947,50 @@ mod tests {
 		assert_eq!(grant_session_cookie_path(Some(&callback)), "/custom/sso/callback");
 		assert_eq!(grant_session_cookie_path(None), "/");
 	}
+
+	/// The Apple id_token fallback in `sso_callback_route` reads
+	/// `session.id_token`, which only `apply_token_response` populates. If the
+	/// carry is dropped the fallback fails at runtime with no compile error.
+	#[test]
+	fn apply_token_response_carries_id_token_into_session() {
+		let token: TokenResponse = serde_json::from_value(serde_json::json!({
+			"token_type": "Bearer",
+			"access_token": "access-123",
+			"expires_in": 3600,
+			"refresh_token": "refresh-456",
+			"refresh_token_expires_in": 7200,
+			"scope": "openid email",
+			"id_token": "header.payload.signature",
+		}))
+		.expect("valid token response");
+
+		let session =
+			apply_token_response(Session::default(), token).expect("session updates apply");
+
+		assert_eq!(session.id_token.as_deref(), Some("header.payload.signature"));
+		assert_eq!(session.access_token.as_deref(), Some("access-123"));
+		assert_eq!(session.refresh_token.as_deref(), Some("refresh-456"));
+		assert_eq!(session.token_type.as_deref(), Some("Bearer"));
+		assert_eq!(session.scope.as_deref(), Some("openid email"));
+		assert!(session.expires_at.is_some(), "expires_in should map to expires_at");
+		assert!(
+			session.refresh_token_expires_at.is_some(),
+			"refresh_token_expires_in should map to refresh_token_expires_at",
+		);
+	}
+
+	/// A token response without an id_token (plain OAuth2 provider) must not
+	/// invent one.
+	#[test]
+	fn apply_token_response_leaves_id_token_empty_when_absent() {
+		let token: TokenResponse = serde_json::from_value(serde_json::json!({
+			"access_token": "access-123",
+		}))
+		.expect("valid token response");
+
+		let session =
+			apply_token_response(Session::default(), token).expect("session updates apply");
+
+		assert_eq!(session.id_token, None);
+	}
 }
