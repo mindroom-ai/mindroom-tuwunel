@@ -1145,6 +1145,22 @@ pub struct Config {
 	#[serde(default = "default_default_room_version")]
 	pub default_room_version: RoomVersionId,
 
+	/// Default power-level overrides applied when this homeserver creates a new
+	/// room.
+	///
+	/// This uses the same top-level shape as the client `/createRoom`
+	/// `power_level_content_override` parameter and is merged before any
+	/// per-request override from the client. It only affects newly created
+	/// rooms and does not retroactively change existing rooms.
+	///
+	/// Example:
+	/// ```toml
+	/// [global.default_power_level_content_override]
+	/// users_default = 50
+	/// ```
+	#[serde(default)]
+	pub default_power_level_content_override: Option<serde_json::Value>,
+
 	// external structure; separate section
 	#[serde(default)]
 	pub well_known: WellKnownConfig,
