@@ -187,7 +187,7 @@ async fn paginate_relations_with_filter(
 	let fetch = |depth: usize, count: PduCount| {
 		services
 			.pdu_metadata
-			.get_relations(shortroomid, count, from, dir, Some(sender_user))
+			.get_relations(shortroomid, count, from, dir, Some(sender_user), None)
 			.map(move |(count, pdu)| (depth, count, pdu))
 			.ready_filter(|(_, count, _)| matches!(count, PduCount::Normal(_)))
 			.boxed()

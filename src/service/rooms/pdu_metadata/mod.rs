@@ -97,7 +97,7 @@ pub async fn has_relation(
 	rel_type: Option<&RelationType>,
 	key: Option<&str>,
 ) -> bool {
-	self.get_relations(target.shortroomid, target.count, None, Direction::Forward, None)
+	self.get_relations(target.shortroomid, target.count, None, Direction::Forward, None, None)
 		.ready_filter(|(_, pdu)| user_id.is_none_or(is_equal_to!(pdu.sender())))
 		.ready_filter(|(_, pdu)| {
 			debug_assert!(
@@ -128,6 +128,7 @@ pub fn get_relations<'a>(
 	from: Option<PduCount>,
 	dir: Direction,
 	user_id: Option<&'a UserId>,
+	scan_limit: Option<usize>,
 ) -> impl Stream<Item = (PduCount, Pdu)> + Send + '_ {
 	let target = target.to_be_bytes();
 	let from = from
@@ -151,6 +152,11 @@ pub fn get_relations<'a>(
 	}
 	.ignore_err()
 	.ready_take_while(move |key| key.starts_with(&target))
+	// Bound the index-key walk itself, not the PDUs it yields: entries whose
+	// PDU was purged (or that a client minted pointing at this target from
+	// another room) resolve to a fetch miss below and would otherwise let an
+	// unbounded number of dangling keys be scanned per served event.
+	.take(scan_limit.unwrap_or(usize::MAX))
 	.map(|to_from| u64_from_u8(&to_from[8..16]))
 	.map(PduCount::from_unsigned)
 	.map(move |count| (user_id, shortroomid, count))
@@ -203,16 +209,17 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 	pdu
 }
 
-/// Bound on relation PDUs fetched and inspected per served event while
-/// looking for the newest same-sender `m.replace`. The relation index
-/// carries no rel_type, so each candidate costs a PDU fetch and parse; an
-/// event whose relations are dominated by newer non-replace entries (a
-/// heavily-replied thread root, a heavily-reacted message) must not turn
-/// every history page into an O(relations) scan. MindRoom edits arrive
-/// directly after the original and the purge keeps exactly one per
-/// (target, sender), so the kept edit sits within the first few entries of
-/// a newest-first walk in practice; past this bound we serve no bundle,
-/// which is exactly the pre-bundling behavior.
+/// Bound on relation-index entries walked per served event while looking for
+/// the newest same-sender `m.replace`. This caps the index-key scan itself,
+/// not the PDUs it yields: the index carries no rel_type and each key costs a
+/// PDU point-lookup, and dangling keys (a purged edit's entry, which the purge
+/// intentionally leaves behind, or one a client minted by relating an event in
+/// another room to this target) yield nothing but must still be bounded — a
+/// per-served-event O(relations-ever-indexed) walk would otherwise be a hot
+/// read-path DoS. MindRoom edits arrive directly after the original and the
+/// purge keeps exactly one per (target, sender), so the kept edit sits within
+/// the first few entries of a newest-first walk in practice; past this bound
+/// we serve no bundle, which is exactly the pre-bundling behavior.
 const REPLACEMENT_SCAN_LIMIT: usize = 100;
 
 /// MSC2676 read-time bundling for history endpoints: attach the newest
@@ -256,9 +263,10 @@ pub async fn bundle_replacement(&self, sender_user: &UserId, mut pdu: Pdu) -> Pd
 				None,
 				Direction::Backward,
 				Some(sender_user),
+				Some(REPLACEMENT_SCAN_LIMIT),
 			)
-			.take(REPLACEMENT_SCAN_LIMIT)
 			.ready_filter(|(_, related)| related.sender() == pdu.sender())
+			.ready_filter(|(_, related)| !related.is_redacted())
 			.ready_filter(|(_, related)| {
 				related
 					.get_content::<ExtractRelatesToInfo>()

@@ -44,6 +44,9 @@ mod tests {
 			redaction_case(&router, &room_id).await;
 			visibility_case(&router).await;
 			messages_cases(&services, &router, &room_id).await?;
+			// Runs last: it deletes PDUs that are DAG forward-extremities, which
+			// would break the prev_event resolution of any later send.
+			scan_limit_case(&services, &router, &room_id).await?;
 
 			Ok(())
 		})
@@ -124,6 +127,67 @@ mod tests {
 		let chunk = messages_chunk(router, &room, ALICE_TOKEN).await;
 		let bundle = replace_bundle(find_event(&chunk, &msg1));
 		assert_full_edit_bundle(bundle, &edit2, room_id, "draft two");
+
+		Ok(())
+	}
+
+	/// The candidate walk is bounded by the number of relation-index entries
+	/// examined, not the PDUs it yields. Dangling entries (a purged edit's
+	/// index row, or one a client minted from another room) must consume that
+	/// budget too, or a served event with many dangling newer relations would
+	/// scan the whole index on every history read. Here an edit sits behind
+	/// more than the scan limit of dangling newer entries and is therefore no
+	/// longer found — the safe degradation to no bundle. (Before the bound was
+	/// moved onto the key walk, the dangling entries yielded nothing, the
+	/// output cap never tripped, and the edit was still served.)
+	async fn scan_limit_case(services: &Arc<Services>, router: &Router, room_id: &str) -> Result {
+		// Keep in sync with REPLACEMENT_SCAN_LIMIT in pdu_metadata.
+		const SCAN_LIMIT: usize = 100;
+
+		let room = enc(room_id);
+
+		let msg = send_text(router, &room, ALICE_TOKEN, "s0", "thinking…").await;
+		// The edit still exists after this case; only the bounded read gives up.
+		let _edit = send_edit(router, &room, ALICE_TOKEN, "s0e", &msg, "buried edit").await;
+
+		// Reactions on the original, all newer than the edit. Send them all
+		// first (each builds on the previous as a prev_event), then delete
+		// their PDU rows so their relation-index entries dangle. More than the
+		// scan limit of them sit between the newest-first walk and the edit.
+		let mut reactions = Vec::new();
+		for i in 0..=SCAN_LIMIT {
+			reactions.push(
+				send_typed(
+					router,
+					&room,
+					ALICE_TOKEN,
+					"m.reaction",
+					&format!("s0r{i}"),
+					json!({
+						"m.relates_to": {
+							"rel_type": "m.annotation",
+							"event_id": msg,
+							"key": format!("👍{i}"),
+						},
+					}),
+				)
+				.await,
+			);
+		}
+		for reaction in &reactions {
+			purge_event_rows(services, reaction).await?;
+		}
+
+		let chunk = messages_chunk(router, &room, ALICE_TOKEN).await;
+		let msg_event = find_event(&chunk, &msg);
+		assert!(
+			msg_event["unsigned"]
+				.get("m.relations")
+				.and_then(|relations| relations.get("m.replace"))
+				.is_none(),
+			"an edit behind more than the scan limit of dangling entries must not be found \
+			 (dangling keys must consume the scan budget): {msg_event}"
+		);
 
 		Ok(())
 	}
@@ -504,10 +568,22 @@ mod tests {
 		txn_id: &str,
 		content: JsonValue,
 	) -> String {
+		send_typed(router, room, token, "m.room.message", txn_id, content).await
+	}
+
+	/// Send an event of an arbitrary type; returns its event_id.
+	async fn send_typed(
+		router: &Router,
+		room: &str,
+		token: &str,
+		event_type: &str,
+		txn_id: &str,
+		content: JsonValue,
+	) -> String {
 		let body = request(
 			router,
 			"PUT",
-			&format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/{txn_id}"),
+			&format!("/_matrix/client/v3/rooms/{room}/send/{event_type}/{txn_id}"),
 			token,
 			Some(content),
 		)
