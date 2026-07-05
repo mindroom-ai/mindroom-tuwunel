@@ -143,6 +143,13 @@ Behavior:
 - Selects the same edit the purge keeps (newest by PDU stream order per
   target and sender) and skips relation-index entries whose edit PDU was
   purged, falling through to the newest surviving edit.
+- The bundled edit is visibility-checked for the requesting user like any
+  directly served event; an edit the requester may not see (for example one
+  sent after they left a history_visibility=joined room) is not bundled.
+- The newest-first candidate walk is capped at 100 fetched relation PDUs
+  per served event so heavily-replied or heavily-reacted targets cannot
+  turn history pages into O(relations) scans; past the cap no bundle is
+  served (the pre-bundling behavior).
 - `/sync` is unchanged: sync compaction already delivers the surviving edit
   event in the timeline, so no bundle is added there.
 

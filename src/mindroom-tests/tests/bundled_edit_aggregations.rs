@@ -37,8 +37,12 @@ mod tests {
 		harness.with_services(|services| async move {
 			let (router, room_id) = setup_room(&services).await?;
 
-			relations_cases(&router, &room_id).await;
+			relations_and_threads_cases(&router, &room_id).await;
 			event_and_context_cases(&router, &room_id).await;
+			search_case(&router, &room_id).await;
+			encrypted_case(&router, &room_id).await;
+			redaction_case(&router, &room_id).await;
+			visibility_case(&router).await;
 			messages_cases(&services, &router, &room_id).await?;
 
 			Ok(())
@@ -68,9 +72,21 @@ mod tests {
 		let msg3 = send_text(router, &room, ALICE_TOKEN, "m7", "alice original").await;
 		let _bob_edit = send_edit(router, &room, BOB_TOKEN, "m8", &msg3, "bob takeover").await;
 
-		let chunk = messages_chunk(router, &room).await;
+		let chunk = messages_chunk(router, &room, ALICE_TOKEN).await;
 		let bundle = replace_bundle(find_event(&chunk, &msg1));
 		assert_full_edit_bundle(bundle, &edit3, room_id, "final answer");
+
+		// A different requester gets the same bundle, but with the sender's
+		// local-echo transaction_id stripped from the bundled edit.
+		let bob_chunk = messages_chunk(router, &room, BOB_TOKEN).await;
+		let bob_bundle = replace_bundle(find_event(&bob_chunk, &msg1));
+		assert_eq!(bob_bundle["event_id"], edit3, "bob sees the same latest edit");
+		assert!(
+			bob_bundle["unsigned"]
+				.get("transaction_id")
+				.is_none(),
+			"transaction_id must be stripped for non-senders: {bob_bundle}"
+		);
 
 		let msg2_event = find_event(&chunk, &msg2);
 		assert!(
@@ -105,7 +121,7 @@ mod tests {
 			purge_event_rows(services, event_id).await?;
 		}
 
-		let chunk = messages_chunk(router, &room).await;
+		let chunk = messages_chunk(router, &room, ALICE_TOKEN).await;
 		let bundle = replace_bundle(find_event(&chunk, &msg1));
 		assert_full_edit_bundle(bundle, &edit2, room_id, "draft two");
 
@@ -149,8 +165,8 @@ mod tests {
 
 	/// `/relations` (plain with `recurse`, and the `m.thread` variant): the
 	/// RELATED events being returned — thread replies — carry bundles, not
-	/// just the pagination target.
-	async fn relations_cases(router: &Router, room_id: &str) {
+	/// just the pagination target. `/threads` bundles onto the listed roots.
+	async fn relations_and_threads_cases(router: &Router, room_id: &str) {
 		let room = enc(room_id);
 
 		let root = send_text(router, &room, ALICE_TOKEN, "r1", "thread root").await;
@@ -185,6 +201,154 @@ mod tests {
 			let bundle = replace_bundle(find_event(chunk, &reply));
 			assert_full_edit_bundle(bundle, &reply_edit, room_id, "edited reply");
 		}
+
+		// /threads: the listed thread roots carry bundles too.
+		let root_edit = send_edit(router, &room, ALICE_TOKEN, "r4", &root, "edited root").await;
+		let threads = request(
+			router,
+			"GET",
+			&format!("/_matrix/client/v1/rooms/{room}/threads?limit=100"),
+			ALICE_TOKEN,
+			None,
+		)
+		.await;
+		let chunk = threads["chunk"]
+			.as_array()
+			.expect("threads chunk");
+		let bundle = replace_bundle(find_event(chunk, &root));
+		assert_full_edit_bundle(bundle, &root_edit, room_id, "edited root");
+	}
+
+	/// `/search`: results carry bundles on the matched originals.
+	async fn search_case(router: &Router, room_id: &str) {
+		let room = enc(room_id);
+
+		let msg = send_text(router, &room, ALICE_TOKEN, "q1", "wombat haystack").await;
+		let edit = send_edit(router, &room, ALICE_TOKEN, "q2", &msg, "search final").await;
+
+		let results = request(
+			router,
+			"POST",
+			"/_matrix/client/v3/search",
+			ALICE_TOKEN,
+			Some(json!({
+				"search_categories": {"room_events": {"search_term": "haystack"}},
+			})),
+		)
+		.await;
+		let results = results["search_categories"]["room_events"]["results"]
+			.as_array()
+			.expect("search results");
+		let result = results
+			.iter()
+			.map(|result| &result["result"])
+			.find(|event| event["event_id"] == msg)
+			.unwrap_or_else(|| panic!("search must find {msg}: {results:?}"));
+		assert_full_edit_bundle(replace_bundle(result), &edit, room_id, "search final");
+	}
+
+	/// Encrypted events: `m.relates_to` lives in cleartext beside the
+	/// ciphertext, so encrypted edits bundle exactly like plaintext ones.
+	async fn encrypted_case(router: &Router, room_id: &str) {
+		let room = enc(room_id);
+
+		let msg = send_encrypted(router, &room, "e1", None).await;
+		let _edit1 = send_encrypted(router, &room, "e2", Some(&msg)).await;
+		let edit2 = send_encrypted(router, &room, "e3", Some(&msg)).await;
+
+		let chunk = messages_chunk(router, &room, ALICE_TOKEN).await;
+		let bundle = replace_bundle(find_event(&chunk, &msg));
+		assert_eq!(bundle["event_id"], edit2, "latest encrypted edit: {bundle}");
+		assert_eq!(bundle["type"], "m.room.encrypted", "bundle type: {bundle}");
+		assert_eq!(bundle["room_id"], *room_id, "bundle room_id: {bundle}");
+		assert!(bundle["origin_server_ts"].is_u64(), "bundle origin_server_ts: {bundle}");
+	}
+
+	/// A redacted newest edit loses its `m.relates_to` content, so the bundle
+	/// falls back to the newest surviving unredacted edit.
+	async fn redaction_case(router: &Router, room_id: &str) {
+		let room = enc(room_id);
+
+		let msg = send_text(router, &room, ALICE_TOKEN, "d1", "thinking…").await;
+		let edit1 = send_edit(router, &room, ALICE_TOKEN, "d2", &msg, "kept draft").await;
+		let edit2 = send_edit(router, &room, ALICE_TOKEN, "d3", &msg, "redacted final").await;
+
+		request(
+			router,
+			"PUT",
+			&format!("/_matrix/client/v3/rooms/{room}/redact/{}/d4", enc(&edit2)),
+			ALICE_TOKEN,
+			Some(json!({"reason": "test"})),
+		)
+		.await;
+
+		let chunk = messages_chunk(router, &room, ALICE_TOKEN).await;
+		let bundle = replace_bundle(find_event(&chunk, &msg));
+		assert_full_edit_bundle(bundle, &edit1, room_id, "kept draft");
+	}
+
+	/// The bundle obeys event visibility: with history_visibility=joined, a
+	/// user who left before the edit was sent must not receive the edit's
+	/// content bundled onto an original they can see.
+	async fn visibility_case(router: &Router) {
+		let body = request(
+			router,
+			"POST",
+			"/_matrix/client/v3/createRoom",
+			ALICE_TOKEN,
+			Some(json!({
+				"preset": "private_chat",
+				"invite": ["@bob:localhost"],
+				"initial_state": [{
+					"type": "m.room.history_visibility",
+					"state_key": "",
+					"content": {"history_visibility": "joined"},
+				}],
+			})),
+		)
+		.await;
+		let room_id = body["room_id"]
+			.as_str()
+			.expect("createRoom returns room_id")
+			.to_owned();
+		let room = enc(&room_id);
+
+		request(
+			router,
+			"POST",
+			&format!("/_matrix/client/v3/rooms/{room}/join"),
+			BOB_TOKEN,
+			Some(json!({})),
+		)
+		.await;
+
+		let msg = send_text(router, &room, ALICE_TOKEN, "v1", "pre-leave original").await;
+
+		request(
+			router,
+			"POST",
+			&format!("/_matrix/client/v3/rooms/{room}/leave"),
+			BOB_TOKEN,
+			Some(json!({})),
+		)
+		.await;
+
+		let edit = send_edit(router, &room, ALICE_TOKEN, "v2", &msg, "post-leave edit").await;
+
+		// Alice sees the bundle; Bob sees the original he was joined for,
+		// but not the edit sent after he left.
+		let alice_chunk = messages_chunk(router, &room, ALICE_TOKEN).await;
+		let bundle = replace_bundle(find_event(&alice_chunk, &msg));
+		assert_eq!(bundle["event_id"], edit, "alice gets the bundle: {bundle}");
+
+		let bob_chunk = messages_chunk(router, &room, BOB_TOKEN).await;
+		let bob_msg = find_event(&bob_chunk, &msg);
+		assert!(
+			bob_msg["unsigned"]["m.relations"]
+				.get("m.replace")
+				.is_none(),
+			"an edit the requester cannot see must not be bundled: {bob_msg}"
+		);
 	}
 
 	/// Create alice and bob with devices, build the router, create a public
@@ -245,12 +409,12 @@ mod tests {
 		Ok(())
 	}
 
-	async fn messages_chunk(router: &Router, room: &str) -> Vec<JsonValue> {
+	async fn messages_chunk(router: &Router, room: &str, token: &str) -> Vec<JsonValue> {
 		let messages = request(
 			router,
 			"GET",
 			&format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=100"),
-			ALICE_TOKEN,
+			token,
 			None,
 		)
 		.await;
@@ -330,6 +494,38 @@ mod tests {
 			"PUT",
 			&format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/{txn_id}"),
 			token,
+			Some(content),
+		)
+		.await;
+
+		body["event_id"]
+			.as_str()
+			.expect("send returns event_id")
+			.to_owned()
+	}
+
+	async fn send_encrypted(
+		router: &Router,
+		room: &str,
+		txn_id: &str,
+		replaces: Option<&str>,
+	) -> String {
+		let mut content = json!({
+			"algorithm": "m.megolm.v1.aes-sha2",
+			"ciphertext": "AwgAEnACgAkLmt6qF84IK",
+			"device_id": "TESTDEVICE",
+			"sender_key": "sender+key",
+			"session_id": "session-id",
+		});
+		if let Some(target) = replaces {
+			content["m.relates_to"] = json!({"rel_type": "m.replace", "event_id": target});
+		}
+
+		let body = request(
+			router,
+			"PUT",
+			&format!("/_matrix/client/v3/rooms/{room}/send/m.room.encrypted/{txn_id}"),
+			ALICE_TOKEN,
 			Some(content),
 		)
 		.await;

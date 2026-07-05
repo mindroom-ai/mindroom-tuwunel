@@ -203,6 +203,18 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 	pdu
 }
 
+/// Bound on relation PDUs fetched and inspected per served event while
+/// looking for the newest same-sender `m.replace`. The relation index
+/// carries no rel_type, so each candidate costs a PDU fetch and parse; an
+/// event whose relations are dominated by newer non-replace entries (a
+/// heavily-replied thread root, a heavily-reacted message) must not turn
+/// every history page into an O(relations) scan. MindRoom edits arrive
+/// directly after the original and the purge keeps exactly one per
+/// (target, sender), so the kept edit sits within the first few entries of
+/// a newest-first walk in practice; past this bound we serve no bundle,
+/// which is exactly the pre-bundling behavior.
+const REPLACEMENT_SCAN_LIMIT: usize = 100;
+
 /// MSC2676 read-time bundling for history endpoints: attach the newest
 /// surviving same-sender `m.replace` event as a full-event bundled
 /// aggregation at `unsigned.m.relations.m.replace` of the served original.
@@ -210,7 +222,12 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 /// This pairs with the fork's edit purge (`service::edit_purge`): the purge
 /// keeps exactly one replacement per (target, sender), selected by PDU
 /// stream order, and this walks the relation index in the same order
-/// (newest count first), so both always select the same edit. Relation
+/// (newest count first), so both select the same edit for all normal-count
+/// (locally created) events. Backfilled edits are the one divergence: the
+/// purge comparator ranks their raw pdu_id bytes above normal counts while
+/// `add_relation` never indexes backfilled relations at all, so a
+/// federation-backfilled edit can be kept by the purge yet not served here
+/// — a pre-existing index gap, noted as a follow-up in the PR. Relation
 /// index entries whose PDU the purge deleted fail the fetch inside
 /// `get_relations` and fall through to the next candidate. Events without
 /// relations only pay the relation-index seek miss.
@@ -239,6 +256,7 @@ pub async fn bundle_replacement(&self, sender_user: &UserId, mut pdu: Pdu) -> Pd
 			Direction::Backward,
 			Some(sender_user),
 		)
+		.take(REPLACEMENT_SCAN_LIMIT)
 		.ready_filter(|(_, related)| related.sender() == pdu.sender())
 		.ready_filter(|(_, related)| {
 			related
@@ -258,12 +276,26 @@ pub async fn bundle_replacement(&self, sender_user: &UserId, mut pdu: Pdu) -> Pd
 
 	// A replacement is not itself aggregated onto (edits chain off the
 	// original), and a redacted original no longer aggregates its edits.
-	// Both checks parse content/unsigned, so they only run once a
+	// These checks parse content/unsigned, so they only run once a
 	// candidate actually exists.
 	if pdu.is_redacted()
 		|| pdu
 			.get_content::<ExtractRelatesToInfo>()
 			.is_ok_and(|content| content.relates_to.rel_type == "m.replace")
+	{
+		return pdu;
+	}
+
+	// The bundle must obey the same visibility rules as serving the edit
+	// event directly (e.g. history_visibility=joined and the edit was sent
+	// after the requester left). Serving an older visible edit instead
+	// would present stale content as current, so an invisible newest edit
+	// means no bundle at all. Runs only when a candidate exists.
+	if !self
+		.services
+		.state_accessor
+		.user_can_see_event(sender_user, replacement.room_id(), replacement.event_id())
+		.await
 	{
 		return pdu;
 	}

@@ -95,11 +95,17 @@ pub fn add_relation(&mut self, name: &str, related: &Pdu) -> Result {
 	let related: JsonValue = serde_json::from_str(related.json().get())
 		.map_err(|e| err!(Database("Invalid related event for bundled aggregation: {e}")))?;
 
-	unsigned
+	let relations = unsigned
 		.entry("m.relations")
-		.or_insert(JsonValue::Object(Map::new()))
+		.or_insert_with(|| JsonValue::Object(Map::new()));
+	if !relations.is_object() {
+		// Repair a corrupt stored value instead of silently dropping the bundle.
+		*relations = JsonValue::Object(Map::new());
+	}
+	relations
 		.as_object_mut()
-		.map(|object| object.insert(name.to_owned(), related));
+		.expect("m.relations is an object")
+		.insert(name.to_owned(), related);
 
 	self.unsigned = Some(to_raw_value(&unsigned)?.into());
 
