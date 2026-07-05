@@ -207,6 +207,7 @@ impl Service {
 	/// Run a single purge cycle: incrementally scan PDUs, find superseded
 	/// m.replace events, and delete them with corked writes (batched flush),
 	/// not as a single transactional unit.
+	#[allow(clippy::too_many_lines)] // upstream lowered the threshold to 150 in v1.8.0
 	#[tracing::instrument(skip_all, level = "debug")]
 	async fn purge_cycle(&self) -> Result {
 		let config = &self.services.server.config;
@@ -1097,10 +1098,9 @@ rocksdb_read_only = {}
 			.shorteventid_eventid
 			.insert(&short_key, event_id.as_bytes());
 		let room_id_ref: &RoomId = room_id.as_ref();
-		service.roomid_tscount_pducount.put_raw(
-			(room_id_ref, origin_server_ts_ms, bias_count(pdu_count)),
-			pdu_count,
-		);
+		service
+			.roomid_tscount_pducount
+			.put_raw((room_id_ref, origin_server_ts_ms, bias_count(pdu_count)), pdu_count);
 
 		StoredEvent {
 			event_id,
@@ -1140,10 +1140,9 @@ rocksdb_read_only = {}
 			.shorteventid_eventid
 			.insert(&short_key, event_id.as_bytes());
 		let room_id_ref: &RoomId = room_id.as_ref();
-		service.roomid_tscount_pducount.put_raw(
-			(room_id_ref, origin_server_ts_ms, bias_count(pdu_count)),
-			pdu_count,
-		);
+		service
+			.roomid_tscount_pducount
+			.put_raw((room_id_ref, origin_server_ts_ms, bias_count(pdu_count)), pdu_count);
 
 		StoredEvent {
 			event_id,

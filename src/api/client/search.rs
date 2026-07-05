@@ -159,7 +159,7 @@ async fn category_room_events(
 
 			let pdu = services
 				.pdu_metadata
-				.bundle_aggregations(sender_user, pdu)
+				.bundle_aggregations_with_replacement(sender_user, pdu)
 				.await;
 
 			SearchResult {
@@ -286,6 +286,14 @@ where
 	pdus.ignore_err()
 		.wide_filter_map(|item| visibility_filter(services, item, sender_user))
 		.take(take)
+		.wide_then(async |(count, pdu)| {
+			let pdu = services
+				.pdu_metadata
+				.bundle_aggregations_with_replacement(sender_user, pdu)
+				.await;
+
+			(count, pdu)
+		})
 		.collect()
 		.await
 }

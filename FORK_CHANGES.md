@@ -119,16 +119,53 @@ Behavior:
 - Reuses the normal SSO account mapping, registration, reactivation, and
   Matrix `loginToken` creation path.
 
+#### 7) `mindroom/edits: serve bundled m.replace aggregations on originals`
+Files:
+- `src/api/client/context.rs`
+- `src/api/client/message.rs`
+- `src/api/client/relations.rs`
+- `src/api/client/room/event.rs`
+- `src/api/client/search.rs`
+- `src/api/client/threads.rs`
+- `src/core/matrix/pdu/tests.rs`
+- `src/core/matrix/pdu/unsigned.rs`
+- `src/mindroom-tests/tests/bundled_edit_aggregations.rs`
+- `src/service/rooms/pdu_metadata/mod.rs`
+
+Behavior:
+- Serves the latest same-sender `m.replace` edit as a bundled aggregation at
+  `unsigned.m.relations.m.replace` on originals returned by `/messages`,
+  `/context`, `/relations` (including `recurse`), `/event`, `/threads`, and
+  `/search` (MSC2675/MSC2676).
+- The bundle is the full replacement event in client format, including
+  `room_id` and `origin_server_ts`, so clients can hydrate the final content
+  even when the edit event itself falls outside a pagination window.
+- Selects the same edit the purge keeps (newest by PDU stream order per
+  target and sender) and skips relation-index entries whose edit PDU was
+  purged, falling through to the newest surviving edit.
+- The bundled edit is visibility-checked for the requesting user like any
+  directly served event; an edit the requester may not see (for example one
+  sent after they left a history_visibility=joined room) is not bundled.
+- The newest-first candidate walk is capped at 100 relation-index entries
+  examined per served event (the key walk itself, not the PDUs it yields),
+  so heavily-replied or heavily-reacted targets — and dangling index
+  entries left by the purge or minted by a client relating a foreign-room
+  event to the target — cannot turn history pages into an unbounded
+  per-event index scan; past the cap no bundle is served (the pre-bundling
+  behavior).
+- `/sync` is unchanged: sync compaction already delivers the surviving edit
+  event in the timeline, so no bundle is added there.
+
 ### Operational Changes
 
-#### 7) `ci: add GitHub release workflow for ARM and x86_64 binaries`
+#### 8) `ci: add GitHub release workflow for ARM and x86_64 binaries`
 Files:
 - `.github/workflows/mindroom-release.yml`
 
 Behavior:
 - Adds tagged binary publishing for Linux `x86_64` and `aarch64`.
 
-#### 8) `ci(release): auto-tag main pushes and create releases`
+#### 9) `ci(release): auto-tag main pushes and create releases`
 Files:
 - `.github/workflows/auto-mindroom-release.yml`
 - `scripts/fork_release_tag.py`
@@ -137,7 +174,7 @@ Behavior:
 - Computes `v<base_version>-mindroom.<n>` tags on `main`.
 - Creates or reuses the corresponding GitHub Release.
 
-#### 9) `ci(container): publish release containers`
+#### 10) `ci(container): publish release containers`
 Files:
 - `.github/workflows/auto-mindroom-release.yml`
 - `.github/workflows/mindroom-container-release.yml`
@@ -147,7 +184,7 @@ Behavior:
 - Dispatches container publication for MindRoom release tags.
 - Uses the configured buildx builder for release container builds.
 
-#### 10) `docs: summarize fork runtime and release additions`
+#### 11) `docs: summarize fork runtime and release additions`
 Files:
 - `README.md`
 
@@ -197,6 +234,9 @@ native_client_ids = ["chat.mindroom.app"]
 ## Behavior Summary
 - Edit lifecycle changes reduce redundant edit traffic in `/sync` and can
   reclaim storage by purging superseded historical edits.
+- History endpoints bundle the latest same-sender `m.replace` edit onto served
+  originals, so purged or out-of-window edits cannot leave clients stuck on
+  the pre-edit body.
 - Apple OAuth fallback improves sign-in robustness when `userinfo` is
   unavailable.
 - Native iOS Apple login can exchange a signed app-bundle ID token for the same
@@ -227,7 +267,9 @@ native_client_ids = ["chat.mindroom.app"]
 - Matrix event formats remain standard.
 - Clients may observe fewer intermediate edit events in `/sync` when compact
   mode is enabled.
-- Superseded edits can be permanently removed when purge is enabled.
+- Superseded edits can be permanently removed when purge is enabled; history
+  endpoints compensate by serving the kept edit as a bundled `m.replace`
+  aggregation on the original.
 - Admin-deactivated SSO accounts stay deactivated on future login attempts.
 - The default power-level override only affects newly created rooms.
 - Native Apple login requires the app bundle ID to be listed in

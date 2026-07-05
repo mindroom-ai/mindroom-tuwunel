@@ -1,10 +1,14 @@
 use std::collections::BTreeMap;
 
-use ruma::{MilliSecondsSinceUnixEpoch, events::room::member::MembershipState, serde::Raw};
+use ruma::{
+	MilliSecondsSinceUnixEpoch,
+	events::{AnyTimelineEvent, room::member::MembershipState},
+	serde::Raw,
+};
 use serde::Serialize;
 use serde_json::value::{RawValue as RawJsonValue, Value as JsonValue, to_raw_value};
 
-use super::{Pdu, Unsigned};
+use super::{Event, Pdu, Unsigned};
 use crate::{Result, err, implement};
 
 #[implement(Pdu)]
@@ -70,8 +74,13 @@ pub fn add_membership(&mut self, membership: &MembershipState) -> Result {
 	Ok(())
 }
 
+/// MSC2675: attach a related event as a bundled aggregation at
+/// `unsigned.m.relations.<name>`. The bundle is the full related event in
+/// client format — including `room_id` and `origin_server_ts` — because
+/// clients (notably the MindRoom Cinny fork) hydrate replacements straight
+/// from this object and ignore bundles missing `origin_server_ts`.
 #[implement(Pdu)]
-pub fn add_relation(&mut self, name: &str, pdu: Option<&Pdu>) -> Result {
+pub fn add_relation(&mut self, name: &str, related: &Pdu) -> Result {
 	use serde_json::Map;
 
 	let mut unsigned: Map<String, JsonValue> = self
@@ -82,16 +91,21 @@ pub fn add_relation(&mut self, name: &str, pdu: Option<&Pdu>) -> Result {
 		.map_or_else(|| Ok(Map::new()), serde_json::from_str)
 		.map_err(|e| err!(Database("Invalid unsigned in pdu event: {e}")))?;
 
-	let pdu = pdu
-		.map(serde_json::to_value)
-		.transpose()?
-		.unwrap_or_else(|| JsonValue::Object(Map::new()));
+	let related: Raw<AnyTimelineEvent> = related.to_format();
+	let related: JsonValue = serde_json::to_value(&related)
+		.map_err(|e| err!(Database("Invalid related event for bundled aggregation: {e}")))?;
 
-	unsigned
+	let relations = unsigned
 		.entry("m.relations")
-		.or_insert(JsonValue::Object(Map::new()))
+		.or_insert_with(|| JsonValue::Object(Map::new()));
+	if !relations.is_object() {
+		// Repair a corrupt stored value instead of silently dropping the bundle.
+		*relations = JsonValue::Object(Map::new());
+	}
+	relations
 		.as_object_mut()
-		.map(|object| object.insert(name.to_owned(), pdu));
+		.expect("m.relations is an object")
+		.insert(name.to_owned(), related);
 
 	self.unsigned = Some(to_raw_value(&unsigned)?.into());
 

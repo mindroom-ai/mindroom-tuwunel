@@ -152,7 +152,7 @@ pub(crate) async fn get_context_route(
 	let event = OptionFuture::from(base_event.map(at!(1)).map(|pdu| {
 		services
 			.pdu_metadata
-			.bundle_aggregations(sender_user, pdu)
+			.bundle_aggregations_with_replacement(sender_user, pdu)
 	}))
 	.await
 	.map(Event::into_format);
@@ -280,7 +280,7 @@ where
 		.wide_then(async |(count, pdu)| {
 			let pdu = services
 				.pdu_metadata
-				.bundle_aggregations(sender_user, pdu)
+				.bundle_aggregations_with_replacement(sender_user, pdu)
 				.await;
 
 			(count, pdu)
