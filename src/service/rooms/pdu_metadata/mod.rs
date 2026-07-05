@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use futures::{Stream, StreamExt, TryFutureExt, future::Either};
+use futures::{Stream, StreamExt, TryFutureExt, future::Either, pin_mut};
 use ruma::{
 	EventId, RoomId, UserId,
 	api::Direction,
@@ -248,27 +248,29 @@ pub async fn bundle_replacement(&self, sender_user: &UserId, mut pdu: Pdu) -> Pd
 	};
 
 	let pdu_id: PduId = pdu_id.into();
-	let replacement = self
-		.get_relations(
-			pdu_id.shortroomid,
-			pdu_id.count,
-			None,
-			Direction::Backward,
-			Some(sender_user),
-		)
-		.take(REPLACEMENT_SCAN_LIMIT)
-		.ready_filter(|(_, related)| related.sender() == pdu.sender())
-		.ready_filter(|(_, related)| {
-			related
-				.get_content::<ExtractRelatesToInfo>()
-				.is_ok_and(|content| {
-					content.relates_to.rel_type == "m.replace"
-						&& content.relates_to.event_id == pdu.event_id()
-				})
-		})
-		.boxed()
-		.next()
-		.await;
+	let replacement = {
+		let candidates = self
+			.get_relations(
+				pdu_id.shortroomid,
+				pdu_id.count,
+				None,
+				Direction::Backward,
+				Some(sender_user),
+			)
+			.take(REPLACEMENT_SCAN_LIMIT)
+			.ready_filter(|(_, related)| related.sender() == pdu.sender())
+			.ready_filter(|(_, related)| {
+				related
+					.get_content::<ExtractRelatesToInfo>()
+					.is_ok_and(|content| {
+						content.relates_to.rel_type == "m.replace"
+							&& content.relates_to.event_id == pdu.event_id()
+					})
+			});
+
+		pin_mut!(candidates);
+		candidates.next().await
+	};
 
 	let Some((_, replacement)) = replacement else {
 		return pdu;

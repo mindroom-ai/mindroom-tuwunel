@@ -219,9 +219,16 @@ mod tests {
 		assert_full_edit_bundle(bundle, &root_edit, room_id, "edited root");
 	}
 
-	/// `/search`: results carry bundles on the matched originals.
+	/// `/search`: both the matched originals and the surrounding context
+	/// events carry bundles.
 	async fn search_case(router: &Router, room_id: &str) {
 		let room = enc(room_id);
+
+		// An edited neighbor directly before the search hit, so it lands in
+		// the hit's context.events_before.
+		let neighbor = send_text(router, &room, ALICE_TOKEN, "q0", "context neighbor").await;
+		let neighbor_edit =
+			send_edit(router, &room, ALICE_TOKEN, "q0e", &neighbor, "neighbor final").await;
 
 		let msg = send_text(router, &room, ALICE_TOKEN, "q1", "wombat haystack").await;
 		let edit = send_edit(router, &room, ALICE_TOKEN, "q2", &msg, "search final").await;
@@ -232,19 +239,27 @@ mod tests {
 			"/_matrix/client/v3/search",
 			ALICE_TOKEN,
 			Some(json!({
-				"search_categories": {"room_events": {"search_term": "haystack"}},
+				"search_categories": {"room_events": {
+					"search_term": "haystack",
+					"event_context": {"before_limit": 3, "after_limit": 3},
+				}},
 			})),
 		)
 		.await;
 		let results = results["search_categories"]["room_events"]["results"]
 			.as_array()
 			.expect("search results");
-		let result = results
+		let hit = results
 			.iter()
-			.map(|result| &result["result"])
-			.find(|event| event["event_id"] == msg)
+			.find(|result| result["result"]["event_id"] == msg)
 			.unwrap_or_else(|| panic!("search must find {msg}: {results:?}"));
-		assert_full_edit_bundle(replace_bundle(result), &edit, room_id, "search final");
+		assert_full_edit_bundle(replace_bundle(&hit["result"]), &edit, room_id, "search final");
+
+		let events_before = hit["context"]["events_before"]
+			.as_array()
+			.expect("search context events_before");
+		let bundle = replace_bundle(find_event(events_before, &neighbor));
+		assert_full_edit_bundle(bundle, &neighbor_edit, room_id, "neighbor final");
 	}
 
 	/// Encrypted events: `m.relates_to` lives in cleartext beside the

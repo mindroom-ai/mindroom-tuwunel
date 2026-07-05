@@ -92,7 +92,7 @@ pub fn add_relation(&mut self, name: &str, related: &Pdu) -> Result {
 		.map_err(|e| err!(Database("Invalid unsigned in pdu event: {e}")))?;
 
 	let related: Raw<AnyTimelineEvent> = related.to_format();
-	let related: JsonValue = serde_json::from_str(related.json().get())
+	let related: JsonValue = serde_json::to_value(&related)
 		.map_err(|e| err!(Database("Invalid related event for bundled aggregation: {e}")))?;
 
 	let relations = unsigned
