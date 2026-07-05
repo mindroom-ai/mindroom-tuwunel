@@ -224,7 +224,7 @@ async fn paginate_relations_with_filter(
 	.wide_then(async |(depth, count, pdu)| {
 		let pdu = services
 			.pdu_metadata
-			.bundle_aggregations(sender_user, pdu)
+			.bundle_aggregations_with_replacement(sender_user, pdu)
 			.await;
 
 		(depth, count, pdu)

@@ -102,7 +102,7 @@ pub(crate) async fn get_room_event_route(
 
 	let event = services
 		.pdu_metadata
-		.bundle_aggregations(sender_user, event)
+		.bundle_aggregations_with_replacement(sender_user, event)
 		.await;
 
 	Ok(get_room_event::v3::Response { event: event.into_format() })

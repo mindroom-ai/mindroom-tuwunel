@@ -133,7 +133,7 @@ pub(crate) async fn get_message_events_route(
 		.wide_then(async |(count, pdu)| {
 			let pdu = services
 				.pdu_metadata
-				.bundle_aggregations(sender_user, pdu)
+				.bundle_aggregations_with_replacement(sender_user, pdu)
 				.await;
 
 			(count, pdu)

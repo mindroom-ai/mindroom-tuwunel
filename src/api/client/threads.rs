@@ -47,7 +47,7 @@ pub(crate) async fn get_threads_route(
 		.wide_and_then(async |(count, pdu)| {
 			let pdu = services
 				.pdu_metadata
-				.bundle_aggregations(body.sender_user(), pdu)
+				.bundle_aggregations_with_replacement(body.sender_user(), pdu)
 				.await;
 
 			Ok((count, pdu))

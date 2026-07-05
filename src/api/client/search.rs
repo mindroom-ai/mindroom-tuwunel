@@ -159,7 +159,7 @@ async fn category_room_events(
 
 			let pdu = services
 				.pdu_metadata
-				.bundle_aggregations(sender_user, pdu)
+				.bundle_aggregations_with_replacement(sender_user, pdu)
 				.await;
 
 			SearchResult {

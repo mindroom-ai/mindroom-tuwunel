@@ -10,7 +10,10 @@ use tuwunel_core::{
 	PduId, Result,
 	arrayvec::ArrayVec,
 	implement, is_equal_to,
-	matrix::{Event, Pdu, PduCount, RawPduId, event::RelationTypeEqual},
+	matrix::{
+		Event, Pdu, PduCount, RawPduId,
+		event::{ExtractRelatesToInfo, RelationTypeEqual},
+	},
 	result::LogErr,
 	trace,
 	utils::{
@@ -198,6 +201,90 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 		.ok();
 
 	pdu
+}
+
+/// MSC2676 read-time bundling for history endpoints: attach the newest
+/// surviving same-sender `m.replace` event as a full-event bundled
+/// aggregation at `unsigned.m.relations.m.replace` of the served original.
+///
+/// This pairs with the fork's edit purge (`service::edit_purge`): the purge
+/// keeps exactly one replacement per (target, sender), selected by PDU
+/// stream order, and this walks the relation index in the same order
+/// (newest count first), so both always select the same edit. Relation
+/// index entries whose PDU the purge deleted fail the fetch inside
+/// `get_relations` and fall through to the next candidate. Events without
+/// relations only pay the relation-index seek miss.
+#[implement(Service)]
+pub async fn bundle_replacement(&self, sender_user: &UserId, mut pdu: Pdu) -> Pdu {
+	// State events cannot be replaced (MSC2676).
+	if pdu.state_key().is_some() {
+		return pdu;
+	}
+
+	let Ok(pdu_id) = self
+		.services
+		.timeline
+		.get_pdu_id(pdu.event_id())
+		.await
+	else {
+		return pdu;
+	};
+
+	let pdu_id: PduId = pdu_id.into();
+	let replacement = self
+		.get_relations(
+			pdu_id.shortroomid,
+			pdu_id.count,
+			None,
+			Direction::Backward,
+			Some(sender_user),
+		)
+		.ready_filter(|(_, related)| related.sender() == pdu.sender())
+		.ready_filter(|(_, related)| {
+			related
+				.get_content::<ExtractRelatesToInfo>()
+				.is_ok_and(|content| {
+					content.relates_to.rel_type == "m.replace"
+						&& content.relates_to.event_id == pdu.event_id()
+				})
+		})
+		.boxed()
+		.next()
+		.await;
+
+	let Some((_, replacement)) = replacement else {
+		return pdu;
+	};
+
+	// A replacement is not itself aggregated onto (edits chain off the
+	// original), and a redacted original no longer aggregates its edits.
+	// Both checks parse content/unsigned, so they only run once a
+	// candidate actually exists.
+	if pdu.is_redacted()
+		|| pdu
+			.get_content::<ExtractRelatesToInfo>()
+			.is_ok_and(|content| content.relates_to.rel_type == "m.replace")
+	{
+		return pdu;
+	}
+
+	pdu.add_relation("m.replace", &replacement)
+		.log_err()
+		.ok();
+
+	pdu
+}
+
+/// `bundle_aggregations` plus read-time `m.replace` bundling, for endpoints
+/// serving room history that clients cache (/messages, /context, /relations,
+/// /event, /threads, /search). /sync intentionally stays on plain
+/// `bundle_aggregations`: the fork's sync edit compaction
+/// (api/client/sync/mindroom_edits.rs) already delivers the surviving edit
+/// event itself in the sync timeline.
+#[implement(Service)]
+pub async fn bundle_aggregations_with_replacement(&self, sender_user: &UserId, pdu: Pdu) -> Pdu {
+	let pdu = self.bundle_aggregations(sender_user, pdu).await;
+	self.bundle_replacement(sender_user, pdu).await
 }
 
 #[implement(Service)]
