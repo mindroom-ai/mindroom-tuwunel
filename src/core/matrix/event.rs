@@ -27,7 +27,7 @@ pub use self::{
 	filter::{Matches, trim_event_fields},
 	format::{Owned, Ref},
 	id::*,
-	relation::RelationTypeEqual,
+	relation::{ExtractRelatesToInfo, RelatesToInfo, RelationTypeEqual},
 	state_key::{StateKey, TypeStateKey},
 	type_ext::TypeExt,
 };
