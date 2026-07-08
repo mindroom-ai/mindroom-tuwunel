@@ -341,7 +341,8 @@ database_path = "{}"
 		};
 		let runtime = tokio::runtime::Handle::current();
 		let metrics = Metrics::new(Some(&runtime));
-		let server = Arc::new(Server::new(config, Sources::default(), Some(&runtime), log, metrics));
+		let server =
+			Arc::new(Server::new(config, Sources::default(), Some(&runtime), log, metrics));
 
 		Services::build(server)
 			.await

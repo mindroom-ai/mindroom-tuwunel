@@ -969,7 +969,8 @@ rocksdb_read_only = {}
 		};
 		let runtime = tokio::runtime::Handle::current();
 		let metrics = Metrics::new(Some(&runtime));
-		let server = Arc::new(Server::new(config, Sources::default(), Some(&runtime), log, metrics));
+		let server =
+			Arc::new(Server::new(config, Sources::default(), Some(&runtime), log, metrics));
 		let db = Database::open(&server)
 			.await
 			.expect("open test database");
