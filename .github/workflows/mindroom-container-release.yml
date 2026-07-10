@@ -66,13 +66,18 @@ jobs:
         run: |
           mkdir -p "dist/${{ matrix.arch }}"
 
+          # The download succeeds as soon as ANY pattern matches, and the
+          # binaries workflow uploads the .sha256 before the tarball — so a
+          # partial download must keep polling until both files are present.
           for attempt in $(seq 1 90); do
             if gh release download "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --clobber \
               -D "dist/${{ matrix.arch }}" \
               -p "$ASSET_NAME" \
-              -p "$ASSET_NAME.sha256"
+              -p "$ASSET_NAME.sha256" \
+              && [ -f "dist/${{ matrix.arch }}/$ASSET_NAME" ] \
+              && [ -f "dist/${{ matrix.arch }}/$ASSET_NAME.sha256" ]
             then
               break
             fi
