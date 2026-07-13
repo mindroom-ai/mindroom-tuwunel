@@ -38,6 +38,9 @@ where
 		.ok();
 
 	let serialized = event.to_format();
+	if self.services.config.push_everything && super::mindroom_push_suppressed(&serialized) {
+		return Ok(());
+	}
 	let actions = self
 		.get_actions(user_id, ruleset, power_levels.as_ref(), &serialized, event.room_id())
 		.await;

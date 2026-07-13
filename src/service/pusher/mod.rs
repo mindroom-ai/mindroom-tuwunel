@@ -98,8 +98,7 @@ fn mindroom_stream_content(
 	Some((content, stream_status))
 }
 
-#[cfg(test)]
-fn mindroom_nonterminal_push_event(pdu: &Raw<AnySyncTimelineEvent>) -> bool {
+pub(super) fn mindroom_push_suppressed(pdu: &Raw<AnySyncTimelineEvent>) -> bool {
 	matches!(mindroom_push_evaluation(pdu), MindroomPushEvaluation::Suppress)
 }
 

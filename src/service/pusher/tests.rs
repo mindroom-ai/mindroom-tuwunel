@@ -12,7 +12,7 @@ use serde_json::Value as JsonValue;
 use tuwunel_database::{Interfix, SEP, serialize_to_vec};
 
 use super::{
-	mindroom_nonterminal_push_event, mindroom_terminal_push_content, mindroom_terminal_push_event,
+	mindroom_push_suppressed, mindroom_terminal_push_content, mindroom_terminal_push_event,
 };
 
 const ROOM: &str = "!room:example.com";
@@ -208,10 +208,10 @@ fn nonterminal_stream_events_are_suppressed_for_any_sender() {
 	let future_intermediate =
 		encrypted_stream_event("@mindroom_helper:example.com", "paused", true);
 
-	assert!(mindroom_nonterminal_push_event(&encrypted_pending));
-	assert!(mindroom_nonterminal_push_event(&encrypted_streaming));
-	assert!(mindroom_nonterminal_push_event(&remote_pending));
-	assert!(mindroom_nonterminal_push_event(&future_intermediate));
+	assert!(mindroom_push_suppressed(&encrypted_pending));
+	assert!(mindroom_push_suppressed(&encrypted_streaming));
+	assert!(mindroom_push_suppressed(&remote_pending));
+	assert!(mindroom_push_suppressed(&future_intermediate));
 }
 
 #[tokio::test]
