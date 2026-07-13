@@ -11,9 +11,9 @@ use std::sync::Arc;
 use futures::{Stream, StreamExt, TryFutureExt, future::join};
 use ipaddress::IPAddress;
 use ruma::{
-	DeviceId, OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId, ServerName, UserId,
+	DeviceId, OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId, UserId,
 	api::client::push::{Pusher, PusherKind, set_pusher},
-	events::{AnySyncTimelineEvent, room::power_levels::RoomPowerLevels},
+	events::{AnySyncTimelineEvent, TimelineEventType, room::power_levels::RoomPowerLevels},
 	push::{Action, PushConditionPowerLevelsCtx, PushConditionRoomCtx, Ruleset},
 	serde::Raw,
 	uint,
@@ -32,7 +32,6 @@ use tuwunel_database::{Database, Deserialized, Ignore, Interfix, Json, Map};
 pub use self::append::Notified;
 
 const MINDROOM_STREAM_STATUS_KEY: &str = "io.mindroom.stream_status";
-const MINDROOM_NONTERMINAL_STREAM_STATUSES: [&str; 2] = ["pending", "streaming"];
 const MINDROOM_TERMINAL_STREAM_STATUSES: [&str; 4] =
 	["completed", "cancelled", "interrupted", "error"];
 
@@ -51,25 +50,28 @@ enum MindroomPushEvaluation {
 }
 
 pub(super) fn mindroom_terminal_push_content(
-	sender: &UserId,
+	event_type: &TimelineEventType,
 	content: &JsonValue,
-	local_server_name: &ServerName,
 ) -> Option<JsonValue> {
-	if !is_terminal_mindroom_edit(sender, content, local_server_name) {
+	if !is_terminal_mindroom_edit(content) {
 		return None;
 	}
 
-	content.as_object()?.get("m.new_content").cloned()
+	match event_type {
+		| TimelineEventType::RoomMessage => content.as_object()?.get("m.new_content").cloned(),
+		| TimelineEventType::RoomEncrypted => {
+			let mut encrypted_content = content.clone();
+			encrypted_content
+				.as_object_mut()?
+				.remove("m.relates_to");
+			Some(encrypted_content)
+		},
+		| _ => None,
+	}
 }
 
-fn is_terminal_mindroom_edit(
-	sender: &UserId,
-	content: &JsonValue,
-	local_server_name: &ServerName,
-) -> bool {
-	let Some((content, stream_status)) =
-		mindroom_stream_content(sender, content, local_server_name)
-	else {
+fn is_terminal_mindroom_edit(content: &JsonValue) -> bool {
+	let Some((content, stream_status)) = mindroom_stream_content(content) else {
 		return false;
 	};
 	if !MINDROOM_TERMINAL_STREAM_STATUSES.contains(&stream_status) {
@@ -84,15 +86,11 @@ fn is_terminal_mindroom_edit(
 		== Some("m.replace")
 }
 
-fn mindroom_stream_content<'a>(
-	sender: &UserId,
-	content: &'a JsonValue,
-	local_server_name: &ServerName,
-) -> Option<(&'a serde_json::Map<String, JsonValue>, &'a str)> {
-	if sender.server_name() != local_server_name || !sender.localpart().starts_with("mindroom_") {
-		return None;
-	}
-
+fn mindroom_stream_content(
+	content: &JsonValue,
+) -> Option<(&serde_json::Map<String, JsonValue>, &str)> {
+	// This is an event-level protocol signal, not an account privilege: senders
+	// may opt their own streamed events into these notification semantics.
 	let content = content.as_object()?;
 	let stream_status = content
 		.get(MINDROOM_STREAM_STATUS_KEY)
@@ -101,31 +99,21 @@ fn mindroom_stream_content<'a>(
 }
 
 #[cfg(test)]
-fn mindroom_nonterminal_push_event(
-	pdu: &Raw<AnySyncTimelineEvent>,
-	local_server_name: &ServerName,
-) -> bool {
-	matches!(
-		mindroom_push_evaluation(pdu, local_server_name),
-		MindroomPushEvaluation::Suppress
-	)
+fn mindroom_nonterminal_push_event(pdu: &Raw<AnySyncTimelineEvent>) -> bool {
+	matches!(mindroom_push_evaluation(pdu), MindroomPushEvaluation::Suppress)
 }
 
 #[cfg(test)]
 fn mindroom_terminal_push_event(
 	pdu: &Raw<AnySyncTimelineEvent>,
-	local_server_name: &ServerName,
 ) -> Option<Raw<AnySyncTimelineEvent>> {
-	match mindroom_push_evaluation(pdu, local_server_name) {
+	match mindroom_push_evaluation(pdu) {
 		| MindroomPushEvaluation::Normalize(event) => Some(event),
 		| MindroomPushEvaluation::Suppress | MindroomPushEvaluation::Unchanged => None,
 	}
 }
 
-fn mindroom_push_evaluation(
-	pdu: &Raw<AnySyncTimelineEvent>,
-	local_server_name: &ServerName,
-) -> MindroomPushEvaluation {
+fn mindroom_push_evaluation(pdu: &Raw<AnySyncTimelineEvent>) -> MindroomPushEvaluation {
 	let Ok(mut event) = serde_json::to_value(pdu) else {
 		return MindroomPushEvaluation::Unchanged;
 	};
@@ -135,44 +123,23 @@ fn mindroom_push_evaluation(
 	if !matches!(event_type, "m.room.message" | "m.room.encrypted") {
 		return MindroomPushEvaluation::Unchanged;
 	}
-	let Some(sender) = event
-		.get("sender")
-		.and_then(JsonValue::as_str)
-		.and_then(|sender| UserId::parse(sender).ok())
-	else {
-		return MindroomPushEvaluation::Unchanged;
-	};
 	let Some(content) = event.get("content") else {
 		return MindroomPushEvaluation::Unchanged;
 	};
-	let Some((_, stream_status)) = mindroom_stream_content(&sender, content, local_server_name)
-	else {
+	let Some((_, stream_status)) = mindroom_stream_content(content) else {
 		return MindroomPushEvaluation::Unchanged;
 	};
-	if MINDROOM_NONTERMINAL_STREAM_STATUSES.contains(&stream_status) {
+	// Only known terminal states may notify. Future intermediate states fail
+	// closed so a new producer state cannot accidentally reintroduce push spam.
+	if !MINDROOM_TERMINAL_STREAM_STATUSES.contains(&stream_status) {
 		return MindroomPushEvaluation::Suppress;
 	}
-	if !is_terminal_mindroom_edit(&sender, content, local_server_name) {
+	if !is_terminal_mindroom_edit(content) {
 		return MindroomPushEvaluation::Unchanged;
 	}
 
-	let push_content = match event_type {
-		| "m.room.message" => content
-			.as_object()
-			.and_then(|content| content.get("m.new_content"))
-			.cloned(),
-		| "m.room.encrypted" => {
-			let mut encrypted_content = content.clone();
-			match encrypted_content.as_object_mut() {
-				| Some(content) => {
-					content.remove("m.relates_to");
-					Some(encrypted_content)
-				},
-				| None => None,
-			}
-		},
-		| _ => None,
-	};
+	let push_content =
+		mindroom_terminal_push_content(&TimelineEventType::from(event_type), content);
 	let Some(push_content) = push_content else {
 		return MindroomPushEvaluation::Unchanged;
 	};
@@ -392,7 +359,7 @@ pub async fn get_actions<'a>(
 	pdu: &Raw<AnySyncTimelineEvent>,
 	room_id: &RoomId,
 ) -> &'a [Action] {
-	let mindroom_push = mindroom_push_evaluation(pdu, self.services.globals.server_name());
+	let mindroom_push = mindroom_push_evaluation(pdu);
 	let pdu = match &mindroom_push {
 		| MindroomPushEvaluation::Suppress => return &[],
 		| MindroomPushEvaluation::Normalize(event) => event,

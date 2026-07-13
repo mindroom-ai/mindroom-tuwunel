@@ -1,8 +1,8 @@
 #![cfg(test)]
 
 use ruma::{
-	EventId, RoomId, ServerName, UserId,
-	events::AnySyncTimelineEvent,
+	EventId, RoomId, UserId,
+	events::{AnySyncTimelineEvent, TimelineEventType},
 	owned_room_id, owned_user_id,
 	push::{Action, PushConditionRoomCtx, Ruleset},
 	serde::Raw,
@@ -11,7 +11,9 @@ use ruma::{
 use serde_json::Value as JsonValue;
 use tuwunel_database::{Interfix, SEP, serialize_to_vec};
 
-use super::{mindroom_nonterminal_push_event, mindroom_terminal_push_event};
+use super::{
+	mindroom_nonterminal_push_event, mindroom_terminal_push_content, mindroom_terminal_push_event,
+};
 
 const ROOM: &str = "!room:example.com";
 const USER: &str = "@user:example.com";
@@ -30,8 +32,6 @@ fn thread_key(root: &EventId) -> Vec<u8> {
 fn interfix_prefix() -> Vec<u8> {
 	serialize_to_vec((user(), room(), Interfix)).expect("serialize prefix")
 }
-
-fn local_server() -> &'static ServerName { "example.com".try_into().unwrap() }
 
 fn stream_event(sender: &str, status: &str, msgtype: &str) -> Raw<AnySyncTimelineEvent> {
 	serde_json::from_value(serde_json::json!({
@@ -129,8 +129,7 @@ fn thread_prefix_sweep_preserves_main() {
 #[test]
 fn terminal_mindroom_edit_is_normalized_for_push_rules() {
 	let event = stream_event("@mindroom_helper:example.com", "completed", "m.text");
-	let normalized =
-		mindroom_terminal_push_event(&event, local_server()).expect("terminal event");
+	let normalized = mindroom_terminal_push_event(&event).expect("terminal event");
 	let value: JsonValue = serde_json::from_str(normalized.json().get()).expect("event json");
 	let content = value["content"]
 		.as_object()
@@ -142,21 +141,25 @@ fn terminal_mindroom_edit_is_normalized_for_push_rules() {
 }
 
 #[test]
-fn nonterminal_or_untrusted_stream_edit_is_not_normalized() {
+fn nonterminal_stream_edit_is_not_normalized() {
 	let streaming = stream_event("@mindroom_helper:example.com", "streaming", "m.notice");
+
+	assert!(mindroom_terminal_push_event(&streaming).is_none());
+}
+
+#[test]
+fn stream_protocol_is_sender_agnostic() {
 	let remote = stream_event("@mindroom_helper:remote.example", "completed", "m.text");
 	let ordinary_user = stream_event("@alice:example.com", "completed", "m.text");
 
-	assert!(mindroom_terminal_push_event(&streaming, local_server()).is_none());
-	assert!(mindroom_terminal_push_event(&remote, local_server()).is_none());
-	assert!(mindroom_terminal_push_event(&ordinary_user, local_server()).is_none());
+	assert!(mindroom_terminal_push_event(&remote).is_some());
+	assert!(mindroom_terminal_push_event(&ordinary_user).is_some());
 }
 
 #[test]
 fn terminal_encrypted_edit_removes_only_the_exposed_relation() {
 	let event = encrypted_stream_event("@mindroom_helper:example.com", "completed", true);
-	let normalized =
-		mindroom_terminal_push_event(&event, local_server()).expect("terminal encrypted event");
+	let normalized = mindroom_terminal_push_event(&event).expect("terminal encrypted event");
 	let value: JsonValue = serde_json::from_str(normalized.json().get()).expect("event json");
 	let content = value["content"]
 		.as_object()
@@ -178,17 +181,37 @@ fn terminal_encrypted_edit_removes_only_the_exposed_relation() {
 }
 
 #[test]
-fn trusted_nonterminal_stream_events_are_suppressed() {
+fn encrypted_gateway_content_matches_push_rule_normalization() {
+	let event = encrypted_stream_event("@mindroom_helper:example.com", "completed", true);
+	let value: JsonValue = serde_json::from_str(event.json().get()).expect("event json");
+	let content =
+		mindroom_terminal_push_content(&TimelineEventType::RoomEncrypted, &value["content"])
+			.expect("terminal encrypted content");
+
+	assert!(content.get("m.relates_to").is_none());
+	assert_eq!(
+		content
+			.get("ciphertext")
+			.and_then(JsonValue::as_str),
+		Some("encrypted payload")
+	);
+}
+
+#[test]
+fn nonterminal_stream_events_are_suppressed_for_any_sender() {
 	let encrypted_pending =
 		encrypted_stream_event("@mindroom_helper:example.com", "pending", false);
 	let encrypted_streaming =
 		encrypted_stream_event("@mindroom_helper:example.com", "streaming", true);
 	let remote_pending =
 		encrypted_stream_event("@mindroom_helper:remote.example", "pending", false);
+	let future_intermediate =
+		encrypted_stream_event("@mindroom_helper:example.com", "paused", true);
 
-	assert!(mindroom_nonterminal_push_event(&encrypted_pending, local_server()));
-	assert!(mindroom_nonterminal_push_event(&encrypted_streaming, local_server()));
-	assert!(!mindroom_nonterminal_push_event(&remote_pending, local_server()));
+	assert!(mindroom_nonterminal_push_event(&encrypted_pending));
+	assert!(mindroom_nonterminal_push_event(&encrypted_streaming));
+	assert!(mindroom_nonterminal_push_event(&remote_pending));
+	assert!(mindroom_nonterminal_push_event(&future_intermediate));
 }
 
 #[tokio::test]
@@ -209,8 +232,7 @@ async fn terminal_mindroom_edit_uses_normal_message_push_rule() {
 			.await
 			.is_empty()
 	);
-	let normalized =
-		mindroom_terminal_push_event(&event, local_server()).expect("terminal event");
+	let normalized = mindroom_terminal_push_event(&event).expect("terminal event");
 	assert!(
 		ruleset
 			.get_actions(&normalized, &context)
@@ -238,8 +260,7 @@ async fn terminal_encrypted_edit_uses_encrypted_message_push_rule() {
 			.await
 			.is_empty()
 	);
-	let normalized =
-		mindroom_terminal_push_event(&event, local_server()).expect("terminal encrypted event");
+	let normalized = mindroom_terminal_push_event(&event).expect("terminal encrypted event");
 	assert!(
 		ruleset
 			.get_actions(&normalized, &context)
