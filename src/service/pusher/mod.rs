@@ -11,13 +11,14 @@ use std::sync::Arc;
 use futures::{Stream, StreamExt, TryFutureExt, future::join};
 use ipaddress::IPAddress;
 use ruma::{
-	DeviceId, OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId, UserId,
+	DeviceId, OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId, ServerName, UserId,
 	api::client::push::{Pusher, PusherKind, set_pusher},
 	events::{AnySyncTimelineEvent, room::power_levels::RoomPowerLevels},
 	push::{Action, PushConditionPowerLevelsCtx, PushConditionRoomCtx, Ruleset},
 	serde::Raw,
 	uint,
 };
+use serde_json::{Value as JsonValue, value::to_raw_value};
 use tuwunel_core::{
 	Err, Result, err, implement,
 	utils::{
@@ -30,12 +31,89 @@ use tuwunel_database::{Database, Deserialized, Ignore, Interfix, Json, Map};
 
 pub use self::append::Notified;
 
+const MINDROOM_STREAM_STATUS_KEY: &str = "io.mindroom.stream_status";
+const MINDROOM_TERMINAL_STREAM_STATUSES: [&str; 4] =
+	["completed", "cancelled", "interrupted", "error"];
+
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	notification_increment_mutex: MutexMap<(OwnedRoomId, OwnedUserId), ()>,
 	highlight_increment_mutex: MutexMap<(OwnedRoomId, OwnedUserId), ()>,
 	db: Data,
 	suppressed: suppressed::SuppressedQueue,
+}
+
+pub(super) fn mindroom_terminal_push_content(
+	sender: &UserId,
+	content: &JsonValue,
+	local_server_name: &ServerName,
+) -> Option<JsonValue> {
+	if !is_terminal_mindroom_edit(sender, content, local_server_name) {
+		return None;
+	}
+
+	content.as_object()?.get("m.new_content").cloned()
+}
+
+fn is_terminal_mindroom_edit(
+	sender: &UserId,
+	content: &JsonValue,
+	local_server_name: &ServerName,
+) -> bool {
+	if sender.server_name() != local_server_name || !sender.localpart().starts_with("mindroom_") {
+		return false;
+	}
+
+	let Some(content) = content.as_object() else {
+		return false;
+	};
+	let stream_status = content
+		.get(MINDROOM_STREAM_STATUS_KEY)
+		.and_then(JsonValue::as_str);
+	let Some(stream_status) = stream_status else {
+		return false;
+	};
+	if !MINDROOM_TERMINAL_STREAM_STATUSES.contains(&stream_status) {
+		return false;
+	}
+
+	content
+		.get("m.relates_to")
+		.and_then(JsonValue::as_object)
+		.and_then(|relation| relation.get("rel_type"))
+		.and_then(JsonValue::as_str)
+		== Some("m.replace")
+}
+
+fn mindroom_terminal_push_event(
+	pdu: &Raw<AnySyncTimelineEvent>,
+	local_server_name: &ServerName,
+) -> Option<Raw<AnySyncTimelineEvent>> {
+	let mut event: JsonValue = serde_json::from_str(pdu.json().get()).ok()?;
+	let event_type = event.get("type")?.as_str()?;
+	let sender = UserId::parse(event.get("sender")?.as_str()?).ok()?;
+	let content = event.get("content")?;
+	if !is_terminal_mindroom_edit(&sender, content, local_server_name) {
+		return None;
+	}
+
+	let push_content = match event_type {
+		| "m.room.message" => content.as_object()?.get("m.new_content")?.clone(),
+		| "m.room.encrypted" => {
+			let mut encrypted_content = content.clone();
+			encrypted_content
+				.as_object_mut()?
+				.remove("m.relates_to");
+			encrypted_content
+		},
+		| _ => return None,
+	};
+
+	// Evaluate the completed replacement as the final message it represents.
+	// This lets ordinary room, DM, mention, and mute rules decide the push result
+	// instead of the generic edit-suppression rule swallowing the terminal update.
+	*event.get_mut("content")? = push_content;
+	Some(Raw::from_json(to_raw_value(&event).ok()?))
 }
 
 struct Data {
@@ -274,5 +352,8 @@ pub async fn get_actions<'a>(
 		| None => ctx,
 	};
 
-	ruleset.get_actions(pdu, &ctx).await
+	let terminal_event = mindroom_terminal_push_event(pdu, self.services.globals.server_name());
+	ruleset
+		.get_actions(terminal_event.as_ref().unwrap_or(pdu), &ctx)
+		.await
 }

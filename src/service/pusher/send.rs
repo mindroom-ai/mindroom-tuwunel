@@ -170,7 +170,14 @@ async fn send_notice<Pdu: Event>(
 				}
 				notify.sender = Some(event.sender().to_owned());
 				notify.event_type = Some(event.kind().to_owned());
-				notify.content = serde_json::value::to_raw_value(event.content()).ok();
+				let event_content = event.get_content_as_value();
+				let push_content = super::mindroom_terminal_push_content(
+					event.sender(),
+					&event_content,
+					self.services.globals.server_name(),
+				)
+				.unwrap_or(event_content);
+				notify.content = serde_json::value::to_raw_value(&push_content).ok();
 
 				if *event.kind() == TimelineEventType::RoomMember {
 					notify.user_is_target = event.state_key() == Some(event.sender().as_str());
