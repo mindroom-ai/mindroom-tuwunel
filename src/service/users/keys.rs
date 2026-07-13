@@ -302,7 +302,51 @@ pub async fn count_one_time_keys(
 			.await;
 	}
 
-	algorithm_counts
+	complete_one_time_key_counts(algorithm_counts)
+}
+
+/// Keep zero-count algorithms visible to clients after an OTK pool is drained.
+///
+/// An empty map is omitted from `/sync` by ruma. Some clients, including nio,
+/// interpret an omitted count as "unknown" and therefore do not replenish a
+/// previously-uploaded Olm account. `curve25519` is retained for compatibility
+/// with clients which still require the legacy count in `/keys/upload`.
+fn complete_one_time_key_counts(
+	mut counts: BTreeMap<OneTimeKeyAlgorithm, UInt>,
+) -> BTreeMap<OneTimeKeyAlgorithm, UInt> {
+	counts
+		.entry(OneTimeKeyAlgorithm::from("curve25519"))
+		.or_default();
+	counts
+		.entry(OneTimeKeyAlgorithm::SignedCurve25519)
+		.or_default();
+	counts
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn empty_one_time_key_counts_include_supported_zeroes() {
+		let counts = complete_one_time_key_counts(BTreeMap::new());
+
+		assert_eq!(
+			counts.get(&OneTimeKeyAlgorithm::from("curve25519")),
+			Some(&UInt::from(0_u32))
+		);
+		assert_eq!(counts.get(&OneTimeKeyAlgorithm::SignedCurve25519), Some(&UInt::from(0_u32)));
+	}
+
+	#[test]
+	fn existing_one_time_key_count_is_preserved() {
+		let mut counts = BTreeMap::new();
+		counts.insert(OneTimeKeyAlgorithm::SignedCurve25519, UInt::from(17_u32));
+
+		let counts = complete_one_time_key_counts(counts);
+
+		assert_eq!(counts.get(&OneTimeKeyAlgorithm::SignedCurve25519), Some(&UInt::from(17_u32)));
+	}
 }
 
 /// MSC4225: drop the `excess` oldest rows for this `(user, device)`. Forward
