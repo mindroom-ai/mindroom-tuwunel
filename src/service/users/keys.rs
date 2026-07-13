@@ -275,6 +275,8 @@ pub async fn count_one_time_keys(
 	device_id: &DeviceId,
 ) -> BTreeMap<OneTimeKeyAlgorithm, UInt> {
 	let Some(otk) = self.db.onetimekeyid4225_otk.as_ref() else {
+		// Without the MSC4225 column this node cannot observe the authoritative
+		// pool, so preserve "unknown" instead of falsely reporting zero keys.
 		return BTreeMap::new();
 	};
 
@@ -339,12 +341,17 @@ mod tests {
 	}
 
 	#[test]
-	fn existing_one_time_key_count_is_preserved() {
+	fn existing_one_time_key_counts_are_preserved() {
 		let mut counts = BTreeMap::new();
+		counts.insert(OneTimeKeyAlgorithm::from("curve25519"), UInt::from(11_u32));
 		counts.insert(OneTimeKeyAlgorithm::SignedCurve25519, UInt::from(17_u32));
 
 		let counts = complete_one_time_key_counts(counts);
 
+		assert_eq!(
+			counts.get(&OneTimeKeyAlgorithm::from("curve25519")),
+			Some(&UInt::from(11_u32))
+		);
 		assert_eq!(counts.get(&OneTimeKeyAlgorithm::SignedCurve25519), Some(&UInt::from(17_u32)));
 	}
 }
