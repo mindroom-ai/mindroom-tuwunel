@@ -126,7 +126,7 @@ fn mindroom_push_evaluation(
 	pdu: &Raw<AnySyncTimelineEvent>,
 	local_server_name: &ServerName,
 ) -> MindroomPushEvaluation {
-	let Ok(mut event) = serde_json::from_str::<JsonValue>(pdu.json().get()) else {
+	let Ok(mut event) = serde_json::to_value(pdu) else {
 		return MindroomPushEvaluation::Unchanged;
 	};
 	let Some(event_type) = event.get("type").and_then(JsonValue::as_str) else {
