@@ -11,7 +11,7 @@ use ruma::{
 use serde_json::Value as JsonValue;
 use tuwunel_database::{Interfix, SEP, serialize_to_vec};
 
-use super::mindroom_terminal_push_event;
+use super::{mindroom_nonterminal_push_event, mindroom_terminal_push_event};
 
 const ROOM: &str = "!room:example.com";
 const USER: &str = "@user:example.com";
@@ -54,18 +54,29 @@ fn stream_event(sender: &str, status: &str, msgtype: &str) -> Raw<AnySyncTimelin
 	.expect("valid timeline event")
 }
 
-fn encrypted_stream_event(sender: &str, status: &str) -> Raw<AnySyncTimelineEvent> {
+fn encrypted_stream_event(sender: &str, status: &str, edit: bool) -> Raw<AnySyncTimelineEvent> {
+	let mut content = serde_json::json!({
+		"algorithm": "m.megolm.v1.aes-sha2",
+		"ciphertext": "encrypted payload",
+		"device_id": "DEVICE",
+		"io.mindroom.stream_status": status,
+		"sender_key": "sender key",
+		"session_id": "session",
+	});
+	if edit {
+		content
+			.as_object_mut()
+			.expect("content object")
+			.insert(
+				"m.relates_to".into(),
+				serde_json::json!({
+				"event_id": "$original",
+				"rel_type": "m.replace",
+				}),
+			);
+	}
 	serde_json::from_value(serde_json::json!({
-		"content": {
-			"algorithm": "m.megolm.v1.aes-sha2",
-			"ciphertext": "encrypted payload",
-			"device_id": "DEVICE",
-			"io.mindroom.stream_status": status,
-			"m.relates_to": {"event_id": "$original", "rel_type": "m.replace"},
-			"msgtype": if status == "streaming" { "m.notice" } else { "m.text" },
-			"sender_key": "sender key",
-			"session_id": "session",
-		},
+		"content": content,
 		"event_id": "$encrypted_edit",
 		"origin_server_ts": 1,
 		"sender": sender,
@@ -143,7 +154,7 @@ fn nonterminal_or_untrusted_stream_edit_is_not_normalized() {
 
 #[test]
 fn terminal_encrypted_edit_removes_only_the_exposed_relation() {
-	let event = encrypted_stream_event("@mindroom_helper:example.com", "completed");
+	let event = encrypted_stream_event("@mindroom_helper:example.com", "completed", true);
 	let normalized =
 		mindroom_terminal_push_event(&event, local_server()).expect("terminal encrypted event");
 	let value: JsonValue = serde_json::from_str(normalized.json().get()).expect("event json");
@@ -164,6 +175,20 @@ fn terminal_encrypted_edit_removes_only_the_exposed_relation() {
 			.and_then(JsonValue::as_str),
 		Some("completed")
 	);
+}
+
+#[test]
+fn trusted_nonterminal_stream_events_are_suppressed() {
+	let encrypted_pending =
+		encrypted_stream_event("@mindroom_helper:example.com", "pending", false);
+	let encrypted_streaming =
+		encrypted_stream_event("@mindroom_helper:example.com", "streaming", true);
+	let remote_pending =
+		encrypted_stream_event("@mindroom_helper:remote.example", "pending", false);
+
+	assert!(mindroom_nonterminal_push_event(&encrypted_pending, local_server()));
+	assert!(mindroom_nonterminal_push_event(&encrypted_streaming, local_server()));
+	assert!(!mindroom_nonterminal_push_event(&remote_pending, local_server()));
 }
 
 #[tokio::test]
@@ -205,7 +230,7 @@ async fn terminal_encrypted_edit_uses_encrypted_message_push_rule() {
 		user,
 		"User".into(),
 	);
-	let event = encrypted_stream_event("@mindroom_helper:example.com", "completed");
+	let event = encrypted_stream_event("@mindroom_helper:example.com", "completed", true);
 
 	assert!(
 		ruleset
