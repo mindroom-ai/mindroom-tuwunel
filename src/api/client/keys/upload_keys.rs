@@ -78,25 +78,42 @@ async fn store_device_keys(
 		)));
 	}
 
-	// Workaround for a nheko bug which omits cross-signing signatures when
-	// re-uploading the same DeviceKeys: ignore an exact-copy re-upload so the
-	// existing signatures are preserved.
-	let unchanged = services
+	match services
 		.users
 		.get_device_keys(sender_user, sender_device)
 		.await
 		.and_then(|keys| keys.deserialize().map_err(Into::into))
-		.is_ok_and(|existing| existing.keys == new_keys.keys);
+	{
+		// Workaround for a nheko bug which omits cross-signing signatures when
+		// re-uploading the same DeviceKeys: ignore an exact-copy re-upload so
+		// the existing signatures are preserved.
+		| Ok(existing) if existing.keys == new_keys.keys => {
+			debug!(
+				?sender_user,
+				?sender_device,
+				?device_keys,
+				"Ignoring user uploaded keys as they are an exact copy already in the database"
+			);
 
-	if unchanged {
-		debug!(
-			?sender_user,
-			?sender_device,
-			?device_keys,
-			"Ignoring user uploaded keys as they are an exact copy already in the database"
-		);
-
-		return Ok(());
+			return Ok(());
+		},
+		// Identity keys for an existing device are immutable. Different key
+		// material for the same device id means the client lost its crypto
+		// store while keeping its access token; accepting the replacement
+		// would silently break olm sessions and permanently poison the device
+		// caches of every peer that saw the old identity. Force a fresh login
+		// instead.
+		| Ok(_) => {
+			return Err!(Request(Forbidden(debug_warn!(
+				?sender_user,
+				?sender_device,
+				"Rejecting upload of different identity keys for an existing device; \
+				 device keys are immutable. Log out and log in again to register a new \
+				 encryption identity."
+			))));
+		},
+		// No existing device keys: this is the device's first upload.
+		| Err(_) => {},
 	}
 
 	services
