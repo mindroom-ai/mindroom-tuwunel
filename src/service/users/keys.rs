@@ -49,6 +49,19 @@ enum SignatureAction {
 	Write(KeyRole, SignatureWrite),
 }
 
+/// Result of atomically comparing a device-key upload with the stored identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceKeysUpdate {
+	/// No identity existed, so the uploaded keys were stored.
+	Inserted,
+
+	/// The identity-key material matched and the stored record was preserved.
+	Unchanged,
+
+	/// A different identity was already stored for the device.
+	Conflict,
+}
+
 /// MSC2732: row stored under `(user, device, algorithm)` in
 /// `userdeviceidalgorithm_fallback`. Fallback keys are not deleted on
 /// claim; the row is rewritten with `used = true`.
@@ -402,6 +415,72 @@ pub async fn prune_one_time_keys(&self, user_id: &UserId, device_id: &DeviceId, 
 
 #[implement(super::Service)]
 pub async fn add_device_keys(
+	&self,
+	user_id: &UserId,
+	device_id: &DeviceId,
+	device_keys: &Raw<DeviceKeys>,
+) -> Result {
+	let mutex_key = (user_id.to_owned(), device_id.to_owned());
+	let _guard = self.device_key_mutex.lock(&mutex_key).await;
+
+	if !self.device_exists(user_id, device_id).await {
+		return Err!(Request(Forbidden(
+			"Cannot add identity keys for a device that no longer exists."
+		)));
+	}
+
+	self.write_device_keys(user_id, device_id, device_keys)
+		.await;
+
+	Ok(())
+}
+
+/// Stores the first identity keys for a device while rejecting replacements.
+///
+/// The comparison and insertion share the same per-device lock as device
+/// removal, so concurrent first uploads cannot both observe an empty record and
+/// a request already in flight cannot resurrect keys after its device is gone.
+#[implement(super::Service)]
+pub async fn update_device_keys(
+	&self,
+	user_id: &UserId,
+	device_id: &DeviceId,
+	device_keys: &Raw<DeviceKeys>,
+	new_keys: &DeviceKeys,
+) -> Result<DeviceKeysUpdate> {
+	let mutex_key = (user_id.to_owned(), device_id.to_owned());
+	let _guard = self.device_key_mutex.lock(&mutex_key).await;
+
+	if !self.device_exists(user_id, device_id).await {
+		return Err!(Request(Forbidden(
+			"Cannot add identity keys for a device that no longer exists."
+		)));
+	}
+
+	if let Ok(existing_keys) = self.get_device_keys(user_id, device_id).await {
+		let existing = existing_keys.deserialize().map_err(|e| {
+			err!(Database(debug_warn!(
+				?user_id,
+				?device_id,
+				"Failed to deserialize existing device keys: {e}"
+			)))
+		})?;
+
+		return Ok(if existing.keys == new_keys.keys {
+			DeviceKeysUpdate::Unchanged
+		} else {
+			DeviceKeysUpdate::Conflict
+		});
+	}
+
+	self.write_device_keys(user_id, device_id, device_keys)
+		.await;
+
+	Ok(DeviceKeysUpdate::Inserted)
+}
+
+#[implement(super::Service)]
+async fn write_device_keys(
 	&self,
 	user_id: &UserId,
 	device_id: &DeviceId,
