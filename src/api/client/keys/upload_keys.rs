@@ -117,9 +117,8 @@ async fn store_device_keys(
 		return Err!(Request(Forbidden(debug_warn!(
 			?sender_user,
 			?sender_device,
-			"Rejecting upload of different identity keys for an existing device; device \
-			 keys are immutable. Log out and log in again to register a new encryption \
-			 identity."
+			"Rejecting upload of different identity keys for an existing device; device keys \
+			 are immutable. Log out and log in again to register a new encryption identity."
 		))));
 	}
 
