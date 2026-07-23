@@ -170,9 +170,26 @@ Behavior:
   collide with the immutability check when a later login re-uses the device
   id.
 
+### 6) fix(api): clamp `/messages` pagination at the `to` position
+Files:
+- `src/api/client/message.rs`
+- `src/mindroom-tests/tests/messages_to_clamp.rs`
+
+Behavior:
+- `/messages` stopped pagination only when an event's count exactly equalled
+  the `to` token and silently swallowed unparseable `to` values. A sync
+  `next_batch` token is a global stream position that almost never equals an
+  event count in the requested room, so a `to` bound taken from `/sync` —
+  which the specification permits — was ignored and the walk ran unbounded.
+  Pagination now stops once the walk passes the `to` position in either
+  direction; the event at exactly `to` stays excluded, as before.
+- An unparseable `from` or `to` is rejected with 400 `M_INVALID_PARAM`.
+  Previously `to` was ignored and `from` surfaced as a 500 through the
+  unmapped `ParseInt` error.
+
 ## Operational Changes
 
-### 6) `ci: fork release automation, container publishing, and GitHub checks`
+### 7) `ci: fork release automation, container publishing, and GitHub checks`
 Files:
 - `.github/workflows/mindroom-release.yml`, `.github/workflows/auto-mindroom-release.yml`
 - `.github/workflows/mindroom-container-release.yml`, `.github/workflows/mindroom-ci.yml`
@@ -189,9 +206,10 @@ Fork integration tests live in the `mindroom-tests` crate
 (`src/mindroom-tests/`), plus `default_test` database-path isolation in
 `src/main/args.rs`. They pin the rebase-sensitive behaviors (SSO/UIAA, native
 Apple, deactivation/erase, Synapse-admin deactivation reason, edit-purge ↔
-bundling composition, and device-key immutability/cleanup/concurrency) so
-future rebases catch regressions. The stream-push classification is pinned by
-unit tests in `src/service/pusher/tests.rs`.
+bundling composition, device-key immutability/cleanup/concurrency, and
+`/messages` `to`-position clamping) so future rebases catch regressions. The
+stream-push classification is pinned by unit tests in
+`src/service/pusher/tests.rs`.
 
 ## Runtime Configuration
 
@@ -230,3 +248,5 @@ native_client_ids = ["chat.mindroom.app"]
   are immutable per device id).
 - Events carrying `io.mindroom.stream_status` push at most once, when the
   stream reaches a terminal status.
+- `/messages` treats `from` and `to` as directional stream-position bounds and
+  rejects malformed pagination tokens with `M_INVALID_PARAM`.

@@ -20,6 +20,8 @@
   notification noise.
 - Immutable per-device encryption identities with atomic concurrent-upload
   handling and complete key cleanup on device removal.
+- Direction-aware `/messages` pagination bounds for global sync positions,
+  with explicit client errors for malformed tokens.
 - Tagged-release binary publishing workflow for Linux `x86_64` and `aarch64`.
 - Release container publishing workflow for MindRoom release tags.
 - Automated fork release tagging on `main` in
