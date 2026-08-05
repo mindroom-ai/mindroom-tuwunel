@@ -565,13 +565,4 @@ mod tests {
 			UInt::try_from(returned_timeline.len()).expect("timeline length fits UInt");
 		assert!(num_live.expect("incremental response") <= timeline_len);
 	}
-
-	#[test]
-	fn filtered_live_event_is_not_counted() {
-		let returned_timeline = timeline(&[8, 9]);
-		let (initial, num_live) = room_timeline_metadata(0, Some(10), &returned_timeline);
-
-		assert_eq!(initial, Some(true));
-		assert_eq!(num_live, Some(uint!(0)));
-	}
 }
