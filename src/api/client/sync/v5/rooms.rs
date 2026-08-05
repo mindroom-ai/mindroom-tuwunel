@@ -84,7 +84,12 @@ async fn handle_room(
 	conn: &Connection,
 	window_room: &WindowRoom,
 ) -> Result<response::Room> {
-	let SyncInfo { services, sender_user, .. } = sync_info;
+	let SyncInfo {
+		services,
+		sender_user,
+		previous_connection_pos,
+		..
+	} = sync_info;
 	let WindowRoom {
 		lists, membership, room_id, last_count, ..
 	} = window_room;
@@ -205,8 +210,7 @@ async fn handle_room(
 	)
 	.await;
 
-	let previous_connection_pos =
-		(!is_invite && conn.globalsince != 0).then_some(conn.globalsince);
+	let previous_connection_pos = previous_connection_pos.filter(|_| !is_invite);
 	let (initial, num_live) =
 		room_timeline_metadata(roomsince, previous_connection_pos, &timeline);
 	let timeline = timeline.into_iter().map(at!(1)).collect();
