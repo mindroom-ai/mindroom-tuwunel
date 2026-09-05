@@ -93,7 +93,7 @@ async fn store_device_keys(
 				"Ignoring user uploaded keys as they are an exact copy already in the database"
 			);
 
-			return Ok(());
+			Ok(())
 		},
 
 		// Identity keys for an existing device are immutable. Different key

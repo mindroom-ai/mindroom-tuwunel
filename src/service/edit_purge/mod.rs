@@ -212,7 +212,7 @@ impl Service {
 	/// trigger a cycle on demand; it does not consult
 	/// `mindroom_edit_purge_enabled` (the worker loop gates on that), only
 	/// `mindroom_edit_purge_dry_run`.
-	#[allow(clippy::too_many_lines)]
+	#[expect(clippy::too_many_lines)]
 	#[tracing::instrument(skip_all, level = "debug")]
 	pub async fn purge_cycle(&self) -> Result {
 		let config = &self.services.server.config;
@@ -366,11 +366,7 @@ impl Service {
 		let purge_batch: Vec<_> = pending_superseded.drain(..purge_budget).collect();
 		drop(pending_superseded);
 
-		let cork = if !dry_run {
-			Some(self.services.db.cork_and_flush())
-		} else {
-			None
-		};
+		let cork = (!dry_run).then(|| self.services.db.cork_and_flush());
 
 		let mut sidecar_cleanup_candidates: Vec<(OwnedEventId, ReplaceCandidate)> = Vec::new();
 		for (target_event_id, candidate) in purge_batch {
@@ -2248,9 +2244,7 @@ rocksdb_read_only = {}
 		{
 			let _cork = service.services.db.cork_and_flush();
 			for i in 2..=18_u32 {
-				service
-					.pduid_pdu
-					.insert(&pdu_key(i), br"not-json");
+				service.pduid_pdu.insert(&pdu_key(i), b"not-json");
 			}
 		}
 

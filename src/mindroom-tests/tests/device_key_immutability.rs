@@ -22,6 +22,7 @@ mod tests {
 	const TOKEN: &str = "device-key-immutability-token-0123456789";
 	const CONCURRENT_DEVICE: &str = "CONCURRENT";
 	const CONCURRENT_TOKEN: &str = "device-key-concurrency-token-0123456789ab";
+	const REQUESTS_PER_IDENTITY: usize = 8;
 	const CORRUPT_DEVICE: &str = "CORRUPT";
 	const CORRUPT_TOKEN: &str = "device-key-corruption-token-0123456789abcdef";
 
@@ -173,7 +174,6 @@ mod tests {
 			)
 			.await?;
 
-		const REQUESTS_PER_IDENTITY: usize = 8;
 		let barrier = Arc::new(Barrier::new(REQUESTS_PER_IDENTITY * 2 + 1));
 		let mut tasks = Vec::with_capacity(REQUESTS_PER_IDENTITY * 2);
 		for identity_seed in [10, 20] {
@@ -183,8 +183,12 @@ mod tests {
 				let keys = device_keys(
 					CONCURRENT_DEVICE,
 					identity_seed,
-					identity_seed + 1,
-					identity_seed + 2,
+					identity_seed
+						.checked_add(1)
+						.expect("bounded signing seed"),
+					identity_seed
+						.checked_add(2)
+						.expect("bounded signature seed"),
 				);
 				tasks.push(tokio::spawn(async move {
 					barrier.wait().await;
@@ -199,8 +203,8 @@ mod tests {
 		}
 
 		barrier.wait().await;
-		let mut first_successes = 0;
-		let mut second_successes = 0;
+		let mut first_successes = 0_usize;
+		let mut second_successes = 0_usize;
 		for task in tasks {
 			let (identity_seed, status) = task.await.expect("upload task should join");
 			assert!(
@@ -209,9 +213,13 @@ mod tests {
 			);
 			if status == StatusCode::OK {
 				if identity_seed == 10 {
-					first_successes += 1;
+					first_successes = first_successes
+						.checked_add(1)
+						.expect("bounded first-identity success count");
 				} else {
-					second_successes += 1;
+					second_successes = second_successes
+						.checked_add(1)
+						.expect("bounded second-identity success count");
 				}
 			}
 		}
@@ -328,7 +336,14 @@ mod tests {
 
 	fn signed_key(seed: u8, fallback: bool) -> Value {
 		let mut signature = Map::new();
-		signature.insert(format!("ed25519:{DEVICE}"), Value::String(encoded(seed + 1, 64)));
+		signature.insert(
+			format!("ed25519:{DEVICE}"),
+			Value::String(encoded(
+				seed.checked_add(1)
+					.expect("bounded signature seed"),
+				64,
+			)),
+		);
 		let mut signatures = Map::new();
 		signatures.insert(USER.to_owned(), Value::Object(signature));
 

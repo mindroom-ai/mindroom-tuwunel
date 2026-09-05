@@ -40,7 +40,9 @@ impl Harness {
 				async move { axum::Json(response) }
 			});
 			let handle = tokio::spawn(async move {
-				let _: std::io::Result<()> = axum::serve(listener, app).await;
+				axum::serve(listener, app)
+					.await
+					.expect("serve discovery test provider");
 			});
 
 			Ok(DiscoveryServer {
@@ -57,7 +59,9 @@ impl Harness {
 			let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
 			let addr = listener.local_addr()?;
 			let handle = tokio::spawn(async move {
-				let _: std::io::Result<()> = axum::serve(listener, app).await;
+				axum::serve(listener, app)
+					.await
+					.expect("serve mock identity provider");
 			});
 
 			Ok(MockServer {

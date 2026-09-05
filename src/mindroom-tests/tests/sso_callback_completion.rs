@@ -38,6 +38,7 @@ mod tests {
 	/// single server, because each `with_services` initializes the global
 	/// tracing subscriber and a test binary can only do that once.
 	#[test]
+	#[expect(clippy::too_many_lines)]
 	fn complete_sso_session_reuse_rejection_and_reactivation() -> Result {
 		let mut harness = Harness::new("mindroom_rebase_sso_completion", [])?;
 
@@ -212,8 +213,8 @@ mod tests {
 			);
 
 			release_first.notify_one();
-			let (_, _, first_old_session) = first.await.expect("first task should join")?;
-			let (_, _, second_old_session) = second.await.expect("second task should join")?;
+			let (_, (), first_old_session) = first.await.expect("first task should join")?;
+			let (_, (), second_old_session) = second.await.expect("second task should join")?;
 			assert!(first_old_session.is_none());
 			assert_eq!(second_old_session.as_deref(), Some("serialized-first"));
 			assert_eq!(

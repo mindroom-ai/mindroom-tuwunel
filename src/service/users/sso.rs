@@ -357,5 +357,5 @@ database_path = "{}"
 		path
 	}
 
-	fn cleanup_temp_dir(path: &Path) { let _: std::io::Result<()> = fs::remove_dir_all(path); }
+	fn cleanup_temp_dir(path: &Path) { drop(fs::remove_dir_all(path)); }
 }
