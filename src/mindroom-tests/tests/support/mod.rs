@@ -5,8 +5,20 @@ use std::sync::Arc;
 use axum::Router;
 use serde_json::json;
 use tuwunel::{Args, Runtime, Server};
+use tuwunel_api::router::State;
 use tuwunel_core::Result;
 use tuwunel_service::Services;
+
+/// The routes of every API surface for `server`, as the server's own router
+/// merges them, without its fallbacks.
+pub(crate) fn api_router(server: &tuwunel_core::Server) -> Router<State> {
+	Router::new()
+		.merge(tuwunel_api_client::routes::build(server))
+		.merge(tuwunel_api_admin::routes::build(server))
+		.merge(tuwunel_api_mas::routes::build())
+		.merge(tuwunel_api_oidc::routes::build())
+		.merge(tuwunel_api_federation::routes::build(server))
+}
 
 pub(crate) struct Harness {
 	pub(crate) args: Args,

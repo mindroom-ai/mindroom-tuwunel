@@ -11,8 +11,8 @@ pub(crate) use crate::OnceServices;
 #[cfg(feature = "livekit")]
 use crate::livekit::Service as LivekitService;
 use crate::{
-	account_data, admin, appservice, client, config, deactivate, delayed_events, emergency,
-	federation, fetcher, globals, key_backups, login_ratelimit,
+	account_data, admin, appservice, client, config, deactivate, delayed_events, edit_purge,
+	emergency, federation, fetcher, globals, key_backups, login_ratelimit,
 	manager::Manager,
 	media, membership, oauth, presence, profile, pusher, registration_tokens, rendezvous,
 	resolver,
@@ -28,6 +28,7 @@ pub struct Services {
 	pub appservice: Arc<appservice::Service>,
 	pub config: Arc<config::Service>,
 	pub client: Arc<client::Service>,
+	pub edit_purge: Arc<edit_purge::Service>,
 	pub emergency: Arc<emergency::Service>,
 	pub fetcher: Arc<fetcher::Service>,
 	pub globals: Arc<globals::Service>,
@@ -106,6 +107,7 @@ pub async fn build(server: Arc<Server>) -> Result<Arc<Self>> {
 		resolver: resolver::Service::build(&args)?,
 		client: client::Service::build(&args)?,
 		config: config::Service::build(&args)?,
+		edit_purge: edit_purge::Service::build(&args)?,
 		emergency: emergency::Service::build(&args)?,
 		fetcher: fetcher::Service::build(&args)?,
 		globals: globals::Service::build(&args)?,
@@ -180,6 +182,7 @@ pub(crate) fn services(&self) -> impl Iterator<Item = Arc<dyn Service>> + Send {
 		cast!(self.resolver),
 		cast!(self.client),
 		cast!(self.config),
+		cast!(self.edit_purge),
 		cast!(self.emergency),
 		cast!(self.fetcher),
 		cast!(self.globals),
