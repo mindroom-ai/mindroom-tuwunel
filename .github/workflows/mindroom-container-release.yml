@@ -103,7 +103,6 @@ jobs:
         with:
           name: mindroom-release-${{ matrix.arch }}
           driver: docker-container
-          install: true
           use: true
           buildkitd-flags: --allow-insecure-entitlement network.host
 
