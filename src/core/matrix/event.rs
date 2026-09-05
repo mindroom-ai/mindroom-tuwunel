@@ -31,7 +31,7 @@ pub use self::{
 	format::{Owned, Ref},
 	id::*,
 	msgtype::MsgType,
-	relation::RelationTypeEqual,
+	relation::{ExtractRelatesToInfo, RelatesToInfo, RelationTypeEqual},
 	state_key::{StateKey, TypeStateKey},
 	type_ext::TypeExt,
 };
