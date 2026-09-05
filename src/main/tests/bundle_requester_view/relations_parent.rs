@@ -13,7 +13,7 @@ use tuwunel_core::{
 	Result,
 	ruma::{CanonicalJsonObject, CanonicalJsonValue, EventId, UserId, event_id},
 };
-use tuwunel_service::Services;
+use tuwunel_service::{Services, users::DeactivationReason};
 
 use super::{Client, chunk_ids, find, refused, room_with_history};
 
@@ -316,7 +316,7 @@ pub(super) async fn unfolded_view(
 	erased
 		.services
 		.deactivate
-		.full_deactivate(erased_id, true)
+		.full_deactivate(erased_id, true, DeactivationReason::Admin)
 		.await?;
 
 	let served = stranger.relations(&opened, &parent, "").await?;

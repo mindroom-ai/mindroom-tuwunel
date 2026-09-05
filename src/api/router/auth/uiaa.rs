@@ -30,11 +30,19 @@ where
 {
 	let sender_user = body.sender_user.as_deref();
 
+	if let Some(sender_user) = sender_user {
+		services
+			.users
+			.maybe_repair_legacy_sso_origin(sender_user)
+			.await;
+	}
+
 	let password_flow = [AuthType::Password];
 	let user_origin = sender_user
 		.map_async(|sender_user| services.users.origin(sender_user).ok())
 		.unwrap_or(None)
 		.await;
+	let sender_uses_sso = user_origin.as_deref() == Some("sso");
 
 	let ldap_origin = cfg!(feature = "ldap")
 		&& services.config.ldap.enable
@@ -52,7 +60,10 @@ where
 			.await;
 
 	let sso_flow = [AuthType::Sso];
+	// Only an SSO-origin account gets an SSO stage; a password account whose
+	// device came from an identity provider does not.
 	let bound_idp = sender_user
+		.filter(|_| sender_uses_sso)
 		.map_async(|sender_user| {
 			select_idp(
 				services,
@@ -66,8 +77,9 @@ where
 
 	let has_sso = bound_idp.is_some();
 
+	// NOTE: JWT fallback/web is not implemented for UIAA.
+	let has_jwt = false;
 	let jwt_flow = [AuthType::Jwt];
-	let has_jwt = cfg!(feature = "jwt_login") && services.config.jwt.enable;
 
 	let mut uiaainfo = UiaaInfo {
 		flows: has_password
@@ -95,6 +107,12 @@ where
 	{
 		#[cfg(feature = "jwt_login")]
 		| Some(AuthData::Jwt(ref jwt)) => {
+			if sender_uses_sso {
+				return Err!(Request(
+					Forbidden("JWT UIAA is not allowed for SSO-origin users.",)
+				));
+			}
+
 			let sender_user = validate_user(services, &jwt.token)?;
 
 			if !services.users.exists(&sender_user).await {
@@ -142,12 +160,7 @@ where
 
 				// The SSO fallback page routes re-authentication to the provider bound here.
 				if let Some(ref idp) = bound_idp {
-					uiaainfo.params = to_raw_value(&json!({
-						"m.login.sso": {
-							"identity_providers": [{"id": idp}]
-						}
-					}))
-					.ok();
+					bind_sso_identity_provider(&mut uiaainfo, idp);
 				}
 
 				services
@@ -204,4 +217,40 @@ async fn select_idp<'a>(
 		.flatten()
 		.map(Cow::Borrowed)
 		.or(tagged)
+}
+
+fn bind_sso_identity_provider(uiaainfo: &mut UiaaInfo, idp: &str) {
+	uiaainfo.params = to_raw_value(&json!({
+		"m.login.sso": {
+			"identity_providers": [{"id": idp}]
+		}
+	}))
+	.ok();
+}
+
+#[cfg(test)]
+mod tests {
+	use serde_json::Value as JsonValue;
+
+	use super::*;
+
+	#[test]
+	fn bound_sso_idp_is_serialized_into_uiaa_params() {
+		let mut uiaainfo = UiaaInfo::default();
+
+		bind_sso_identity_provider(&mut uiaainfo, "apple");
+
+		let params: JsonValue = serde_json::from_str(
+			uiaainfo
+				.params
+				.as_ref()
+				.expect("params should be populated")
+				.get(),
+		)
+		.expect("valid params JSON");
+		assert_eq!(
+			params["m.login.sso"]["identity_providers"][0]["id"],
+			JsonValue::String("apple".to_owned()),
+		);
+	}
 }

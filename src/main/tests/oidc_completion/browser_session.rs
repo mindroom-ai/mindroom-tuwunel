@@ -15,7 +15,10 @@ use tuwunel_core::{
 	ruma::{OwnedDeviceId, OwnedUserId, UserId},
 };
 use tuwunel_database::Interfix;
-use tuwunel_service::{Services, users::Register};
+use tuwunel_service::{
+	Services,
+	users::{DeactivationReason, Register},
+};
 
 use super::{PASSWORD, USERNAME, location, parameter, post_form, register_client};
 
@@ -529,7 +532,10 @@ async fn deactivation_ends_sessions(harness @ Harness { services, .. }: &Harness
 	assert!(set_cookie(&response).is_some());
 	assert_eq!(sessions(harness, &gone).await, 1);
 
-	services.users.deactivate_account(&gone).await?;
+	services
+		.users
+		.deactivate_account(&gone, DeactivationReason::Admin)
+		.await?;
 
 	assert_eq!(sessions(harness, &gone).await, 0);
 
