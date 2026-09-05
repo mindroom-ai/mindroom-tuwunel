@@ -77,6 +77,9 @@ fn resolve_device_id(device_id: Option<&DeviceId>) -> OwnedDeviceId {
 #[implement(super::Service)]
 #[tracing::instrument(level = "info", skip(self))]
 pub async fn remove_device(&self, user_id: &UserId, device_id: &DeviceId) {
+	let mutex_key = (user_id.to_owned(), device_id.to_owned());
+	let _guard = self.device_key_mutex.lock(&mutex_key).await;
+
 	// Remove access tokens
 	self.remove_tokens(user_id, device_id).await;
 
@@ -109,7 +112,19 @@ pub async fn remove_device(&self, user_id: &UserId, device_id: &DeviceId) {
 		.await
 		.ok();
 
-	// TODO: Remove onetimekeys
+	// Remove the identity keys the device uploaded; leaving them behind
+	// would make a later login re-using this device id collide with the
+	// immutability check in /keys/upload.
+	self.db.keyid_key.del((user_id, device_id));
+
+	// Remove one-time keys.
+	if let Some(otk) = self.db.onetimekeyid4225_otk.as_ref() {
+		let prefix = (user_id, device_id, Interfix);
+		otk.keys_prefix_raw(&prefix)
+			.ignore_err()
+			.ready_for_each(|key| otk.remove(key))
+			.await;
+	}
 
 	// MSC2732: drop fallback keys for this device.
 	let prefix = (user_id, device_id, Interfix);
