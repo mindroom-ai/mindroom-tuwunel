@@ -92,6 +92,9 @@ fn resolve_device_id(device_id: Option<&DeviceId>) -> OwnedDeviceId {
 #[implement(super::Service)]
 #[tracing::instrument(level = "info", skip(self))]
 pub async fn remove_device(&self, user_id: &UserId, device_id: &DeviceId) {
+	let mutex_key = (user_id.to_owned(), device_id.to_owned());
+	let _guard = self.device_key_mutex.lock(&mutex_key).await;
+
 	// Remove access tokens
 	self.remove_tokens(user_id, device_id).await;
 

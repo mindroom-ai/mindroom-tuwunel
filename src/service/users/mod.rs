@@ -35,7 +35,7 @@ use tuwunel_database::{Deserialized, Json, Map};
 pub use self::{
 	dehydrated_device::DehydratedDevice,
 	invite_filter::InviteFilter,
-	keys::{DeviceListChange, DeviceListRecord, parse_master_key},
+	keys::{DeviceKeysUpdate, DeviceListChange, DeviceListRecord, parse_master_key},
 	register::Register,
 	server_user::SERVER_USER_KEY,
 	sso::DeactivationReason,
@@ -59,6 +59,7 @@ pub struct Service {
 	device_list_mutex: MutexMap<OwnedUserId, ()>,
 	// Entries live only while claims for a user/device hold or await the lock.
 	claiming_one_time_keys: MutexMap<(OwnedUserId, OwnedDeviceId), ()>,
+	device_key_mutex: MutexMap<(OwnedUserId, OwnedDeviceId), ()>,
 }
 
 struct Data {
@@ -100,6 +101,7 @@ impl crate::Service for Service {
 			services: args.services.clone(),
 			device_list_mutex: MutexMap::new(),
 			claiming_one_time_keys: MutexMap::new(),
+			device_key_mutex: MutexMap::new(),
 			db: Data {
 				keychangeid_devicechange: args.db["keychangeid_devicechange"].clone(),
 				keychangeid_userid: args.db["keychangeid_userid"].clone(),
