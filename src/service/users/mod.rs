@@ -41,7 +41,7 @@ type LoginTokenId = SmallString<[u8; 48]>;
 pub use self::{
 	dehydrated_device::DehydratedDevice,
 	invite_filter::InviteFilter,
-	keys::{DeviceListChange, DeviceListRecord, parse_master_key},
+	keys::{DeviceKeysUpdate, DeviceListChange, DeviceListRecord, parse_master_key},
 	register::Register,
 	server_user::SERVER_USER_KEY,
 	sso::DeactivationReason,
