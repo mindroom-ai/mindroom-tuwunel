@@ -6,6 +6,7 @@ mod keys;
 mod ldap;
 mod register;
 mod server_user;
+mod sso;
 
 use std::sync::Arc;
 
@@ -29,7 +30,7 @@ use tuwunel_database::{Deserialized, Json, Map};
 
 pub use self::{
 	dehydrated_device::DehydratedDevice, invite_filter::InviteFilter, keys::parse_master_key,
-	register::Register,
+	register::Register, sso::DeactivationReason,
 };
 
 pub const PASSWORD_SENTINEL: &str = "*";
@@ -70,6 +71,7 @@ struct Data {
 	userid_dehydrateddevice: Arc<Map>,
 	userid_devicelistversion: Arc<Map>,
 	userid_erased: Arc<Map>,
+	userid_deactivation_reason: Arc<Map>,
 	userid_lastonetimekeyupdate: Arc<Map>,
 	userid_locked: Arc<Map>,
 	userid_masterkeyid: Arc<Map>,
@@ -105,6 +107,7 @@ impl crate::Service for Service {
 				userid_dehydrateddevice: args.db["userid_dehydrateddevice"].clone(),
 				userid_devicelistversion: args.db["userid_devicelistversion"].clone(),
 				userid_erased: args.db["userid_erased"].clone(),
+				userid_deactivation_reason: args.db["userid_deactivation_reason"].clone(),
 				userid_lastonetimekeyupdate: args.db["userid_lastonetimekeyupdate"].clone(),
 				userid_locked: args.db["userid_locked"].clone(),
 				userid_masterkeyid: args.db["userid_masterkeyid"].clone(),
@@ -171,7 +174,11 @@ impl Service {
 	}
 
 	/// Deactivate account
-	pub async fn deactivate_account(&self, user_id: &UserId) -> Result {
+	pub async fn deactivate_account(
+		&self,
+		user_id: &UserId,
+		reason: DeactivationReason,
+	) -> Result {
 		// Revoke any SSO authorizations
 		self.services
 			.oauth
@@ -188,6 +195,7 @@ impl Service {
 		// Systems like changing the password without logging in should check if the
 		// account is deactivated.
 		self.set_password(user_id, None).await?;
+		self.set_deactivation_reason(user_id, reason);
 
 		// TODO: Unhook 3PID
 		Ok(())
@@ -383,6 +391,12 @@ impl Service {
 			.deserialized()
 	}
 
+	/// Sets the origin of the user (password/sso/ldap/...).
+	#[inline]
+	pub fn set_origin(&self, user_id: &UserId, origin: &str) {
+		self.db.userid_origin.insert(user_id, origin);
+	}
+
 	/// Returns whether the user has a password. Disabled accounts and
 	/// registrations setting a sentinel password will return false here.
 	pub async fn has_password(&self, user_id: &UserId) -> Result<bool> {
@@ -444,6 +458,7 @@ impl Service {
 				})?;
 
 				self.db.userid_password.insert(user_id, hash);
+				self.db.userid_deactivation_reason.remove(user_id);
 				self.db.userid_origin.insert(user_id, "password");
 			},
 		}

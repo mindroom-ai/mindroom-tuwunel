@@ -1,6 +1,7 @@
 use axum::extract::State;
 use synapse_admin_api::users::deactivate_account::v1 as deactivate_account;
 use tuwunel_core::{Err, Result};
+use tuwunel_service::users::DeactivationReason;
 
 use crate::{Ruma, client::admin::require_admin};
 
@@ -21,7 +22,7 @@ pub(crate) async fn admin_deactivate_account_route(
 
 	services
 		.deactivate
-		.full_deactivate(&body.user_id, body.erase)
+		.full_deactivate(&body.user_id, body.erase, DeactivationReason::Admin)
 		.await?;
 
 	Ok(deactivate_account::Response::new("success".to_owned()))

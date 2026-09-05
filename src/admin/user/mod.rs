@@ -28,7 +28,7 @@ use clap::{ArgGroup, Subcommand, ValueEnum};
 use futures::FutureExt;
 use ruma::{OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedRoomOrAliasId, OwnedUserId, UserId};
 use tuwunel_core::Result;
-use tuwunel_service::{Services, profile::Propagation};
+use tuwunel_service::{Services, profile::Propagation, users::DeactivationReason};
 
 use crate::admin_command_dispatch;
 
@@ -287,11 +287,14 @@ async fn deactivate_user(services: &Services, user_id: &UserId, no_leave_rooms: 
 	if !no_leave_rooms {
 		services
 			.deactivate
-			.full_deactivate(user_id, false)
+			.full_deactivate(user_id, false, DeactivationReason::Admin)
 			.boxed()
 			.await?;
 	} else {
-		services.users.deactivate_account(user_id).await?;
+		services
+			.users
+			.deactivate_account(user_id, DeactivationReason::Admin)
+			.await?;
 	}
 
 	Ok(())
