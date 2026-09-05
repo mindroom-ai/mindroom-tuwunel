@@ -101,6 +101,19 @@ enum SignatureAction {
 	Write(KeyRole, SignatureWrite),
 }
 
+/// Result of atomically comparing a device-key upload with the stored identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceKeysUpdate {
+	/// No identity existed, so the uploaded keys were stored.
+	Inserted,
+
+	/// The identity-key material matched and the stored record was preserved.
+	Unchanged,
+
+	/// A different identity was already stored for the device.
+	Conflict,
+}
+
 /// MSC2732: row stored under `(user, device, algorithm)` in
 /// `userdeviceidalgorithm_fallback`. Fallback keys are not deleted on
 /// claim; the row is rewritten with `used = true`.
@@ -504,6 +517,58 @@ pub async fn add_device_keys(
 		.await;
 
 	Ok(())
+}
+
+/// Stores the first identity keys for a device while rejecting replacements.
+///
+/// The comparison and insertion hold the same device lock as device removal,
+/// so concurrent first uploads cannot both observe an empty record and a
+/// request already in flight cannot resurrect keys after its device is gone.
+#[implement(super::Service)]
+pub async fn update_device_keys(
+	&self,
+	user_id: &UserId,
+	device_id: &DeviceId,
+	device_keys: &Raw<DeviceKeys>,
+	new_keys: &DeviceKeys,
+) -> Result<DeviceKeysUpdate> {
+	let _lock = self.lock_device(user_id, device_id).await;
+
+	if !self.try_device_exists(user_id, device_id).await? {
+		return Err!(Request(Forbidden(
+			"Cannot add identity keys for a device that no longer exists."
+		)));
+	}
+
+	// Only a missing record permits insertion. A read or decoding failure
+	// must not silently replace an existing identity.
+	let existing = self
+		.get_device_keys(user_id, device_id)
+		.await
+		.optional()
+		.and_then(|existing| {
+			existing
+				.map(|keys| keys.deserialize().map_err(Into::into))
+				.transpose()
+		})
+		.map_err(|error| {
+			err!(Database(debug_warn!("Failed to read stored device keys: {error}")))
+		})?;
+	if let Some(existing) = existing {
+		return Ok(if existing.keys == new_keys.keys {
+			DeviceKeysUpdate::Unchanged
+		} else {
+			DeviceKeysUpdate::Conflict
+		});
+	}
+
+	let key = (user_id, device_id);
+
+	self.db.keyid_key.put(key, Json(device_keys));
+	self.mark_device_key_update(user_id, DeviceListChange::Device(device_id))
+		.await;
+
+	Ok(DeviceKeysUpdate::Inserted)
 }
 
 /// Stores a user's cross-signing keys and points the user at them.
