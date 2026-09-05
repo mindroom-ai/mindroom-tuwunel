@@ -15,6 +15,8 @@ use tuwunel_core::{
 	warn,
 };
 
+use crate::users::DeactivationReason;
+
 const CURRENT_MEMBERSHIPS: &[MembershipState] =
 	&[MembershipState::Join, MembershipState::Invite, MembershipState::Knock];
 
@@ -42,10 +44,15 @@ impl crate::Service for Service {
 // cross-crate codegen firewall
 #[async_noinline]
 #[tracing::instrument(skip(self), level = "debug")]
-pub async fn full_deactivate<'a>(&'a self, user_id: &'a UserId, erase: bool) -> Result {
+pub async fn full_deactivate<'a>(
+	&'a self,
+	user_id: &'a UserId,
+	erase: bool,
+	reason: DeactivationReason,
+) -> Result {
 	self.services
 		.users
-		.deactivate_account(user_id)
+		.deactivate_account(user_id, reason)
 		.await?;
 
 	self.clear_profile(user_id).await;
