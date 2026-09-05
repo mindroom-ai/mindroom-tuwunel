@@ -10,6 +10,8 @@ use ruma::{
 use serde_json::to_value;
 use tuwunel_core::{Result, debug_warn, error, implement, warn};
 
+use crate::users::DeactivationReason;
+
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 }
@@ -116,6 +118,6 @@ async fn set_emergency_access(&self, password: Option<&str>) -> Result {
 	// Never refused: the last-admin check does not count the server user.
 	self.services
 		.users
-		.deactivate_account(server_user)
+		.deactivate_account(server_user, DeactivationReason::Admin)
 		.await
 }

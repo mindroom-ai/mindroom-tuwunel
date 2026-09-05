@@ -6,6 +6,7 @@ mod keys;
 mod ldap;
 mod register;
 mod server_user;
+mod sso;
 #[cfg(test)]
 mod tests;
 
@@ -43,6 +44,7 @@ pub use self::{
 	keys::{DeviceListChange, DeviceListRecord, parse_master_key},
 	register::Register,
 	server_user::SERVER_USER_KEY,
+	sso::DeactivationReason,
 };
 
 pub const PASSWORD_SENTINEL: &str = "*";
@@ -100,6 +102,7 @@ struct Data {
 	userid_dehydrateddevice: Arc<Map>,
 	userid_devicelistversion: Arc<Map>,
 	userid_erased: Arc<Map>,
+	userid_deactivation_reason: Arc<Map>,
 	userid_lastonetimekeyupdate: Arc<Map>,
 	userid_locked: Arc<Map>,
 	userid_masterkeyid: Arc<Map>,
@@ -140,6 +143,7 @@ impl crate::Service for Service {
 				userid_dehydrateddevice: args.db["userid_dehydrateddevice"].clone(),
 				userid_devicelistversion: args.db["userid_devicelistversion"].clone(),
 				userid_erased: args.db["userid_erased"].clone(),
+				userid_deactivation_reason: args.db["userid_deactivation_reason"].clone(),
 				userid_lastonetimekeyupdate: args.db["userid_lastonetimekeyupdate"].clone(),
 				userid_locked: args.db["userid_locked"].clone(),
 				userid_masterkeyid: args.db["userid_masterkeyid"].clone(),
@@ -237,7 +241,11 @@ impl Service {
 	}
 
 	/// Deactivate account
-	pub async fn deactivate_account(&self, user_id: &UserId) -> Result {
+	pub async fn deactivate_account(
+		&self,
+		user_id: &UserId,
+		reason: DeactivationReason,
+	) -> Result {
 		// Held until the password is cleared; see `lock_admin_room`.
 		let admin_lock = self.services.admin.lock_admin_room().await;
 
@@ -266,6 +274,7 @@ impl Service {
 		// Systems like changing the password without logging in should check if the
 		// account is deactivated.
 		self.set_password(user_id, None).await?;
+		self.set_deactivation_reason(user_id, reason);
 		drop(admin_lock);
 
 		// Revoke any SSO authorizations, outside the lock since each is a request
@@ -481,6 +490,12 @@ impl Service {
 			.get(user_id)
 			.await
 			.deserialized()
+	}
+
+	/// Sets the origin of the user (password/sso/ldap/...).
+	#[inline]
+	pub fn set_origin(&self, user_id: &UserId, origin: &str) {
+		self.db.userid_origin.insert(user_id, origin);
 	}
 
 	/// Returns whether the user has a password. Disabled accounts and
@@ -769,6 +784,7 @@ async fn set_password_locked(&self, user_id: &UserId, password: Option<&str>) ->
 			})?;
 
 			self.db.userid_password.insert(user_id, hash);
+			self.db.userid_deactivation_reason.remove(user_id);
 			self.db.userid_origin.insert(user_id, "password");
 		},
 	}

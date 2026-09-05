@@ -13,7 +13,7 @@ use tuwunel_core::{
 	},
 	utils::stream::ReadyExt,
 };
-use tuwunel_service::Services;
+use tuwunel_service::{Services, users::DeactivationReason};
 
 use self::client::{Client, poll_until, register, wait_until_ready};
 
@@ -256,12 +256,12 @@ async fn deactivate_and_assert(
 
 	services
 		.deactivate
-		.full_deactivate(erased, true)
+		.full_deactivate(erased, true, DeactivationReason::Admin)
 		.await?;
 
 	services
 		.deactivate
-		.full_deactivate(retained, false)
+		.full_deactivate(retained, false, DeactivationReason::Admin)
 		.await?;
 
 	assert!(services.users.is_deactivated(erased).await?);

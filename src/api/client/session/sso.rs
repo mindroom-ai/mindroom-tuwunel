@@ -380,6 +380,7 @@ async fn handle_sso_login(
 		body = ?body.body,
 	),
 )]
+#[expect(clippy::too_many_lines)]
 pub(crate) async fn sso_callback_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
@@ -506,6 +507,14 @@ pub(crate) async fn sso_callback_route(
 		.commit_identity_session(&unique_id, complete_identity)
 		.await?;
 
+	if services
+		.users
+		.maybe_repair_legacy_sso_origin(&user_id)
+		.await
+	{
+		info!("Repaired legacy SSO-origin metadata for {user_id}");
+	}
+
 	if let Some(old_sess_id) = old_sess_id
 		.as_deref()
 		.filter(is_not_equal_to!(&sess_id))
@@ -513,9 +522,7 @@ pub(crate) async fn sso_callback_route(
 		services.oauth.sessions.delete(old_sess_id).await;
 	}
 
-	if !services.users.is_active_local(&user_id).await {
-		return Err!(Request(UserDeactivated("This user has been deactivated.")));
-	}
+	ensure_sso_account_active(&services, &user_id).await?;
 
 	services.users.locked_check(&user_id).await?;
 
@@ -729,6 +736,22 @@ fn display_login_target(mut target: Url) -> String {
 	target.set_query(None);
 	target.set_fragment(None);
 	target.into()
+}
+
+async fn ensure_sso_account_active(services: &Services, user_id: &UserId) -> Result {
+	if services
+		.users
+		.maybe_reactivate_deactivated_sso(user_id)
+		.await?
+	{
+		info!("Reactivated deactivated SSO account {user_id}");
+	}
+
+	if !services.users.is_active_local(user_id).await {
+		return Err!(Request(UserDeactivated("This user has been deactivated.")));
+	}
+
+	Ok(())
 }
 
 async fn handle_uiaa(
