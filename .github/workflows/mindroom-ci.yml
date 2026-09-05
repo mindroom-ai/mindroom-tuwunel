@@ -1,0 +1,65 @@
+name: MindRoom CI
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mindroom-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            clang \
+            libclang-dev \
+            libssl-dev \
+            liburing-dev \
+            pkg-config
+
+      - name: Set up Rust
+        run: rustup toolchain install
+
+      - name: Set up nightly rustfmt
+        # Upstream main (3f5db6d3a) passes nightly-2026-10-04 unchanged; the locked
+        # Fenix formatter in flake.lock (nightly-2026-08-05) rejects upstream source.
+        run: rustup toolchain install nightly-2026-10-04 --profile minimal --component rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo +nightly-2026-10-04 fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: cargo test --locked --workspace --all-targets --all-features
+
+      - name: Build release binary
+        run: cargo build --locked --release -p tuwunel
