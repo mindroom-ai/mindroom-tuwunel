@@ -15,7 +15,13 @@ tokio.workspace = true
 tower.workspace = true
 tuwunel = { path = "../main" }
 tuwunel-api.workspace = true
+tuwunel-api-admin.workspace = true
+tuwunel-api-client.workspace = true
+tuwunel-api-federation.workspace = true
+tuwunel-api-mas.workspace = true
+tuwunel-api-oidc.workspace = true
 tuwunel-core.workspace = true
+tuwunel-matrix.workspace = true
 tuwunel-service.workspace = true
 url.workspace = true
 

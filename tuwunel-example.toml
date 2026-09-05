@@ -144,6 +144,55 @@
 #
 #database_migrations = true
 
+# MindRoom: Collapse multiple m.replace (edit) events per target into
+# only the latest one in `/sync` timeline responses.
+#
+# When enabled, if a `/sync` timeline batch contains multiple replacement
+# events targeting the same event, only the most recent replacement is
+# kept. This dramatically reduces bandwidth for streaming AI responses
+# that produce many intermediate edits.
+#
+#mindroom_compact_edits_enabled = false
+
+# MindRoom: Enable background purging of superseded m.replace events
+# from the database.
+#
+# When enabled, a periodic background job will find m.replace events
+# that have been superseded by newer replacements and remove them from
+# storage. Only events older than `mindroom_edit_purge_min_age_secs`
+# are eligible.
+#
+#mindroom_edit_purge_enabled = false
+
+# MindRoom: Minimum age in seconds before a superseded edit becomes
+# eligible for purging. This prevents purging edits that clients may
+# still be paginating through.
+#
+#mindroom_edit_purge_min_age_secs = 86400
+
+# MindRoom: How often (in seconds) to run the edit purge background job.
+#
+#mindroom_edit_purge_interval_secs = 3600
+
+# MindRoom: Maximum number of events to purge per cycle. Keeps
+# individual purge runs bounded so they don't block other work.
+#
+#mindroom_edit_purge_batch_size = 1000
+
+# MindRoom: Floor for PDUs scanned per purge cycle.
+#
+# This value competes with `mindroom_edit_purge_batch_size * 10`; the
+# effective per-cycle scan budget is:
+# `max(mindroom_edit_purge_batch_size * 10,
+# mindroom_edit_purge_scan_limit)`.
+#
+#mindroom_edit_purge_scan_limit = 100000
+
+# MindRoom: When true, log what would be purged without actually
+# deleting anything. Useful for testing the purge logic.
+#
+#mindroom_edit_purge_dry_run = false
+
 
 ################################################################################
 # Server administration
@@ -5169,9 +5218,9 @@
 # Relation bundles
 #
 # Adds optional edit and reference summaries to events served to clients.
-# Both are off by default; most clients build these themselves, so enable
-# one only for a client that relies on it. Thread summaries are always
-# bundled and do not depend on these keys.
+# Most clients build these themselves. MindRoom fork: edit bundles are on
+# by default (see `bundle_edits`); reference bundles stay off. Thread
+# summaries are always bundled and do not depend on these keys.
 #
 #[global.rooms.relations]
 
@@ -5179,14 +5228,19 @@
 # [MSC3925](https://github.com/matrix-org/matrix-spec-proposals/pull/3925).
 #
 # Client read endpoints fold the most recent `m.replace` relation into
-# `unsigned.m.relations` as the full replacement event. This is opt-in
-# and disabled by default because it adds a typed index seek per served
-# event and a server-authoritative summary most clients reconstruct
-# locally.
+# `unsigned.m.relations` as the full replacement event.
+#
+# MindRoom fork: on by default. The fork purges superseded edits
+# (`mindroom_edit_purge_enabled`), so without this bundle a history
+# endpoint (`/messages`, `/context`, `/event`, ...) would serve an
+# original carrying its stale pre-edit body with no way for the client
+# to discover the surviving edit; bundling the kept edit onto the
+# original keeps history correct. Upstream defaults this off (opt-in)
+# because it adds a typed index seek per served event.
 #
 # reloadable: yes
 #
-#bundle_edits = false
+#bundle_edits = true
 
 # Bundles reference relations under
 # [MSC2675](https://github.com/matrix-org/matrix-spec-proposals/pull/2675)

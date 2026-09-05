@@ -566,11 +566,11 @@ pub struct Redaction {
 /// Relation bundles
 ///
 /// Adds optional edit and reference summaries to events served to clients.
-/// Both are off by default; most clients build these themselves, so enable
-/// one only for a client that relies on it. Thread summaries are always
-/// bundled and do not depend on these keys.
+/// Most clients build these themselves. MindRoom fork: edit bundles are on
+/// by default (see `bundle_edits`); reference bundles stay off. Thread
+/// summaries are always bundled and do not depend on these keys.
 #[expect(rustdoc::broken_intra_doc_links, rustdoc::bare_urls)]
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[config_example_generator(
 	filename = "tuwunel-example.toml",
 	section = "global.rooms.relations",
@@ -581,15 +581,20 @@ pub struct Relations {
 	/// [MSC3925](https://github.com/matrix-org/matrix-spec-proposals/pull/3925).
 	///
 	/// Client read endpoints fold the most recent `m.replace` relation into
-	/// `unsigned.m.relations` as the full replacement event. This is opt-in
-	/// and disabled by default because it adds a typed index seek per served
-	/// event and a server-authoritative summary most clients reconstruct
-	/// locally.
+	/// `unsigned.m.relations` as the full replacement event.
+	///
+	/// MindRoom fork: on by default. The fork purges superseded edits
+	/// (`mindroom_edit_purge_enabled`), so without this bundle a history
+	/// endpoint (`/messages`, `/context`, `/event`, ...) would serve an
+	/// original carrying its stale pre-edit body with no way for the client
+	/// to discover the surviving edit; bundling the kept edit onto the
+	/// original keeps history correct. Upstream defaults this off (opt-in)
+	/// because it adds a typed index seek per served event.
 	///
 	/// reloadable: yes
-	/// default: false
+	/// default: true
 	/// legacy: bundle_edit_relations
-	#[serde(default)]
+	#[serde(default = "true_fn")]
 	pub bundle_edits: bool,
 
 	/// Bundles reference relations under
@@ -630,6 +635,15 @@ impl Default for Rooms {
 			policy_server: PolicyServer::default(),
 			redaction: Redaction::default(),
 			relations: Relations::default(),
+		}
+	}
+}
+
+impl Default for Relations {
+	fn default() -> Self {
+		Self {
+			bundle_edits: true_fn(),
+			bundle_references: Default::default(),
 		}
 	}
 }

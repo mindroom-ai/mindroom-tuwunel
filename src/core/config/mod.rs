@@ -429,6 +429,69 @@ pub struct Config {
 	#[serde(default, with = "identity_provider_serde")]
 	pub identity_provider: BTreeMap<String, IdentityProvider>,
 
+	/// MindRoom: Collapse multiple m.replace (edit) events per target into
+	/// only the latest one in `/sync` timeline responses.
+	///
+	/// When enabled, if a `/sync` timeline batch contains multiple replacement
+	/// events targeting the same event, only the most recent replacement is
+	/// kept. This dramatically reduces bandwidth for streaming AI responses
+	/// that produce many intermediate edits.
+	///
+	/// default: false
+	#[serde(default)]
+	pub mindroom_compact_edits_enabled: bool,
+
+	/// MindRoom: Enable background purging of superseded m.replace events
+	/// from the database.
+	///
+	/// When enabled, a periodic background job will find m.replace events
+	/// that have been superseded by newer replacements and remove them from
+	/// storage. Only events older than `mindroom_edit_purge_min_age_secs`
+	/// are eligible.
+	///
+	/// default: false
+	#[serde(default)]
+	pub mindroom_edit_purge_enabled: bool,
+
+	/// MindRoom: Minimum age in seconds before a superseded edit becomes
+	/// eligible for purging. This prevents purging edits that clients may
+	/// still be paginating through.
+	///
+	/// default: 86400
+	#[serde(default = "default_mindroom_edit_purge_min_age_secs")]
+	pub mindroom_edit_purge_min_age_secs: u64,
+
+	/// MindRoom: How often (in seconds) to run the edit purge background job.
+	///
+	/// default: 3600
+	#[serde(default = "default_mindroom_edit_purge_interval_secs")]
+	pub mindroom_edit_purge_interval_secs: u64,
+
+	/// MindRoom: Maximum number of events to purge per cycle. Keeps
+	/// individual purge runs bounded so they don't block other work.
+	///
+	/// default: 1000
+	#[serde(default = "default_mindroom_edit_purge_batch_size")]
+	pub mindroom_edit_purge_batch_size: usize,
+
+	/// MindRoom: Floor for PDUs scanned per purge cycle.
+	///
+	/// This value competes with `mindroom_edit_purge_batch_size * 10`; the
+	/// effective per-cycle scan budget is:
+	/// `max(mindroom_edit_purge_batch_size * 10,
+	/// mindroom_edit_purge_scan_limit)`.
+	///
+	/// default: 100000
+	#[serde(default = "default_mindroom_edit_purge_scan_limit")]
+	pub mindroom_edit_purge_scan_limit: usize,
+
+	/// MindRoom: When true, log what would be purged without actually
+	/// deleting anything. Useful for testing the purge logic.
+	///
+	/// default: false
+	#[serde(default)]
+	pub mindroom_edit_purge_dry_run: bool,
+
 	#[serde(flatten)]
 	#[expect(clippy::zero_sized_map_values)]
 	// this is a catchall, the map shouldn't be zero at runtime
@@ -2990,3 +3053,11 @@ fn default_sso_grant_session_duration() -> Option<u64> { Some(300) }
 fn default_multipart_threshold() -> ByteSize { ByteSize::mib(100) }
 
 fn default_multipart_part_size() -> ByteSize { ByteSize::mib(10) }
+
+fn default_mindroom_edit_purge_min_age_secs() -> u64 { 86_400 }
+
+fn default_mindroom_edit_purge_interval_secs() -> u64 { 3_600 }
+
+fn default_mindroom_edit_purge_batch_size() -> usize { 1_000 }
+
+fn default_mindroom_edit_purge_scan_limit() -> usize { 100_000 }

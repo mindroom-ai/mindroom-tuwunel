@@ -2703,7 +2703,13 @@ dependencies = [
  "tower",
  "tuwunel",
  "tuwunel_api",
+ "tuwunel_api_admin",
+ "tuwunel_api_client",
+ "tuwunel_api_federation",
+ "tuwunel_api_mas",
+ "tuwunel_api_oidc",
  "tuwunel_core",
+ "tuwunel_matrix",
  "tuwunel_service",
  "url",
 ]
