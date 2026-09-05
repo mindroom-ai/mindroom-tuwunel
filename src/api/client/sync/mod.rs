@@ -1,3 +1,5 @@
+mod mindroom_edits;
+
 #[cfg(test)]
 mod tests;
 mod v3;
@@ -16,6 +18,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{Services, users::InviteFilter};
 
+use self::mindroom_edits::collapse_superseded_edits;
 pub(crate) use self::{
 	v3::{calculate_heroes, sync_events_route},
 	v5::sync_events_v5_route,
@@ -117,6 +120,17 @@ async fn load_timeline_with_errors(
 	}
 
 	timeline_pdus.reverse();
+
+	// Collapse superseded m.replace events when enabled
+	let timeline_pdus = if services
+		.server
+		.config
+		.mindroom_compact_edits_enabled
+	{
+		collapse_superseded_edits(timeline_pdus)
+	} else {
+		timeline_pdus
+	};
 
 	Ok((timeline_pdus, limited, last_timeline_count))
 }
