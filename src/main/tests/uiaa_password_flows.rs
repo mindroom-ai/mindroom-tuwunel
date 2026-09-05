@@ -314,7 +314,9 @@ async fn exercise_linked(services: &Services, base: &str) -> Result {
 		("tagged", PASSWORD_SENTINEL, Some("alpha"), &["gamma"][..], Some("alpha")),
 		("unlinked", PASSWORD_SENTINEL, None, &[][..], None),
 		("unconfigured", PASSWORD_SENTINEL, None, &["gone"][..], None),
-		("password", "test-password", None, &["beta"][..], Some("beta")),
+		// MindRoom: a real password makes the origin `password`, and only an
+		// SSO-origin account gets an SSO stage.
+		("password", "test-password", None, &["beta"][..], None),
 	] {
 		let user_id = UserId::parse_with_server_name(localpart, services.globals.server_name())?;
 

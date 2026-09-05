@@ -33,7 +33,7 @@ use tuwunel_core::{
 	utils::{BoolExt, stream::ReadyExt, time::now_millis},
 };
 use tuwunel_matrix::Event;
-use tuwunel_service::Services;
+use tuwunel_service::{Services, users::DeactivationReason};
 
 use self::{
 	client::{Client, accepted, field, poll_until, register},
@@ -660,7 +660,10 @@ async fn deactivation_removes_scheduled(
 				poll_until(FIRE_DEADLINE, async || admission_held(services, bob_id).await).await;
 
 			require(held, "schedule did not hold admission before deactivation")?;
-			services.users.deactivate_account(bob_id).await
+			services
+				.users
+				.deactivate_account(bob_id, DeactivationReason::Admin)
+				.await
 		},
 		async {
 			let held =
