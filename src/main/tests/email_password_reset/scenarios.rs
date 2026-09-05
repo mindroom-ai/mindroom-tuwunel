@@ -12,7 +12,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	users::{PASSWORD_SENTINEL, Register},
+	users::{DeactivationReason, PASSWORD_SENTINEL, Register},
 };
 
 use super::{
@@ -858,7 +858,7 @@ async fn reject_deactivated_reset(phase: Phase<'_>) -> Result<String> {
 	phase
 		.services
 		.users
-		.deactivate_account(phase.user_a)
+		.deactivate_account(phase.user_a, DeactivationReason::Admin)
 		.await?;
 
 	let non_email = phase

@@ -10,7 +10,10 @@ use tuwunel_core::{
 	Err, Result,
 	utils::{BoolExt, IterStream, ReadyExt, stream::automatic_width},
 };
-use tuwunel_service::{threepid::canonicalize_email, users::PASSWORD_SENTINEL};
+use tuwunel_service::{
+	threepid::canonicalize_email,
+	users::{DeactivationReason, PASSWORD_SENTINEL},
+};
 
 use super::user_details;
 use crate::{Ruma, refuse_server_user, require_admin};
@@ -105,7 +108,7 @@ pub(crate) async fn admin_create_or_modify_route(
 		| Some(true) =>
 			services
 				.deactivate
-				.full_deactivate(user_id, false)
+				.full_deactivate(user_id, false, DeactivationReason::Admin)
 				.await?,
 		| Some(false)
 			if services

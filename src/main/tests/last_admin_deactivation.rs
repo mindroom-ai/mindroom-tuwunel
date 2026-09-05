@@ -14,7 +14,10 @@ use tuwunel_core::{
 	Err, Result,
 	ruma::{OwnedUserId, UserId, api::error::ErrorKind},
 };
-use tuwunel_service::{Services, users::Register};
+use tuwunel_service::{
+	Services,
+	users::{DeactivationReason, Register},
+};
 
 use self::client::wait_until_ready;
 
@@ -98,7 +101,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	expect_forbidden(
 		services
 			.deactivate
-			.full_deactivate(&first, false)
+			.full_deactivate(&first, false, DeactivationReason::Admin)
 			.boxed()
 			.await,
 		"full deactivation",
@@ -106,7 +109,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	expect_forbidden(
 		services
 			.users
-			.deactivate_account(&first)
+			.deactivate_account(&first, DeactivationReason::Admin)
 			.boxed()
 			.await,
 		"account deactivation",
@@ -122,7 +125,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.await?;
 	services
 		.users
-		.deactivate_account(&first)
+		.deactivate_account(&first, DeactivationReason::Admin)
 		.boxed()
 		.await?;
 
@@ -143,7 +146,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	expect_forbidden(
 		services
 			.deactivate
-			.full_deactivate(&second, false)
+			.full_deactivate(&second, false, DeactivationReason::Admin)
 			.boxed()
 			.await,
 		"full deactivation beside a deactivated admin",
@@ -178,7 +181,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	// unset, and the server user is never counted as an admin here.
 	services
 		.users
-		.deactivate_account(&services.globals.server_user)
+		.deactivate_account(&services.globals.server_user, DeactivationReason::Admin)
 		.boxed()
 		.await
 }
@@ -266,7 +269,11 @@ async fn overtaken_deactivation_is_refused(
 	rival: &UserId,
 ) -> Result {
 	let admin_lock = services.admin.lock_admin_room().await;
-	let deactivation = pin!(services.users.deactivate_account(target));
+	let deactivation = pin!(
+		services
+			.users
+			.deactivate_account(target, DeactivationReason::Admin)
+	);
 	let waiting = pin!(sleep(LOCK_WAIT));
 
 	let deactivation = match select(deactivation, waiting).await {

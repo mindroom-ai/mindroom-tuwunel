@@ -14,7 +14,7 @@ use tuwunel_core::{
 	jwt::{EncodingKey, Header, encode},
 	ruma::UserId,
 };
-use tuwunel_service::Services;
+use tuwunel_service::{Services, users::DeactivationReason};
 
 use self::{
 	appservice::{Bridge, register_appservice},
@@ -109,7 +109,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 	services
 		.users
-		.deactivate_account(&deactivated)
+		.deactivate_account(&deactivated, DeactivationReason::Admin)
 		.await?;
 
 	let session = expect_login(services, base, &jwt_auth(&active)?, LASTING).await?;
