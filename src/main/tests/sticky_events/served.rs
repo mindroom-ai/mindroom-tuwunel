@@ -20,7 +20,7 @@ use tuwunel_core::{
 	},
 };
 use tuwunel_matrix::pdu::PduBuilder;
-use tuwunel_service::Services;
+use tuwunel_service::{Services, users::DeactivationReason};
 
 use super::{
 	DURATION, DURATION_MS, ONE_EVENT, STICKY_KEY,
@@ -66,7 +66,7 @@ pub(super) async fn erased_sender_leaves_the_section(
 
 	services
 		.deactivate
-		.full_deactivate(&erin_id, true)
+		.full_deactivate(&erin_id, true, DeactivationReason::Admin)
 		.await?;
 
 	frank.act(room, "join").await?;
