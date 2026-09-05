@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use futures::{Stream, StreamExt, TryFutureExt};
 use ruma::{
-	MilliSecondsSinceUnixEpoch, OwnedUserId, UserId,
+	MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedUserId, UserId,
 	api::client::filter::FilterDefinition,
 	events::{
 		GlobalAccountDataEventType,
@@ -24,13 +24,18 @@ use tuwunel_core::{
 	Err, Result, debug_warn, err, is_equal_to,
 	matrix::pdu::PduCount,
 	trace,
-	utils::{self, BoolExt, ReadyExt, hash::password as hash_password, stream::TryIgnore},
+	utils::{
+		self, BoolExt, MutexMap, ReadyExt, hash::password as hash_password, stream::TryIgnore,
+	},
 };
 use tuwunel_database::{Deserialized, Json, Map};
 
 pub use self::{
-	dehydrated_device::DehydratedDevice, invite_filter::InviteFilter, keys::parse_master_key,
-	register::Register, sso::DeactivationReason,
+	dehydrated_device::DehydratedDevice,
+	invite_filter::InviteFilter,
+	keys::{DeviceKeysUpdate, parse_master_key},
+	register::Register,
+	sso::DeactivationReason,
 };
 
 pub const PASSWORD_SENTINEL: &str = "*";
@@ -48,6 +53,7 @@ pub struct Moderation {
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	db: Data,
+	device_key_mutex: MutexMap<(OwnedUserId, OwnedDeviceId), ()>,
 }
 
 struct Data {
@@ -86,6 +92,7 @@ impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
 			services: args.services.clone(),
+			device_key_mutex: MutexMap::new(),
 			db: Data {
 				keychangeid_userid: args.db["keychangeid_userid"].clone(),
 				keyid_key: args.db["keyid_key"].clone(),

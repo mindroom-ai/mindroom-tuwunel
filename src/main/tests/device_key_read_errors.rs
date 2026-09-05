@@ -27,8 +27,8 @@ mod client;
 const ACCESS_TOKEN: &str = "device-key-read-errors-test-access-token";
 const DEVICE: &str = "READERRORS";
 
-/// Device-key replacement must distinguish an absent row from an unreadable
-/// one without disturbing the existing exact-copy retry behavior.
+/// Device-key uploads must distinguish an absent row from an unreadable one
+/// while preserving immutable identities and the exact-copy retry behavior.
 #[test]
 fn device_key_read_errors_preserve_stored_bytes() -> Result {
 	let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -99,15 +99,15 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 	let replacement = device_keys(&user_id, 4, 5, 6);
 	let changed = upload(&client, &replacement).await?;
-	assert_eq!(changed.status(), StatusCode::OK, "changed device-key upload");
-	assert_eq!(stored_keys(services, &user_id, device_id).await?, replacement);
+	assert_eq!(changed.status(), StatusCode::FORBIDDEN, "changed device-key upload");
+	assert_eq!(stored_keys(services, &user_id, device_id).await?, original);
 
-	let exact_with_new_signature = device_keys(&user_id, 4, 5, 7);
+	let exact_with_new_signature = device_keys(&user_id, 1, 2, 7);
 	let retry = upload(&client, &exact_with_new_signature).await?;
 	assert_eq!(retry.status(), StatusCode::OK, "exact-copy retry");
 	assert_eq!(
 		stored_keys(services, &user_id, device_id).await?,
-		replacement,
+		original,
 		"an exact-key retry must preserve the stored signature",
 	);
 
@@ -119,7 +119,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	);
 	assert_eq!(
 		stored_keys(services, &user_id, device_id).await?,
-		replacement,
+		original,
 		"a malformed upload must not change the stored keys",
 	);
 
