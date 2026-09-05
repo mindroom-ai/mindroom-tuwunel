@@ -152,8 +152,8 @@ pub(crate) use self::{
 	send::send_message_event_route,
 	session::{
 		get_login_types_route, login_route, login_token_route, logout_all_route, logout_route,
-		refresh_token_route, sso_callback_route, sso_complete_js_route, sso_css_route,
-		sso_fallback_route, sso_login_route, sso_login_with_provider_route,
+		native_apple_login_route, refresh_token_route, sso_callback_route, sso_complete_js_route,
+		sso_css_route, sso_fallback_route, sso_login_route, sso_login_with_provider_route,
 	},
 	space::get_hierarchy_route,
 	state::{
