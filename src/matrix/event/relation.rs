@@ -1,4 +1,4 @@
-use ruma::events::relation::RelationType;
+use ruma::{OwnedEventId, events::relation::RelationType};
 use serde::{Deserialize, de::IgnoredAny};
 use serde_json::{from_str, value::RawValue as RawJsonValue};
 
@@ -14,6 +14,23 @@ pub trait RelationTypeEqual<E: Event> {
 	/// The comparison deserializes only the relation fields needed for the
 	/// check. Content that cannot be deserialized returns false.
 	fn relation_type_equal(&self, event: &E) -> bool;
+}
+
+/// Minimal relation metadata extracted from an event's content.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ExtractRelatesToInfo {
+	/// The event content's `m.relates_to` object.
+	#[serde(rename = "m.relates_to")]
+	pub relates_to: RelatesToInfo,
+}
+
+/// The relation type and target event needed to follow an edit chain.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RelatesToInfo {
+	/// The relation type declared by the event.
+	pub rel_type: String,
+	/// The event targeted by the relation.
+	pub event_id: OwnedEventId,
 }
 
 #[derive(Clone, Debug, Deserialize)]

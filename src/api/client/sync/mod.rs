@@ -1,3 +1,4 @@
+mod mindroom_edits;
 mod profiles;
 #[cfg(test)]
 mod tests;
@@ -33,6 +34,7 @@ use tuwunel_matrix::{
 };
 use tuwunel_service::{Services, users::InviteFilter};
 
+use self::mindroom_edits::collapse_superseded_edits;
 pub use self::v3::calculate_heroes;
 pub(crate) use self::{v3::sync_events_route, v5::sync_events_v5_route};
 use crate::utils::is_ignored_sender;
@@ -208,7 +210,18 @@ async fn load_timeline_with_errors<'a>(
 		.await
 		.or_else(Halt::into_scan)?;
 
-	Ok(scan.into_window(last_count))
+	let mut window = scan.into_window(last_count);
+
+	// Collapse superseded m.replace events when enabled
+	if services
+		.server
+		.config
+		.mindroom_compact_edits_enabled
+	{
+		window.pdus = collapse_superseded_edits(window.pdus);
+	}
+
+	Ok(window)
 }
 
 /// Decides whether the user may see one raw row's event.

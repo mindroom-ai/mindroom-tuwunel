@@ -54,7 +54,7 @@
   "auto_join_rooms": "[]",
   "block_non_admin_invites": "false",
   "brotli_compression": "false",
-  "bundle_edit_relations": "false",
+  "bundle_edit_relations": "true",
   "bundle_reference_relations": "false",
   "cache_capacity_modifier": "1.0",
   "calculate_heroes": "true",

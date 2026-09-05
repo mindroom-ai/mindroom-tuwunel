@@ -34,7 +34,7 @@ pub use self::{
 	format::{Owned, Ref},
 	id::*,
 	msgtype::MsgType,
-	relation::RelationTypeEqual,
+	relation::{ExtractRelatesToInfo, RelatesToInfo, RelationTypeEqual},
 	state_key::{StateKey, TypeStateKey},
 	sticky::{STICKY_DURATION_MAX, STICKY_KEY, STICKY_TTL_KEY, Sticky},
 	type_ext::TypeExt,

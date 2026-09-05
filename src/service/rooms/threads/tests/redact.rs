@@ -641,7 +641,10 @@ async fn set_unsigned(&self, event_id: &EventId, unsigned: &Value) -> Result {
 
 #[tokio::test]
 async fn own_latest_reload_failure_drops_the_summary() -> Result {
-	let Some(fixture) = fixture(Figment::new()).await? else {
+	// The fork defaults `bundle_edits` to true, whose edit-fold reload also
+	// fails closed on a missing `eventid_pduid`.
+	let config = Figment::new().merge(("rooms.relations.bundle_edits", false));
+	let Some(fixture) = fixture(config).await? else {
 		return Ok(());
 	};
 
