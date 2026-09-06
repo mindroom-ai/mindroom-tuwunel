@@ -1,13 +1,13 @@
 //! Integration with `clap`
 
-use std::path::PathBuf;
+use std::{env::temp_dir, path::PathBuf};
 
 use clap::{ArgAction, Parser};
 use tuwunel_core::{
 	Err, Result,
 	config::{Figment, FigmentValue},
 	err, implement, is_true, toml,
-	utils::available_parallelism,
+	utils::{available_parallelism, random_string},
 };
 
 /// Only its own argument may set this, since restoring is destructive and
@@ -300,14 +300,22 @@ pub struct Args {
 
 /// Returns arguments for a test, naming the harnesses it opts into.
 ///
-/// The server name is preset to `localhost`. A test wanting another appends its
-/// own override, which wins, since the later value of a key takes precedence.
+/// The server name is preset to `localhost`, with a separate temporary database
+/// path for each call. Random names avoid reusing stale paths after process-id
+/// reuse. A test can append its own override, which takes precedence.
 #[implement(Args)]
 #[must_use]
+#[expect(
+	clippy::unnecessary_debug_formatting,
+	reason = "configuration overrides require a quoted and escaped path"
+)]
 pub fn default_test(name: &[&str]) -> Self {
+	let database_path = temp_dir().join(format!("tuwunel-test-{}", random_string(32)));
+
 	Self::default()
 		.with_tests(name)
 		.with_option("server_name=\"localhost\"")
+		.with_option(format!("database_path={database_path:?}"))
 }
 
 /// Returns these arguments with more test harnesses appended.
