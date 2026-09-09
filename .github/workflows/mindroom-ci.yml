@@ -56,6 +56,8 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Run tests
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: cargo test --locked --workspace --all-targets --all-features
 
       - name: Build release binary
