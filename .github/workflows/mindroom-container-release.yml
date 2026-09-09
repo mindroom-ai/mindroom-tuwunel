@@ -183,7 +183,7 @@ jobs:
             "${IMAGE}:${ARM64_TAG}"
 
       - name: Publish GHCR latest tag
-        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_latest) }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_latest }}
         env:
           IMAGE: ghcr.io/${{ github.repository }}
           AMD64_TAG: ${{ env.RELEASE_TAG }}-release-all-x86_64-v1-linux-gnu
@@ -207,7 +207,7 @@ jobs:
             "${IMAGE}:${ARM64_TAG}"
 
       - name: Publish Docker Hub latest tag
-        if: ${{ env.DOCKERHUB_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_latest)) }}
+        if: ${{ env.DOCKERHUB_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' && inputs.publish_latest) }}
         env:
           IMAGE: docker.io/${{ vars.DOCKER_REPO }}
           AMD64_TAG: ${{ env.RELEASE_TAG }}-release-all-x86_64-v1-linux-gnu
