@@ -55,44 +55,48 @@ mod tests {
 				);
 			}
 
-			let full = request(
-				&router,
-				"GET",
-				&format!("/_matrix/client/v3/sync?timeout=0&since={since}&full_state=true"),
-				None,
-			)
-			.await;
-			for room in [&plain, &encrypted] {
-				let joined = &full["rooms"]["join"][room];
-				let state = joined["state"]["events"]
-					.as_array()
-					.expect("full state includes the quiet room");
-				assert!(
-					state
-						.iter()
-						.any(|event| event["type"] == "m.room.create")
-				);
-				assert!(state.iter().any(|event| {
-					event["type"] == "m.room.member"
-						&& event["state_key"] == "@alice:localhost"
-						&& event["content"]["membership"] == "join"
-				}));
-				assert!(
-					joined["timeline"]["events"]
+			let filter: String =
+				url::form_urlencoded::byte_serialize(br#"{"room":{"timeline":{"limit":0}}}"#)
+					.collect();
+			for query in [format!("since={since}"), format!("filter={filter}")] {
+				let full = request(
+					&router,
+					"GET",
+					&format!("/_matrix/client/v3/sync?timeout=0&full_state=true&{query}"),
+					None,
+				)
+				.await;
+				for room in [&plain, &encrypted] {
+					let joined = &full["rooms"]["join"][room];
+					let state = joined["state"]["events"]
 						.as_array()
-						.is_none_or(Vec::is_empty)
-				);
-				let encryption = state
-					.iter()
-					.find(|event| event["type"] == "m.room.encryption");
-				if room == &encrypted {
-					assert_eq!(
-						encryption.expect("encryption state must not be omitted")["content"]
-							["algorithm"],
-						"m.megolm.v1.aes-sha2"
+						.expect("full state includes the quiet room");
+					assert!(
+						state
+							.iter()
+							.any(|event| event["type"] == "m.room.create")
 					);
-				} else {
-					assert!(encryption.is_none());
+					assert!(state.iter().any(|event| {
+						event["type"] == "m.room.member"
+							&& event["state_key"] == "@alice:localhost"
+							&& event["content"]["membership"] == "join"
+					}));
+					assert!(
+						joined["timeline"]["events"]
+							.as_array()
+							.is_none_or(Vec::is_empty)
+					);
+					let encryption = state
+						.iter()
+						.find(|event| event["type"] == "m.room.encryption");
+					if room == &encrypted {
+						let encryption =
+							encryption.expect("encryption state must not be omitted");
+						assert_eq!(encryption["unsigned"]["membership"], "join");
+						assert_eq!(encryption["content"]["algorithm"], "m.megolm.v1.aes-sha2");
+					} else {
+						assert!(encryption.is_none());
+					}
 				}
 			}
 			Ok(())
