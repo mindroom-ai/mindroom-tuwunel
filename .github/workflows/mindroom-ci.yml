@@ -43,13 +43,14 @@ jobs:
         run: rustup toolchain install
 
       - name: Set up nightly rustfmt
-        run: rustup toolchain install nightly --profile minimal --component rustfmt
+        # Match the formatter selected by the locked Fenix input in flake.lock.
+        run: rustup toolchain install nightly-2026-06-29 --profile minimal --component rustfmt
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        run: cargo +nightly fmt --all -- --check
+        run: cargo +nightly-2026-06-29 fmt --all -- --check
 
       - name: Run clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
