@@ -7,7 +7,7 @@ use std::{
 use async_trait::async_trait;
 use futures::StreamExt;
 use ruma::{
-	Mxc, OwnedEventId, OwnedMxcUri, OwnedRoomId, OwnedUserId, RoomId, ServerName, UserId,
+	EventId, Mxc, OwnedEventId, OwnedMxcUri, OwnedRoomId, OwnedUserId, RoomId, ServerName, UserId,
 };
 use serde_json::Value as JsonValue;
 use tokio::{
@@ -36,11 +36,11 @@ pub struct Service {
 	roomid_tscount_pducount: Arc<Map>,
 	/// Last-scanned pdu_id key for incremental scanning.
 	last_scan_key: Mutex<Option<Vec<u8>>>,
-	/// Latest replacement seen so far for each (target, sender) during the
+	/// Latest replacement seen so far for each (room, target, sender) during the
 	/// current full-table scan pass. This is persisted across purge cycles so
 	/// replacements split across scan windows are still compared.
-	latest_replace_by_target_sender:
-		Mutex<HashMap<(OwnedEventId, OwnedUserId), ReplaceCandidate>>,
+	latest_replace_by_room_target_sender:
+		Mutex<HashMap<(OwnedRoomId, OwnedEventId, OwnedUserId), ReplaceCandidate>>,
 	/// Superseded candidates discovered in previous cycles but not yet deleted
 	/// because `batch_size` was reached.
 	pending_superseded_candidates: Mutex<VecDeque<(OwnedEventId, ReplaceCandidate)>>,
@@ -135,7 +135,7 @@ impl crate::Service for Service {
 			shorteventid_eventid: db["shorteventid_eventid"].clone(),
 			roomid_tscount_pducount: db["roomid_tscount_pducount"].clone(),
 			last_scan_key: Mutex::new(None),
-			latest_replace_by_target_sender: Mutex::new(HashMap::new()),
+			latest_replace_by_room_target_sender: Mutex::new(HashMap::new()),
 			pending_superseded_candidates: Mutex::new(VecDeque::new()),
 			services: Services {
 				server: args.server.clone(),
@@ -232,7 +232,7 @@ impl Service {
 		let cutoff_ms = now_ms.saturating_sub(min_age_ms);
 
 		// Phase 1: Incrementally scan PDUs from the last cursor position and
-		// compare m.replace events against per-(target, sender) latest state that
+		// Compare eligible edits against per-(room, target, sender) latest state that
 		// persists across cycles during a full-table scan pass.
 		let mut superseded_candidates: Vec<(OwnedEventId, ReplaceCandidate)> = Vec::new();
 		let pending_len = self
@@ -241,8 +241,10 @@ impl Service {
 			.await
 			.len();
 		let should_scan = pending_len < backlog_cap;
-		let mut latest_replace_by_target_sender =
-			self.latest_replace_by_target_sender.lock().await;
+		let mut latest_replace_by_room_target_sender = self
+			.latest_replace_by_room_target_sender
+			.lock()
+			.await;
 
 		let mut last_key: Option<Vec<u8>> = None;
 		let mut scanned: usize = 0;
@@ -277,9 +279,14 @@ impl Service {
 					&& content.relates_to.rel_type == "m.replace"
 				{
 					let ts: u64 = pdu.origin_server_ts.into();
-					if ts <= cutoff_ms {
+					if ts <= cutoff_ms
+						&& self
+							.is_valid_replacement(&pdu, &content.relates_to.event_id)
+							.await
+					{
 						let target_event_id = content.relates_to.event_id;
-						let group_key = (target_event_id.clone(), pdu.sender.clone());
+						let group_key =
+							(pdu.room_id.clone(), target_event_id.clone(), pdu.sender.clone());
 						let candidate = ReplaceCandidate {
 							event_id: pdu.event_id.clone(),
 							sender: pdu.sender.clone(),
@@ -289,7 +296,7 @@ impl Service {
 							sidecar_mxcs: extract_mindroom_long_text_sidecar_mxcs(&pdu),
 						};
 
-						match latest_replace_by_target_sender.entry(group_key) {
+						match latest_replace_by_room_target_sender.entry(group_key) {
 							| Entry::Vacant(entry) => {
 								entry.insert(candidate);
 							},
@@ -330,13 +337,13 @@ impl Service {
 		// Under sustained high write load this pass may never reach the end; cap
 		// retained latest-state entries to avoid unbounded growth.
 		let latest_state_cap = scan_limit.saturating_mul(4).max(10_000);
-		if latest_replace_by_target_sender.len() > latest_state_cap {
+		if latest_replace_by_room_target_sender.len() > latest_state_cap {
 			warn!(
-				groups = latest_replace_by_target_sender.len(),
+				groups = latest_replace_by_room_target_sender.len(),
 				cap = latest_state_cap,
 				"MindRoom edit purge latest-state cache exceeded cap; resetting scan pass"
 			);
-			latest_replace_by_target_sender.clear();
+			latest_replace_by_room_target_sender.clear();
 			reset_scan_state = true;
 		}
 
@@ -349,12 +356,12 @@ impl Service {
 				// pressure.
 			} else if reached_end || reset_scan_state {
 				*cursor = None;
-				latest_replace_by_target_sender.clear();
+				latest_replace_by_room_target_sender.clear();
 			} else {
 				*cursor = last_key;
 			}
 		}
-		drop(latest_replace_by_target_sender);
+		drop(latest_replace_by_room_target_sender);
 
 		// Phase 2: Purge superseded events discovered during this and prior scan
 		// windows.
@@ -425,6 +432,48 @@ impl Service {
 		}
 
 		Ok(())
+	}
+
+	/// A relation-shaped payload alone is not permission to destroy an event.
+	/// Preserve candidates whenever the original cannot be read or the visible
+	/// replacement boundaries cannot be verified. Encrypted new content remains
+	/// opaque, but its event metadata must satisfy the same constraints.
+	async fn is_valid_replacement(&self, pdu: &PduEvent, target_event_id: &EventId) -> bool {
+		if pdu.state_key.is_some()
+			|| (pdu.kind != ruma::events::TimelineEventType::RoomEncrypted
+				&& !pdu
+					.get_content_as_value()
+					.get("m.new_content")
+					.is_some_and(JsonValue::is_object))
+		{
+			return false;
+		}
+
+		let Ok(target_key) = self
+			.eventid_pduid
+			.get(target_event_id.as_bytes())
+			.await
+		else {
+			return false;
+		};
+		let Ok(target_bytes) = self.pduid_pdu.get(&*target_key).await else {
+			return false;
+		};
+		let Ok(target) = serde_json::from_slice::<PduEvent>(&target_bytes) else {
+			return false;
+		};
+
+		target.event_id.as_str() == target_event_id.as_str()
+			&& target.state_key.is_none()
+			&& target.room_id == pdu.room_id
+			&& target.sender == pdu.sender
+			&& target.kind == pdu.kind
+			&& target
+				.get_content_as_value()
+				.get("m.relates_to")
+				.and_then(|relation| relation.get("rel_type"))
+				.and_then(JsonValue::as_str)
+				!= Some("m.replace")
 	}
 
 	/// Delete a superseded edit event from the database.
@@ -794,7 +843,7 @@ mod tests {
 	use ruma::{
 		EventId, Mxc, OwnedEventId, OwnedMxcUri, OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
 	};
-	use serde_json::value::RawValue;
+	use serde_json::{json, value::RawValue};
 	use tokio::{
 		sync::{Mutex, MutexGuard, Notify},
 		time::timeout,
@@ -810,7 +859,7 @@ mod tests {
 	};
 	use tuwunel_database::{Database, serialize_to_vec};
 
-	use super::{Service, Services, SidecarMedia, TestSidecarMedia, bias_count};
+	use super::{Event, Service, Services, SidecarMedia, TestSidecarMedia, bias_count};
 
 	static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 	static TEST_DB_OPEN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -908,7 +957,7 @@ mod tests {
 			shorteventid_eventid: db["shorteventid_eventid"].clone(),
 			roomid_tscount_pducount: db["roomid_tscount_pducount"].clone(),
 			last_scan_key: Mutex::new(None),
-			latest_replace_by_target_sender: Mutex::new(HashMap::new()),
+			latest_replace_by_room_target_sender: Mutex::new(HashMap::new()),
 			pending_superseded_candidates: Mutex::new(VecDeque::new()),
 			services: Services {
 				server,
@@ -995,7 +1044,7 @@ rocksdb_read_only = {}
 			|| r#"{"body":"original"}"#.to_owned(),
 			|target| {
 				format!(
-					r#"{{"body":"edited","m.relates_to":{{"rel_type":"m.replace","event_id":"{target}"}}}}"#
+					r#"{{"body":"edited","m.new_content":{{"body":"edited"}},"m.relates_to":{{"rel_type":"m.replace","event_id":"{target}"}}}}"#
 				)
 			},
 		);
@@ -1028,6 +1077,7 @@ rocksdb_read_only = {}
 		format!(
 			r#"{{
 				"body":"message-content.json",
+				"m.new_content":{{"body":"message-content.json"}},
 				"msgtype":"m.file",
 				"url":"{mxc}",
 				"io.mindroom.long_text":{{
@@ -1046,6 +1096,7 @@ rocksdb_read_only = {}
 		format!(
 			r#"{{
 				"body":"message-content.json",
+				"m.new_content":{{"body":"message-content.json"}},
 				"msgtype":"m.file",
 				"file":{{"url":"{mxc}"}},
 				"io.mindroom.long_text":{{
@@ -1064,6 +1115,7 @@ rocksdb_read_only = {}
 		format!(
 			r#"{{
 				"body":"ordinary-file.bin",
+				"m.new_content":{{"body":"ordinary-file.bin"}},
 				"msgtype":"m.file",
 				"url":"{mxc}",
 				"m.relates_to":{{
@@ -1540,7 +1592,7 @@ rocksdb_read_only = {}
 	}
 
 	#[tokio::test]
-	async fn purge_groups_edits_by_sender() {
+	async fn purge_preserves_other_senders_replacement_shaped_messages() {
 		let harness = make_harness(HarnessConfig::default()).await;
 		let service = &harness.service;
 
@@ -1593,8 +1645,188 @@ rocksdb_read_only = {}
 		assert_event_present(service, &target);
 		assert_event_absent(service, &alice_edit1);
 		assert_event_present(service, &alice_edit2);
-		assert_event_absent(service, &bob_edit1);
+		assert_event_present(service, &bob_edit1);
 		assert_event_present(service, &bob_edit2);
+	}
+
+	fn update_stored_pdu(
+		service: &Service,
+		event: &StoredEvent,
+		update: impl FnOnce(&mut PduEvent),
+	) {
+		let bytes = service
+			.pduid_pdu
+			.get_blocking(&event.pdu_key)
+			.expect("stored PDU");
+		let mut pdu: PduEvent = serde_json::from_slice(&bytes).expect("valid stored PDU");
+		update(&mut pdu);
+		service
+			.pduid_pdu
+			.insert(&event.pdu_key, serde_json::to_vec(&pdu).expect("serialize PDU"));
+	}
+
+	#[tokio::test]
+	async fn purge_preserves_invalid_or_unverifiable_replacements() {
+		let mut failures = Vec::new();
+		for case in [
+			"state replacement",
+			"cross-room replacement",
+			"different event type",
+			"state target",
+			"edit target",
+			"missing target index",
+			"missing target PDU",
+			"corrupt target",
+			"mismatched target ID",
+			"missing new content",
+			"non-object new content",
+		] {
+			let harness = make_harness(HarnessConfig::default()).await;
+			let service = &harness.service;
+			let target = insert_event(
+				service,
+				0,
+				"$boundary_target:example.com",
+				"@alice:example.com",
+				100,
+				None,
+			);
+			let older = insert_event(
+				service,
+				1,
+				"$boundary_old:example.com",
+				"@alice:example.com",
+				200,
+				Some(target.event_id.as_str()),
+			);
+			let newer = insert_event(
+				service,
+				2,
+				"$boundary_new:example.com",
+				"@alice:example.com",
+				300,
+				Some(target.event_id.as_str()),
+			);
+			match case {
+				| "state replacement"
+				| "cross-room replacement"
+				| "different event type"
+				| "missing new content"
+				| "non-object new content" =>
+					for event in [&older, &newer] {
+						update_stored_pdu(service, event, |pdu| match case {
+							| "state replacement" =>
+								pdu.state_key = Some(pdu.event_id.to_string().into()),
+							| "cross-room replacement" =>
+								pdu.room_id = "!other:example.com".try_into().expect("room ID"),
+							| "different event type" =>
+								pdu.kind = ruma::events::TimelineEventType::RoomEncrypted,
+							| _ => {
+								let mut content = pdu.get_content_as_value();
+								content
+									.as_object_mut()
+									.expect("content object")
+									.remove("m.new_content");
+								if case == "non-object new content" {
+									content["m.new_content"] = json!(null);
+								}
+								pdu.content = RawValue::from_string(content.to_string())
+									.expect("JSON content")
+									.into();
+							},
+						});
+					},
+				| "state target" => update_stored_pdu(service, &target, |pdu| {
+					pdu.state_key = Some("current".into())
+				}),
+				| "edit target" => update_stored_pdu(service, &target, |pdu| {
+					pdu.content = RawValue::from_string(
+						json!({"m.relates_to": {"rel_type": "m.replace"}}).to_string(),
+					)
+					.expect("JSON content")
+					.into();
+				}),
+				| "missing target index" => service
+					.eventid_pduid
+					.remove(target.event_id.as_bytes()),
+				| "missing target PDU" => service.pduid_pdu.remove(&target.pdu_key),
+				| "corrupt target" => service
+					.pduid_pdu
+					.insert(&target.pdu_key, b"not JSON"),
+				| "mismatched target ID" => update_stored_pdu(service, &target, |pdu| {
+					pdu.event_id = "$different:example.com"
+						.try_into()
+						.expect("event ID")
+				}),
+				| _ => unreachable!("known test case"),
+			}
+			service
+				.purge_cycle()
+				.await
+				.expect("purge cycle succeeds");
+			if service
+				.pduid_pdu
+				.get_blocking(&older.pdu_key)
+				.is_err()
+			{
+				failures.push(case);
+			} else {
+				assert_event_present(service, &older);
+			}
+			assert_event_present(service, &newer);
+		}
+		assert!(failures.is_empty(), "purge deleted unverifiable replacements: {failures:?}");
+	}
+
+	#[tokio::test]
+	async fn purge_keeps_encrypted_edits_without_cleartext_new_content_supported() {
+		let harness = make_harness(HarnessConfig::default()).await;
+		let service = &harness.service;
+		let target = insert_event(
+			service,
+			0,
+			"$encrypted_target:example.com",
+			"@alice:example.com",
+			100,
+			None,
+		);
+		let older = insert_event(
+			service,
+			1,
+			"$encrypted_old:example.com",
+			"@alice:example.com",
+			200,
+			Some(target.event_id.as_str()),
+		);
+		let newer = insert_event(
+			service,
+			2,
+			"$encrypted_new:example.com",
+			"@alice:example.com",
+			300,
+			Some(target.event_id.as_str()),
+		);
+		for event in [&target, &older, &newer] {
+			update_stored_pdu(service, event, |pdu| {
+				pdu.kind = ruma::events::TimelineEventType::RoomEncrypted;
+				let mut content =
+					json!({"algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "opaque"});
+				if event.event_id != target.event_id {
+					content["m.relates_to"] =
+						json!({"rel_type": "m.replace", "event_id": target.event_id});
+				}
+				pdu.content = RawValue::from_string(content.to_string())
+					.expect("JSON content")
+					.into();
+			});
+		}
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+		assert_event_present(service, &target);
+		assert_event_absent(service, &older);
+		assert_event_present(service, &newer);
 	}
 
 	#[tokio::test]

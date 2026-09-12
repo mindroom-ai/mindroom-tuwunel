@@ -50,11 +50,112 @@ mod tests {
 		harness.with_services(async |services| {
 			let (router, room_id) = setup_room(&services).await?;
 
+			purge_preserves_state_and_cross_room_boundaries(&services, &router, &room_id).await?;
 			real_purge_still_bundles_survivor(&services, &router, &room_id).await?;
 			dangling_newest_falls_through(&services, &router, &room_id).await?;
 
 			Ok(())
 		})
+	}
+
+	/// Replacement-shaped state or foreign-room content must never supersede a
+	/// valid edit. Exercise the real router, state mappings, purge and bundler.
+	#[expect(clippy::too_many_lines)]
+	async fn purge_preserves_state_and_cross_room_boundaries(
+		services: &Arc<Services>,
+		router: &Router,
+		room_a: &str,
+	) -> Result {
+		let state_target =
+			send_text(router, room_a, ALICE_TOKEN, "state-target", "state target").await;
+		let mut state_ids = Vec::new();
+		for key in ["first", "second"] {
+			let uri = format!(
+				"/_matrix/client/v3/rooms/{}/state/org.mindroom.purge_probe/{key}",
+				enc(room_a)
+			);
+			let content = json!({"value": key, "m.relates_to": {"rel_type": "m.replace", "event_id": state_target}});
+			let sent = request(router, "PUT", &uri, ALICE_TOKEN, Some(content)).await;
+			state_ids.push(
+				sent["event_id"]
+					.as_str()
+					.expect("state event ID")
+					.to_owned(),
+			);
+			assert_eq!(request(router, "GET", &uri, ALICE_TOKEN, None).await["value"], key);
+		}
+		let original = send_text(router, room_a, ALICE_TOKEN, "cross-original", "original").await;
+		let survivor =
+			send_edit(router, room_a, ALICE_TOKEN, "cross-survivor", &original, "valid edit")
+				.await;
+		let created = request(
+			router,
+			"POST",
+			"/_matrix/client/v3/createRoom",
+			ALICE_TOKEN,
+			Some(json!({"preset": "private_chat"})),
+		)
+		.await;
+		let room_b = created["room_id"]
+			.as_str()
+			.expect("second room ID");
+		let foreign =
+			send_edit(router, room_b, ALICE_TOKEN, "cross-foreign", &original, "foreign edit")
+				.await;
+		assert!(get_pdu_id(services, &survivor).await.is_some());
+		let before = messages_chunk(router, &enc(room_a), ALICE_TOKEN).await;
+		assert_edit_bundle(
+			replace_bundle(find_event(&before, &original)),
+			&survivor,
+			"valid edit",
+		);
+
+		// A normal same-room group proves the purge really ran, not merely that
+		// the safety checks disabled all deletion.
+		let control = send_text(router, room_a, ALICE_TOKEN, "boundary-control", "control").await;
+		let obsolete =
+			send_edit(router, room_a, ALICE_TOKEN, "boundary-old", &control, "old").await;
+		let latest =
+			send_edit(router, room_a, ALICE_TOKEN, "boundary-new", &control, "new").await;
+		services.edit_purge.purge_cycle().await?;
+		assert!(get_pdu_id(services, &obsolete).await.is_none());
+		assert!(get_pdu_id(services, &latest).await.is_some());
+
+		let mut state_readable = Vec::new();
+		for (key, event_id) in ["first", "second"].into_iter().zip(&state_ids) {
+			let uri = format!(
+				"/_matrix/client/v3/rooms/{}/state/org.mindroom.purge_probe/{key}",
+				enc(room_a)
+			);
+			let (status, content) = response(router, "GET", &uri, ALICE_TOKEN, None).await;
+			state_readable.push(
+				status == StatusCode::OK
+					&& content["value"] == key
+					&& get_pdu_id(services, event_id).await.is_some(),
+			);
+		}
+		let survivor_present = get_pdu_id(services, &survivor).await.is_some();
+		assert_eq!(
+			(state_readable, survivor_present),
+			(vec![true, true], true),
+			"purge must preserve current state and the other room's surviving edit"
+		);
+		assert!(get_pdu_id(services, &foreign).await.is_some());
+		let after = messages_chunk(router, &enc(room_a), ALICE_TOKEN).await;
+		assert_edit_bundle(
+			replace_bundle(find_event(&after, &original)),
+			&survivor,
+			"valid edit",
+		);
+		assert_edit_bundle(replace_bundle(find_event(&after, &control)), &latest, "new");
+		services.edit_purge.purge_cycle().await?;
+		for event in state_ids.iter().chain([&survivor, &foreign]) {
+			assert!(
+				get_pdu_id(services, event).await.is_some(),
+				"protected event survives another scan"
+			);
+		}
+		Ok(())
 	}
 
 	/// A real purge cycle deletes the superseded edit and keeps the newest; the
@@ -309,6 +410,18 @@ mod tests {
 		token: &str,
 		body: Option<JsonValue>,
 	) -> JsonValue {
+		let (status, body) = response(router, method, uri, token, body).await;
+		assert_eq!(status, StatusCode::OK, "{method} {uri} should succeed: {body}");
+		body
+	}
+
+	async fn response(
+		router: &Router,
+		method: &str,
+		uri: &str,
+		token: &str,
+		body: Option<JsonValue>,
+	) -> (StatusCode, JsonValue) {
 		let request = Request::builder()
 			.method(method)
 			.uri(uri)
@@ -328,14 +441,7 @@ mod tests {
 		let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
 			.await
 			.expect("readable response body");
-		assert_eq!(
-			status,
-			StatusCode::OK,
-			"{method} {uri} should succeed: {}",
-			String::from_utf8_lossy(&bytes),
-		);
-
-		serde_json::from_slice(&bytes).expect("JSON response body")
+		(status, serde_json::from_slice(&bytes).expect("JSON response body"))
 	}
 
 	/// Percent-encode a room/event ID for use as a URI path segment.
