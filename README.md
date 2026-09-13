@@ -1,5 +1,10 @@
 # Tuwunel<sup>💕</sup>
 
+<picture>
+  <source media="(prefers-reduced-motion: no-preference)" srcset="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/assets/logo/logo-mark-animated.svg" />
+  <img src="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/assets/logo/logo-mark.svg" alt="MindRoom Logo" align="right" width="120" />
+</picture>
+
 > This is the MindRoom fork of
 > [`matrix-construct/tuwunel`](https://github.com/matrix-construct/tuwunel).
 > It tracks upstream and carries a focused set of fork-specific changes for
