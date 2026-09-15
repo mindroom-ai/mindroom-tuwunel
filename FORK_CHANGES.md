@@ -35,6 +35,16 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Optional appservice user discovery
+
+`show_appservice_users_in_user_directory` allows appservice senders and users
+in exclusive appservice namespaces to appear in directory searches.
+It defaults to false, preserving upstream's exclusion.
+When enabled, ordinary room visibility rules still apply unless
+`show_all_local_users_in_user_directory` is also enabled.
+This changes directory visibility only; exclusive namespace ownership is
+unchanged.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
