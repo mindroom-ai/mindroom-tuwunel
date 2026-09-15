@@ -42,7 +42,8 @@ pub(super) fn check_directory(
 
 		let exercise = async {
 			let outcome = exercise(&services, &base, show_appservices, show_all, expected).await;
-			outcome.and(server.server.shutdown())
+			let shutdown = server.server.shutdown();
+			outcome.and(shutdown)
 		};
 		let (run_result, outcome) = join(async_run(&server), exercise).await;
 		drop(services);
