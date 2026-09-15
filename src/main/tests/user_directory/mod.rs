@@ -10,36 +10,17 @@ use tuwunel_service::Services;
 
 use self::client::{Client, register, wait_until_ready};
 
+#[path = "../client/mod.rs"]
 mod client;
 
 const TOKEN: &str = "directory-search-test-token-0123456789abcdef";
 const AGENT_TOKEN: &str = "directory-agent-test-token-0123456789abcdef";
 
-#[test]
-fn appservice_accounts_remain_hidden_by_default() -> Result {
-	check_directory(None, true, &["@directory_human:localhost"])
-}
-
-#[test]
-fn appservice_accounts_can_be_made_discoverable() -> Result {
-	check_directory(Some(true), true, &[
-		"@directory_agent:localhost",
-		"@directory_human:localhost",
-		"@directory_sender:localhost",
-	])
-}
-
-#[test]
-fn appservice_visibility_can_be_disabled_explicitly() -> Result {
-	check_directory(Some(false), true, &["@directory_human:localhost"])
-}
-
-#[test]
-fn appservice_visibility_preserves_room_visibility_rules() -> Result {
-	check_directory(Some(true), false, &[])
-}
-
-fn check_directory(show_appservices: Option<bool>, show_all: bool, expected: &[&str]) -> Result {
+pub(super) fn check_directory(
+	show_appservices: Option<bool>,
+	show_all: bool,
+	expected: &[&str],
+) -> Result {
 	let listener = TcpListener::bind(("127.0.0.1", 0))?;
 	let port = listener.local_addr()?.port();
 	let mut args = Args::default_test(&["fresh", "cleanup"])
