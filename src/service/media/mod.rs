@@ -712,6 +712,12 @@ impl Service {
 		})
 	}
 
+	/// Every (MXC, uploader) pair in the uploader index, which records the
+	/// uploading local user of each upload, in MXC order.
+	pub fn uploads(&self) -> impl Stream<Item = (OwnedMxcUri, OwnedUserId)> + Send + '_ {
+		self.db.all_uploads()
+	}
+
 	/// Uploader, byte length and storage modification time of every media item
 	/// uploaded by a local user, one row per upload; media missing from every
 	/// storage provider are skipped.

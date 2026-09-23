@@ -1,3 +1,5 @@
+mod sweep;
+
 use std::{
 	collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
 	sync::Arc,
@@ -5,13 +7,14 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{StreamExt, stream::BoxStream};
 use ruma::{
 	EventId, Mxc, OwnedEventId, OwnedMxcUri, OwnedRoomId, OwnedUserId, RoomId, ServerName, UserId,
 };
 use serde_json::Value as JsonValue;
 use tokio::{
 	sync::{Mutex, Notify},
+	task::yield_now,
 	time::{MissedTickBehavior, interval},
 };
 use tuwunel_core::{
@@ -24,7 +27,14 @@ use tuwunel_core::{
 };
 use tuwunel_database::{Database, Map, serialize_to_vec};
 
+pub use self::sweep::{
+	ORPHANED_SIDECAR_AGE_MARGIN, OrphanedSidecarReport, OrphanedSidecarSweep, UploaderFilter,
+};
+use self::sweep::{StoredObject, UploadType};
 use crate::rooms::timeline::bias_count;
+
+/// Rows a long scan reads between cooperative yields to the runtime.
+const SCAN_YIELD_INTERVAL: usize = 1024;
 
 pub struct Service {
 	interval: Duration,
@@ -79,6 +89,52 @@ impl SidecarMedia {
 			| Self::Test(media) => media.delete_owned_by(mxc, user).await,
 		}
 	}
+
+	/// Every (MXC, uploader) pair in the local uploader index.
+	fn uploads(&self) -> BoxStream<'_, (OwnedMxcUri, OwnedUserId)> {
+		match self {
+			| Self::Runtime(services) => services.media.uploads().boxed(),
+			#[cfg(test)]
+			| Self::Test(media) => futures::stream::iter(media.uploads()).boxed(),
+		}
+	}
+
+	/// Stored content type and upload filename, from the media database only.
+	async fn upload_type(&self, mxc: &Mxc<'_>) -> Option<UploadType> {
+		match self {
+			| Self::Runtime(services) => services
+				.media
+				.get_metadata(mxc)
+				.await
+				.map(|metadata| UploadType {
+					content_type: metadata.content_type,
+					filename: metadata
+						.content_disposition
+						.and_then(|disposition| disposition.filename),
+				}),
+			#[cfg(test)]
+			| Self::Test(media) => media.upload_type(mxc).await,
+		}
+	}
+
+	/// Byte length and modification time of the stored object, or `None` when
+	/// no storage provider holds it.
+	async fn stored_object(&self, mxc: &Mxc<'_>) -> Option<StoredObject> {
+		match self {
+			| Self::Runtime(services) =>
+				services
+					.media
+					.media_entry(mxc)
+					.await
+					.and_then(|entry| {
+						entry
+							.media_length
+							.map(|size| StoredObject { size, modified_ms: entry.created_ts })
+					}),
+			#[cfg(test)]
+			| Self::Test(media) => media.stored_object(mxc).await,
+		}
+	}
 }
 
 #[cfg(test)]
@@ -87,6 +143,12 @@ trait TestSidecarMedia: Send + Sync {
 	async fn mxc_is_owned_by_user(&self, mxc: &Mxc<'_>, user: &UserId) -> bool;
 
 	async fn delete_owned_by(&self, mxc: &Mxc<'_>, user: &UserId) -> Result<bool>;
+
+	fn uploads(&self) -> Vec<(OwnedMxcUri, OwnedUserId)>;
+
+	async fn upload_type(&self, mxc: &Mxc<'_>) -> Option<UploadType>;
+
+	async fn stored_object(&self, mxc: &Mxc<'_>) -> Option<StoredObject>;
 }
 
 /// A candidate replacement event with its metadata.
@@ -718,41 +780,81 @@ impl Service {
 			.flat_map(|(_, candidate)| candidate.sidecar_mxcs.iter().cloned())
 			.collect();
 
-		if candidate_mxcs.is_empty() {
-			return HashSet::new();
-		}
-
 		let ignored_event_ids: HashSet<OwnedEventId> = cleanup_candidates
 			.iter()
 			.map(|(_, candidate)| candidate.event_id.clone())
 			.collect();
-		let mut protected_mxcs = HashSet::new();
+
+		self.referenced_mxcs(&candidate_mxcs, &ignored_event_ids)
+			.await
+			.protected
+	}
+
+	/// Find which of `candidate_mxcs` a retained event still references. No
+	/// index maps media to the events using it, so this scans every stored PDU
+	/// in every room and matches any string value in its content equal to a
+	/// candidate. Events in `ignored_event_ids` are skipped. A row that does
+	/// not decode as a PDU is searched as plain JSON instead, so it can only
+	/// add protection; rows that cannot be read at all are counted.
+	///
+	/// Yields to the runtime periodically so a full scan cannot monopolize a
+	/// worker thread.
+	async fn referenced_mxcs(
+		&self,
+		candidate_mxcs: &HashSet<OwnedMxcUri>,
+		ignored_event_ids: &HashSet<OwnedEventId>,
+	) -> ReferenceScan {
+		let mut scan = ReferenceScan::default();
+		if candidate_mxcs.is_empty() {
+			return scan;
+		}
+
 		let stream = self.pduid_pdu.raw_stream();
 		tokio::pin!(stream);
 
 		while let Some(kv) = stream.next().await {
+			scan.scanned = scan.scanned.saturating_add(1);
+			if scan.scanned.is_multiple_of(SCAN_YIELD_INTERVAL) {
+				yield_now().await;
+			}
+
 			let Ok((_key, value)) = kv else {
+				scan.unreadable = scan.unreadable.saturating_add(1);
 				continue;
 			};
 
-			let Ok(pdu) = serde_json::from_slice::<PduEvent>(value) else {
-				continue;
-			};
+			if let Ok(pdu) = serde_json::from_slice::<PduEvent>(value) {
+				if ignored_event_ids.contains(&pdu.event_id) {
+					continue;
+				}
 
-			if ignored_event_ids.contains(&pdu.event_id) {
+				let content = pdu.get_content_as_value();
+				collect_referenced_candidate_mxcs(&content, candidate_mxcs, &mut scan.protected);
+			} else if let Ok(event) = serde_json::from_slice::<JsonValue>(value) {
+				collect_referenced_candidate_mxcs(&event, candidate_mxcs, &mut scan.protected);
+			} else {
+				scan.unreadable = scan.unreadable.saturating_add(1);
 				continue;
 			}
 
-			let content = pdu.get_content_as_value();
-			collect_referenced_candidate_mxcs(&content, &candidate_mxcs, &mut protected_mxcs);
-
-			if protected_mxcs.len() == candidate_mxcs.len() {
+			if scan.protected.len() == candidate_mxcs.len() {
 				break;
 			}
 		}
 
-		protected_mxcs
+		scan
 	}
+}
+
+/// Outcome of a full scan for retained references to candidate media.
+#[derive(Default)]
+struct ReferenceScan {
+	/// Candidates referenced by at least one retained event.
+	protected: HashSet<OwnedMxcUri>,
+	/// Rows read before the scan finished or every candidate was protected.
+	scanned: usize,
+	/// Rows that could not be read or decoded, whose references are unknown.
+	unreadable: usize,
 }
 
 fn extract_mindroom_long_text_sidecar_mxcs(pdu: &PduEvent) -> Vec<OwnedMxcUri> {
@@ -859,7 +961,12 @@ mod tests {
 	};
 	use tuwunel_database::{Database, serialize_to_vec};
 
-	use super::{Event, Service, Services, SidecarMedia, TestSidecarMedia, bias_count};
+	use super::{
+		Event, Service, Services, SidecarMedia, StoredObject, TestSidecarMedia, UploadType,
+		bias_count,
+	};
+
+	mod sweep;
 
 	static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 	static TEST_DB_OPEN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -898,6 +1005,17 @@ mod tests {
 	#[derive(Default)]
 	struct TestMedia {
 		owners: StdMutex<HashMap<String, OwnedUserId>>,
+		/// Stored type and object of uploads that record them.
+		objects: StdMutex<HashMap<String, TestObject>>,
+	}
+
+	#[derive(Clone)]
+	struct TestObject {
+		content_type: Option<String>,
+		filename: Option<String>,
+		size: u64,
+		/// `None` when no storage provider holds the object.
+		modified_ms: Option<u64>,
 	}
 
 	#[async_trait]
@@ -918,7 +1036,48 @@ mod tests {
 			}
 
 			owners.remove(&mxc);
+			self.objects
+				.lock()
+				.expect("test media lock")
+				.remove(&mxc);
+
 			Ok(true)
+		}
+
+		fn uploads(&self) -> Vec<(OwnedMxcUri, OwnedUserId)> {
+			let mut uploads: Vec<_> = self
+				.owners
+				.lock()
+				.expect("test media lock")
+				.iter()
+				.map(|(mxc, user)| (OwnedMxcUri::from(mxc.clone()), user.clone()))
+				.collect();
+
+			uploads.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+			uploads
+		}
+
+		async fn upload_type(&self, mxc: &Mxc<'_>) -> Option<UploadType> {
+			self.objects
+				.lock()
+				.expect("test media lock")
+				.get(&mxc.to_string())
+				.map(|object| UploadType {
+					content_type: object.content_type.clone(),
+					filename: object.filename.clone(),
+				})
+		}
+
+		async fn stored_object(&self, mxc: &Mxc<'_>) -> Option<StoredObject> {
+			self.objects
+				.lock()
+				.expect("test media lock")
+				.get(&mxc.to_string())
+				.and_then(|object| {
+					object
+						.modified_ms
+						.map(|modified_ms| StoredObject { size: object.size, modified_ms })
+				})
 		}
 	}
 
