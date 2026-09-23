@@ -52,12 +52,16 @@ Files:
 - `src/core/matrix/event.rs`, `src/core/matrix/event/relation.rs`
 - `src/database/map/remove.rs`
 - `src/service/edit_purge/mod.rs`, `src/service/mod.rs`, `src/service/services.rs`
-- `src/service/edit_purge/sweep.rs`, `src/service/edit_purge/tests/sweep.rs`
-- `src/service/media/mod.rs` (uploader-index stream for the sidecar sweep)
+- `src/service/edit_purge/sweep.rs`, `src/service/edit_purge/tests/sweep.rs`,
+  `src/service/edit_purge/tests/references.rs`
+- `src/service/media/mod.rs` (uploader-index stream for the sidecar sweep;
+  retryable media deletion)
 - `src/admin/media/mod.rs`, `src/admin/media/delete_orphaned_long_text_sidecars.rs`,
   `src/admin/tests.rs`
 - `src/mindroom-tests/tests/edit_purge_bundle_compose.rs`
-- `src/mindroom-tests/tests/orphaned_sidecar_sweep.rs`, `src/mindroom-tests/Cargo.toml`
+- `src/mindroom-tests/tests/orphaned_sidecar_sweep.rs`,
+  `src/mindroom-tests/tests/orphaned_sidecar_delete_retry.rs`,
+  `src/mindroom-tests/Cargo.toml`
 - `tuwunel-example.toml`
 
 Behavior:
@@ -70,22 +74,52 @@ Behavior:
   object; encrypted replacement content remains opaque. Invalid or unverifiable
   relationships are preserved rather than used to supersede another event.
 - Adds the MindRoom edit-lifecycle configuration surface and purge validation.
+- The retained-reference scan that keeps shared sidecars covers every timeline
+  PDU, the retained unredacted originals of redacted events
+  (`eventid_originalpdu`, kept for `redaction_retention_seconds` when
+  `save_unredacted_events` is on and still served to moderators), and outlier
+  events. A stored row that does not decode as a PDU is searched as plain JSON.
+  The scan yields to the runtime every 1024 rows.
 - Adds `!admin media delete-orphaned-long-text-sidecars`, a one-shot sweep for
   MindRoom long-text sidecar media that no retained event references any more,
   such as sidecars of edits deleted before the purge recognized their shape.
-  It only reports unless `--execute` is given. Candidates are local
-  unencrypted sidecar uploads (`application/json` named
-  `message-content.json`) by local users, optionally limited to uploaders
-  matching `--uploader-prefix` or `--uploader-regex`, whose stored file is
-  older than `--older-than`. The cutoff must be at least
-  `mindroom_edit_purge_min_age_secs` plus one day, so sidecars of edits the
-  purge has not reached and uploads whose event is not sent yet are never
-  selected. One full scan of retained events (the scan the purge uses to
-  protect shared sidecars) keeps every referenced candidate; the rest are
-  deleted through the owner-checked media path, at most `--limit` (default
-  1000) per run. Encrypted-room sidecars are skipped and counted because
-  encrypted event content is opaque to the server. A stored event that cannot
-  be read refuses the sweep. Scans and deletions yield to the runtime.
+  - It only reports unless `--execute` is given. It has its own dry run and
+    does not consult `mindroom_edit_purge_dry_run`.
+  - Candidates are local unencrypted sidecar uploads (`application/json`
+    named `message-content.json`) by local users, optionally limited to
+    uploaders whose ID starts with `--uploader-prefix` or matches
+    `--uploader-regex` in full (the pattern is anchored).
+  - One run of the retained-reference scan above keeps every referenced
+    candidate. Each unreferenced candidate is then dated by its storage
+    object's modification time and selected if older than `--older-than`.
+    At most `--limit` (default 1000) are selected and deleted, through the
+    owner-checked media path. The limit bounds deletions and storage-metadata
+    lookups for selected candidates, but a candidate found too recent or
+    missing from storage does not count toward it, so a run can look up more
+    objects than `--limit`.
+  - `--older-than` must be at least `mindroom_edit_purge_min_age_secs` plus one
+    day. Use a generous cutoff in production (a week or more): a client can
+    hold an uploaded sidecar in a durable outbox before sending the event that
+    references it.
+  - Encrypted-room sidecars are skipped and counted, because encrypted event
+    content is opaque to the server. A stored event that cannot be read refuses
+    the sweep.
+  - The scan reads a database snapshot, so a reference created after it
+    starts is not seen. The sweep runs on the admin command processor and
+    occupies its queue until it finishes. Scans and deletions yield to the
+    runtime.
+- Media deletion keeps database rows until storage deletion succeeds.
+  `media::delete()` now returns the storage error and leaves the media's file
+  and uploader rows in place until every configured provider has removed (or
+  never held) the object. Previously a provider failure was only logged and the
+  rows were dropped regardless, leaving an unindexed object in storage. This
+  affects every deletion caller: the Synapse admin media endpoints
+  (`delete_media`, `delete_user_media`, `delete_media_by_date_size` and
+  `purge_media_cache`), the
+  `!admin media` commands `delete`, `delete-list`, `delete-by-event`,
+  `delete-range`, `delete-all-from-user` and `delete-all-from-server`, and the
+  purge's and sweep's owner-checked `delete_owned_by`. Media whose deletion
+  failed stays indexed and downloadable until a retry succeeds.
 - **Turns on upstream's edit bundling by default** (`bundle_edit_relations`,
   MSC3925; upstream ships it off). The purge deletes superseded edits, so
   without the bundle a history endpoint (`/messages`, `/context`, `/event`, ...)
@@ -255,7 +289,9 @@ Fork integration tests live in the `mindroom-tests` crate
 (`src/mindroom-tests/`). They pin the rebase-sensitive fork behaviors: SSO/UIAA,
 native Apple, deactivation/erase, Synapse-admin deactivation reason and room
 departure, edit-purge/bundling composition, the orphaned long-text sidecar
-sweep command, device-key immutability/cleanup/
+sweep command and its retry after a storage failure
+(`orphaned_sidecar_sweep.rs`, `orphaned_sidecar_delete_retry.rs`),
+device-key immutability/cleanup/
 concurrency, and real gateway stream/invite notifications. Stream classification
 also has unit tests in `src/service/pusher/tests.rs`.
 
