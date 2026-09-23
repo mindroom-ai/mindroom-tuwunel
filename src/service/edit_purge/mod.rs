@@ -767,11 +767,11 @@ fn extract_mindroom_long_text_sidecar_mxcs(pdu: &PduEvent) -> Vec<OwnedMxcUri> {
 	mxcs
 }
 
+/// A MindRoom long-text sidecar is identified by its `io.mindroom.long_text`
+/// marker, not by `msgtype`. Final previews are `m.file` events, but
+/// in-progress streaming previews keep the stream's own msgtype (for example
+/// `m.notice` or `m.text`) while still attaching a full-content sidecar.
 fn collect_mindroom_long_text_sidecar_mxcs(content: &JsonValue, mxcs: &mut Vec<OwnedMxcUri>) {
-	if content.get("msgtype").and_then(JsonValue::as_str) != Some("m.file") {
-		return;
-	}
-
 	let Some(long_text) = content.get("io.mindroom.long_text") else {
 		return;
 	};
@@ -1111,6 +1111,59 @@ rocksdb_read_only = {}
 		)
 	}
 
+	/// An in-progress streaming preview edit keeps the stream's own msgtype
+	/// and attaches the full-content sidecar inside `m.new_content`, either as
+	/// `url` (unencrypted room shape) or as `file.url` (encrypted-room shape).
+	fn streaming_preview_sidecar_content(
+		target: &str,
+		msgtype: Option<&str>,
+		sidecar_key: &str,
+		sidecar: serde_json::Value,
+	) -> String {
+		let mut new_content = json!({
+			"body":"partial answer",
+			"format":"org.matrix.custom.html",
+			"formatted_body":"<p>partial answer</p>",
+			"io.mindroom.long_text":{
+				"version":2,
+				"encoding":"matrix_event_content_json",
+				"original_event_size":90_000,
+				"preview_size":14,
+				"is_complete_content":true
+			}
+		});
+		new_content[sidecar_key] = sidecar;
+		let mut content = json!({
+			"body":"* partial answer",
+			"format":"org.matrix.custom.html",
+			"formatted_body":"<p>partial answer</p>",
+			"m.new_content":new_content,
+			"m.relates_to":{
+				"rel_type":"m.replace",
+				"event_id":target
+			}
+		});
+		if let Some(msgtype) = msgtype {
+			content["msgtype"] = json!(msgtype);
+			content["m.new_content"]["msgtype"] = json!(msgtype);
+		}
+
+		content.to_string()
+	}
+
+	fn streaming_preview_url_content(target: &str, mxc: &str) -> String {
+		streaming_preview_sidecar_content(target, Some("m.notice"), "url", json!(mxc))
+	}
+
+	fn streaming_preview_file_content(target: &str, mxc: &str) -> String {
+		streaming_preview_sidecar_content(
+			target,
+			Some("m.notice"),
+			"file",
+			json!({"url":mxc,"mimetype":"application/json","v":"v2"}),
+		)
+	}
+
 	fn normal_file_content(target: &str, mxc: &str) -> String {
 		format!(
 			r#"{{
@@ -1414,6 +1467,70 @@ rocksdb_read_only = {}
 		let mxcs = super::extract_mindroom_long_text_sidecar_mxcs(&pdu);
 
 		assert_eq!(mxcs, vec![OwnedMxcUri::from(sidecar_mxc.to_owned())]);
+	}
+
+	#[test]
+	fn extract_long_text_sidecar_mxcs_ignores_streaming_preview_msgtype() {
+		let target = "$target_streaming_extract:example.com";
+		let sidecar_mxc = "mxc://example.com/streamingSidecar";
+		let expected = vec![OwnedMxcUri::from(sidecar_mxc.to_owned())];
+
+		for msgtype in [Some("m.notice"), Some("m.text"), None] {
+			for (sidecar_key, sidecar) in
+				[("url", json!(sidecar_mxc)), ("file", json!({"url":sidecar_mxc,"v":"v2"}))]
+			{
+				let pdu = make_pdu_with_content(
+					"$edit_streaming_extract:example.com",
+					"@alice:example.com",
+					1_000,
+					streaming_preview_sidecar_content(target, msgtype, sidecar_key, sidecar),
+				);
+
+				assert_eq!(
+					super::extract_mindroom_long_text_sidecar_mxcs(&pdu),
+					expected,
+					"msgtype {msgtype:?} with sidecar in {sidecar_key}",
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn extract_long_text_sidecar_mxcs_requires_sidecar_marker() {
+		let target = "$target_marker_extract:example.com";
+		let media_mxc = "mxc://example.com/notASidecar";
+		let without_marker = format!(
+			r#"{{
+				"body":"* image",
+				"msgtype":"m.image",
+				"url":"{media_mxc}",
+				"m.new_content":{{"body":"image","msgtype":"m.image","url":"{media_mxc}"}},
+				"m.relates_to":{{"rel_type":"m.replace","event_id":"{target}"}}
+			}}"#
+		);
+		let mut unknown_version: serde_json::Value =
+			serde_json::from_str(&streaming_preview_url_content(target, media_mxc))
+				.expect("valid content");
+		unknown_version["m.new_content"]["io.mindroom.long_text"]["version"] = json!(1);
+		let mut unknown_encoding: serde_json::Value =
+			serde_json::from_str(&streaming_preview_url_content(target, media_mxc))
+				.expect("valid content");
+		unknown_encoding["m.new_content"]["io.mindroom.long_text"]["encoding"] = json!("text");
+
+		for content in [without_marker, unknown_version.to_string(), unknown_encoding.to_string()]
+		{
+			let pdu = make_pdu_with_content(
+				"$edit_marker_extract:example.com",
+				"@alice:example.com",
+				1_000,
+				content,
+			);
+
+			assert!(
+				super::extract_mindroom_long_text_sidecar_mxcs(&pdu).is_empty(),
+				"media without a supported long-text marker is not a sidecar",
+			);
+		}
 	}
 
 	#[tokio::test]
@@ -2159,6 +2276,165 @@ rocksdb_read_only = {}
 		assert_event_absent(service, &old_edit);
 		assert_event_present(service, &latest_edit);
 		assert_media_present(&harness, shared_mxc);
+	}
+
+	#[tokio::test]
+	async fn purge_deletes_superseded_streaming_preview_url_sidecar() {
+		let harness = make_harness(HarnessConfig::default()).await;
+		let service = &harness.service;
+		let target_id = "$target_streaming_url:example.com";
+		let old_mxc = "mxc://example.com/streamingUrlOld";
+		let latest_mxc = "mxc://example.com/streamingUrlLatest";
+
+		let target = insert_event(service, 0, target_id, "@alice:example.com", 100, None);
+		create_media_for_user(&harness, old_mxc, "@alice:example.com");
+		create_media_for_user(&harness, latest_mxc, "@alice:example.com");
+		let old_edit = insert_event_with_content(
+			service,
+			1,
+			"$edit_streaming_url_old:example.com",
+			"@alice:example.com",
+			1_000,
+			streaming_preview_url_content(target_id, old_mxc),
+		);
+		let latest_edit = insert_event_with_content(
+			service,
+			2,
+			"$edit_streaming_url_latest:example.com",
+			"@alice:example.com",
+			2_000,
+			streaming_preview_url_content(target_id, latest_mxc),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_absent(service, &old_edit);
+		assert_event_present(service, &latest_edit);
+		assert_media_absent(&harness, old_mxc);
+		assert_media_present(&harness, latest_mxc);
+	}
+
+	#[tokio::test]
+	async fn purge_deletes_superseded_streaming_preview_file_sidecar() {
+		let harness = make_harness(HarnessConfig::default()).await;
+		let service = &harness.service;
+		let target_id = "$target_streaming_file:example.com";
+		let old_mxc = "mxc://example.com/streamingFileOld";
+		let latest_mxc = "mxc://example.com/streamingFileLatest";
+
+		let target = insert_event(service, 0, target_id, "@alice:example.com", 100, None);
+		create_media_for_user(&harness, old_mxc, "@alice:example.com");
+		create_media_for_user(&harness, latest_mxc, "@alice:example.com");
+		let old_edit = insert_event_with_content(
+			service,
+			1,
+			"$edit_streaming_file_old:example.com",
+			"@alice:example.com",
+			1_000,
+			streaming_preview_file_content(target_id, old_mxc),
+		);
+		let latest_edit = insert_event_with_content(
+			service,
+			2,
+			"$edit_streaming_file_latest:example.com",
+			"@alice:example.com",
+			2_000,
+			streaming_preview_file_content(target_id, latest_mxc),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &target);
+		assert_event_absent(service, &old_edit);
+		assert_event_present(service, &latest_edit);
+		assert_media_absent(&harness, old_mxc);
+		assert_media_present(&harness, latest_mxc);
+	}
+
+	#[tokio::test]
+	async fn purge_preserves_streaming_preview_sidecar_reused_by_retained_edits() {
+		let harness = make_harness(HarnessConfig::default()).await;
+		let service = &harness.service;
+		let streaming_id = "$target_streaming_in_progress:example.com";
+		let finished_id = "$target_streaming_finished:example.com";
+		let discarded_mxc = "mxc://example.com/streamingDiscarded";
+		let in_progress_mxc = "mxc://example.com/streamingInProgress";
+		let final_mxc = "mxc://example.com/streamingFinal";
+
+		for mxc in [discarded_mxc, in_progress_mxc, final_mxc] {
+			create_media_for_user(&harness, mxc, "@alice:example.com");
+		}
+
+		// A stream still in progress: its retained latest edit is itself an
+		// in-progress preview that reuses a superseded preview's sidecar.
+		let streaming = insert_event(service, 0, streaming_id, "@alice:example.com", 100, None);
+		let discarded_preview = insert_event_with_content(
+			service,
+			1,
+			"$edit_streaming_in_progress_1:example.com",
+			"@alice:example.com",
+			1_000,
+			streaming_preview_url_content(streaming_id, discarded_mxc),
+		);
+		let reused_preview = insert_event_with_content(
+			service,
+			2,
+			"$edit_streaming_in_progress_2:example.com",
+			"@alice:example.com",
+			2_000,
+			streaming_preview_file_content(streaming_id, in_progress_mxc),
+		);
+		let latest_preview = insert_event_with_content(
+			service,
+			3,
+			"$edit_streaming_in_progress_3:example.com",
+			"@alice:example.com",
+			3_000,
+			streaming_preview_url_content(streaming_id, in_progress_mxc),
+		);
+
+		// A finished stream: its retained terminal `m.file` edit reuses the
+		// sidecar of the superseded in-progress preview.
+		let finished = insert_event(service, 4, finished_id, "@alice:example.com", 100, None);
+		let finished_preview = insert_event_with_content(
+			service,
+			5,
+			"$edit_streaming_finished_preview:example.com",
+			"@alice:example.com",
+			4_000,
+			streaming_preview_file_content(finished_id, final_mxc),
+		);
+		let final_edit = insert_event_with_content(
+			service,
+			6,
+			"$edit_streaming_finished_final:example.com",
+			"@alice:example.com",
+			5_000,
+			long_text_sidecar_content(finished_id, final_mxc),
+		);
+
+		service
+			.purge_cycle()
+			.await
+			.expect("purge cycle succeeds");
+
+		assert_event_present(service, &streaming);
+		assert_event_absent(service, &discarded_preview);
+		assert_event_absent(service, &reused_preview);
+		assert_event_present(service, &latest_preview);
+		assert_event_present(service, &finished);
+		assert_event_absent(service, &finished_preview);
+		assert_event_present(service, &final_edit);
+		assert_media_absent(&harness, discarded_mxc);
+		assert_media_present(&harness, in_progress_mxc);
+		assert_media_present(&harness, final_mxc);
 	}
 
 	#[tokio::test]
