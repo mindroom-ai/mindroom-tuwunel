@@ -17,6 +17,10 @@
 //!
 //! The pre-purge assertions also pin the fork default `bundle_edit_relations =
 //! true`: if that default were reverted these tests would fail with no bundle.
+//!
+//! The same purge also deletes the MindRoom long-text sidecar media of the
+//! superseded in-progress streaming previews it removes, through the real
+//! media service, while the surviving preview's sidecar is kept.
 
 mod support;
 
@@ -30,7 +34,7 @@ mod tests {
 	use tuwunel_core::{
 		Result,
 		http::{Request, StatusCode, header},
-		ruma::user_id,
+		ruma::{Mxc, user_id},
 	};
 	use tuwunel_service::Services;
 
@@ -53,6 +57,7 @@ mod tests {
 
 			purge_preserves_state_and_cross_room_boundaries(&services, &router, &room_id).await?;
 			real_purge_still_bundles_survivor(&services, &router, &room_id).await?;
+			streaming_preview_sidecars_follow_purge(&services, &router, &room_id).await?;
 			dangling_newest_falls_through(&services, &router, &room_id).await?;
 
 			Ok(())
@@ -194,6 +199,105 @@ mod tests {
 		// maintain relatesto_typed for history to stay correct.
 		let chunk = messages_chunk(router, &enc(room_id), ALICE_TOKEN).await;
 		assert_edit_bundle(replace_bundle(find_event(&chunk, &original)), &edit2, "final answer");
+
+		Ok(())
+	}
+
+	/// In-progress streaming previews keep the stream's own msgtype while
+	/// attaching a long-text sidecar, as `url` (unencrypted room shape) or
+	/// `file.url` (encrypted-room shape). A real purge deletes the superseded
+	/// previews and their locally uploaded sidecars, keeps the sidecar the
+	/// surviving preview references, and the original still bundles it.
+	async fn streaming_preview_sidecars_follow_purge(
+		services: &Arc<Services>,
+		router: &Router,
+		room_id: &str,
+	) -> Result {
+		let alice = user_id!("@alice:localhost");
+		let sidecars = [
+			"mxc://localhost/streamingSidecarUrl",
+			"mxc://localhost/streamingSidecarFile",
+			"mxc://localhost/streamingSidecarLatest",
+		];
+		for sidecar in sidecars {
+			let mxc = Mxc::try_from(sidecar).expect("valid MXC");
+			services
+				.media
+				.create(&mxc, Some(alice), None, Some("application/json"), b"{}")
+				.await?;
+			assert!(
+				services
+					.media
+					.mxc_is_owned_by_user(&mxc, alice)
+					.await
+			);
+		}
+		let [url_mxc, file_mxc, latest_mxc] = sidecars;
+
+		let original = send_message(
+			router,
+			room_id,
+			ALICE_TOKEN,
+			"stream-m1",
+			json!({"msgtype": "m.notice", "body": "thinking…"}),
+		)
+		.await;
+		let url_preview = send_streaming_preview(
+			router,
+			room_id,
+			"stream-e1",
+			&original,
+			"first chunk",
+			json!({"url": url_mxc}),
+		)
+		.await;
+		let file_preview = send_streaming_preview(
+			router,
+			room_id,
+			"stream-e2",
+			&original,
+			"second chunk",
+			json!({"file": {"url": file_mxc, "v": "v2"}}),
+		)
+		.await;
+		let latest_preview = send_streaming_preview(
+			router,
+			room_id,
+			"stream-e3",
+			&original,
+			"third chunk",
+			json!({"url": latest_mxc}),
+		)
+		.await;
+
+		services.edit_purge.purge_cycle().await?;
+
+		assert!(get_pdu_id(services, &url_preview).await.is_none());
+		assert!(
+			get_pdu_id(services, &file_preview)
+				.await
+				.is_none()
+		);
+		assert!(
+			get_pdu_id(services, &latest_preview)
+				.await
+				.is_some()
+		);
+		for (sidecar, retained) in [(url_mxc, false), (file_mxc, false), (latest_mxc, true)] {
+			let mxc = Mxc::try_from(sidecar).expect("valid MXC");
+			assert_eq!(
+				services.media.get_metadata(&mxc).await.is_some(),
+				retained,
+				"sidecar {sidecar} retained"
+			);
+		}
+
+		let chunk = messages_chunk(router, &enc(room_id), ALICE_TOKEN).await;
+		assert_edit_bundle(
+			replace_bundle(find_event(&chunk, &original)),
+			&latest_preview,
+			"third chunk",
+		);
 
 		Ok(())
 	}
@@ -397,6 +501,45 @@ mod tests {
 				"msgtype": "m.text",
 				"body": format!("* {new_body}"),
 				"m.new_content": {"msgtype": "m.text", "body": new_body},
+				"m.relates_to": {"rel_type": "m.replace", "event_id": target},
+			}),
+		)
+		.await
+	}
+
+	/// Send an in-progress streaming preview edit the way the MindRoom runtime
+	/// does: the stream's msgtype on both levels, with the sidecar fields and
+	/// the long-text marker inside `m.new_content`.
+	async fn send_streaming_preview(
+		router: &Router,
+		room: &str,
+		txn_id: &str,
+		target: &str,
+		preview: &str,
+		sidecar: JsonValue,
+	) -> String {
+		let mut new_content = json!({
+			"msgtype": "m.notice",
+			"body": preview,
+			"io.mindroom.long_text": {
+				"version": 2,
+				"encoding": "matrix_event_content_json",
+				"is_complete_content": true,
+			},
+		});
+		for (key, value) in sidecar.as_object().expect("sidecar fields") {
+			new_content[key.as_str()] = value.clone();
+		}
+
+		send_message(
+			router,
+			room,
+			ALICE_TOKEN,
+			txn_id,
+			json!({
+				"msgtype": "m.notice",
+				"body": format!("* {preview}"),
+				"m.new_content": new_content,
 				"m.relates_to": {"rel_type": "m.replace", "event_id": target},
 			}),
 		)
