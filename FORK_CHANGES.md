@@ -64,6 +64,13 @@ Behavior:
   and not themselves be edits. Plaintext replacements need an `m.new_content`
   object; encrypted replacement content remains opaque. Invalid or unverifiable
   relationships are preserved rather than used to supersede another event.
+- Deletes the MindRoom long-text sidecar media of each purged edit. A sidecar
+  is recognized by its `io.mindroom.long_text` marker (version 2,
+  `matrix_event_content_json` encoding) with `url` or `file.url`, at the top
+  level or in `m.new_content`, whatever the `msgtype`: final `m.file` previews
+  and in-progress streaming previews both qualify. Only local media uploaded
+  by the local edit sender is deleted, and never media that a retained event
+  still references.
 - Adds the MindRoom edit-lifecycle configuration surface and purge validation.
 - **Turns on upstream's edit bundling by default** (`bundle_edit_relations`,
   MSC3925; upstream ships it off). The purge deletes superseded edits, so
