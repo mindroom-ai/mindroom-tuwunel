@@ -14,6 +14,7 @@ serde_json.workspace = true
 tokio.workspace = true
 tower.workspace = true
 tuwunel = { path = "../main" }
+tuwunel-admin.workspace = true
 tuwunel-api.workspace = true
 tuwunel-core.workspace = true
 tuwunel-service.workspace = true
