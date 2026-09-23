@@ -2726,6 +2726,7 @@ dependencies = [
  "tokio",
  "tower",
  "tuwunel",
+ "tuwunel_admin",
  "tuwunel_api",
  "tuwunel_core",
  "tuwunel_service",

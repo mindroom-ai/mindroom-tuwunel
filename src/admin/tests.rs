@@ -61,6 +61,62 @@ fn delete_range_accepts_one_direction() {
 }
 
 #[test]
+fn delete_orphaned_long_text_sidecars_requires_cutoff() {
+	assert!(
+		parse_err(&["argv[0] doesn't matter", "media", "delete-orphaned-long-text-sidecars"])
+			.contains("--older-than"),
+		"an age cutoff must be required"
+	);
+}
+
+#[test]
+fn delete_orphaned_long_text_sidecars_defaults_to_dry_run() {
+	let AdminCommand::Media(MediaCommand::DeleteOrphanedLongTextSidecars {
+		older_than,
+		uploader_prefix,
+		uploader_regex,
+		limit,
+		execute,
+	}) = parse_ok(&[
+		"argv[0] doesn't matter",
+		"media",
+		"delete-orphaned-long-text-sidecars",
+		"--older-than",
+		"2d",
+	])
+	else {
+		panic!("must parse as a media delete-orphaned-long-text-sidecars command");
+	};
+
+	assert_eq!(older_than, "2d", "the cutoff is passed through");
+	assert!(
+		uploader_prefix.is_none() && uploader_regex.is_none(),
+		"no uploader filter by default"
+	);
+	assert_eq!(limit, 1000, "the default limit bounds one invocation");
+	assert!(!execute, "nothing is deleted without --execute");
+}
+
+#[test]
+fn delete_orphaned_long_text_sidecars_rejects_both_uploader_filters() {
+	assert!(
+		parse_err(&[
+			"argv[0] doesn't matter",
+			"media",
+			"delete-orphaned-long-text-sidecars",
+			"--older-than",
+			"2d",
+			"--uploader-prefix",
+			"@bot_",
+			"--uploader-regex",
+			"^@bot_",
+		])
+		.contains("cannot be used with"),
+		"the uploader filters must be exclusive"
+	);
+}
+
+#[test]
 fn query_feds_parse() {
 	for survey in ["version", "state", "head"] {
 		let command =
