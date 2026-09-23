@@ -4,6 +4,7 @@ mod delete_all_from_server;
 mod delete_all_from_user;
 mod delete_by_event;
 mod delete_list;
+mod delete_orphaned_long_text_sidecars;
 mod delete_range;
 mod get_file_info;
 mod get_remote_file;
@@ -62,6 +63,38 @@ pub(super) enum MediaCommand {
 		/// - Long argument to additionally delete local media
 		#[arg(long)]
 		yes_i_want_to_delete_local_media: bool,
+	},
+
+	/// - Finds, and with --execute deletes, MindRoom long-text sidecar media
+	///   that no retained event references any more.
+	///
+	/// Only local, unencrypted sidecars (`application/json` uploads named
+	/// `message-content.json`) uploaded by local users are considered.
+	/// Encrypted-room sidecars are skipped and counted, since the server cannot
+	/// read the encrypted events that may reference them. Every retained event
+	/// is scanned once for references. Without --execute nothing is deleted.
+	DeleteOrphanedLongTextSidecars {
+		/// - Only media whose stored file is older than this (e.g. 2d). Must be
+		///   at least mindroom_edit_purge_min_age_secs plus one day.
+		#[arg(long)]
+		older_than: String,
+
+		/// - Only media uploaded by users whose ID starts with this prefix
+		///   (e.g. `@bot_`)
+		#[arg(long, conflicts_with = "uploader_regex")]
+		uploader_prefix: Option<String>,
+
+		/// - Only media uploaded by users whose ID matches this regex
+		#[arg(long)]
+		uploader_regex: Option<String>,
+
+		/// - Maximum number of sidecars to delete (or report as deletable)
+		#[arg(long, default_value("1000"))]
+		limit: usize,
+
+		/// - Delete the selected sidecars instead of only reporting them
+		#[arg(long)]
+		execute: bool,
 	},
 
 	/// - Deletes all the local media from a local user on our server. This will

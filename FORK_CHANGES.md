@@ -52,7 +52,12 @@ Files:
 - `src/core/matrix/event.rs`, `src/core/matrix/event/relation.rs`
 - `src/database/map/remove.rs`
 - `src/service/edit_purge/mod.rs`, `src/service/mod.rs`, `src/service/services.rs`
+- `src/service/edit_purge/sweep.rs`, `src/service/edit_purge/tests/sweep.rs`
+- `src/service/media/mod.rs` (uploader-index stream for the sidecar sweep)
+- `src/admin/media/mod.rs`, `src/admin/media/delete_orphaned_long_text_sidecars.rs`,
+  `src/admin/tests.rs`
 - `src/mindroom-tests/tests/edit_purge_bundle_compose.rs`
+- `src/mindroom-tests/tests/orphaned_sidecar_sweep.rs`, `src/mindroom-tests/Cargo.toml`
 - `tuwunel-example.toml`
 
 Behavior:
@@ -65,6 +70,22 @@ Behavior:
   object; encrypted replacement content remains opaque. Invalid or unverifiable
   relationships are preserved rather than used to supersede another event.
 - Adds the MindRoom edit-lifecycle configuration surface and purge validation.
+- Adds `!admin media delete-orphaned-long-text-sidecars`, a one-shot sweep for
+  MindRoom long-text sidecar media that no retained event references any more,
+  such as sidecars of edits deleted before the purge recognized their shape.
+  It only reports unless `--execute` is given. Candidates are local
+  unencrypted sidecar uploads (`application/json` named
+  `message-content.json`) by local users, optionally limited to uploaders
+  matching `--uploader-prefix` or `--uploader-regex`, whose stored file is
+  older than `--older-than`. The cutoff must be at least
+  `mindroom_edit_purge_min_age_secs` plus one day, so sidecars of edits the
+  purge has not reached and uploads whose event is not sent yet are never
+  selected. One full scan of retained events (the scan the purge uses to
+  protect shared sidecars) keeps every referenced candidate; the rest are
+  deleted through the owner-checked media path, at most `--limit` (default
+  1000) per run. Encrypted-room sidecars are skipped and counted because
+  encrypted event content is opaque to the server. A stored event that cannot
+  be read refuses the sweep. Scans and deletions yield to the runtime.
 - **Turns on upstream's edit bundling by default** (`bundle_edit_relations`,
   MSC3925; upstream ships it off). The purge deletes superseded edits, so
   without the bundle a history endpoint (`/messages`, `/context`, `/event`, ...)
@@ -233,7 +254,8 @@ Behavior:
 Fork integration tests live in the `mindroom-tests` crate
 (`src/mindroom-tests/`). They pin the rebase-sensitive fork behaviors: SSO/UIAA,
 native Apple, deactivation/erase, Synapse-admin deactivation reason and room
-departure, edit-purge/bundling composition, device-key immutability/cleanup/
+departure, edit-purge/bundling composition, the orphaned long-text sidecar
+sweep command, device-key immutability/cleanup/
 concurrency, and real gateway stream/invite notifications. Stream classification
 also has unit tests in `src/service/pusher/tests.rs`.
 
