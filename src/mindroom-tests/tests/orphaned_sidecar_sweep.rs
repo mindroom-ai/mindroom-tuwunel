@@ -21,6 +21,7 @@ mod tests {
 	use tuwunel_core::{
 		Result,
 		http::{Request, StatusCode, header},
+		matrix::event::Event,
 		ruma::{Mxc, UserId, user_id},
 		utils::content_disposition::make_content_disposition,
 	};
@@ -82,6 +83,7 @@ mod tests {
 		let orphan = upload(services, "sweepOrphan", bot, sidecar).await?;
 		let streaming = upload(services, "sweepStreaming", bot, sidecar).await?;
 		let terminal = upload(services, "sweepTerminal", bot, sidecar).await?;
+		let redacted = upload(services, "sweepRedacted", bot, sidecar).await?;
 		let alice_orphan = upload(services, "sweepAliceOrphan", alice, sidecar).await?;
 		let encrypted = upload(
 			services,
@@ -96,11 +98,79 @@ mod tests {
 		let not_json =
 			upload(services, "sweepNotJson", bot, ("text/plain", "message-content.json")).await?;
 
-		// A retained in-progress streaming preview and a retained terminal
-		// `m.file` preview each reference their sidecar.
+		send_referencing_events(&router, &room_id, &streaming, &terminal).await;
+		send_and_redact(services, &router, &room_id, &redacted).await?;
+
+		backdate_stored_media(services, Duration::from_hours(72))?;
+		let fresh = upload(services, "sweepFresh", bot, sidecar).await?;
+
+		let refused = admin(services, &format!("{COMMAND} --older-than 1d")).await;
+		check_output(&refused, false, &["must be at least"]);
+
+		let bot_sweep = format!("{COMMAND} --older-than 2d --uploader-prefix @mindroom_");
+		let dry_run = admin(services, &bot_sweep).await;
+		check_output(&dry_run, true, &[
+			"dry run",
+			"- Unencrypted sidecars examined: 5",
+			"- Encrypted sidecars skipped: 1",
+			"- Kept, referenced by a retained event: 3",
+			"- Kept, newer than the cutoff: 1",
+			"- Deletable: 1",
+			&orphan,
+		]);
+		assert_media(services, &[
+			(&orphan, true),
+			(&streaming, true),
+			(&terminal, true),
+			(&redacted, true),
+			(&alice_orphan, true),
+			(&encrypted, true),
+			(&other_json, true),
+			(&not_json, true),
+			(&fresh, true),
+		])
+		.await?;
+
+		let executed = admin(services, &format!("{bot_sweep} --execute")).await;
+		check_output(&executed, true, &["- Deleted: 1", "- Failed: 0"]);
+		assert_media(services, &[
+			(&orphan, false),
+			(&streaming, true),
+			(&terminal, true),
+			(&redacted, true),
+			(&alice_orphan, true),
+			(&encrypted, true),
+			(&other_json, true),
+			(&not_json, true),
+			(&fresh, true),
+		])
+		.await?;
+
+		let alice_sweep = format!(
+			"{COMMAND} --older-than 2d --uploader-regex ^@alice:localhost$ --limit 10 --execute"
+		);
+		let executed = admin(services, &alice_sweep).await;
+		check_output(&executed, true, &["- Unencrypted sidecars examined: 1", "- Deleted: 1"]);
+		assert_media(services, &[
+			(&alice_orphan, false),
+			(&streaming, true),
+			(&terminal, true),
+			(&redacted, true),
+		])
+		.await
+	}
+
+	/// A retained in-progress streaming preview and a retained terminal
+	/// `m.file` preview, each referencing its sidecar.
+	async fn send_referencing_events(
+		router: &Router,
+		room_id: &str,
+		streaming: &str,
+		terminal: &str,
+	) {
 		let original = send(
-			&router,
-			&room_id,
+			router,
+			room_id,
 			"sweep-original",
 			json!({
 				"msgtype": "m.notice",
@@ -109,8 +179,8 @@ mod tests {
 		)
 		.await;
 		send(
-			&router,
-			&room_id,
+			router,
+			room_id,
 			"sweep-streaming",
 			json!({
 				"msgtype": "m.notice",
@@ -126,8 +196,8 @@ mod tests {
 		)
 		.await;
 		send(
-			&router,
-			&room_id,
+			router,
+			room_id,
 			"sweep-terminal",
 			json!({
 				"msgtype": "m.file",
@@ -138,57 +208,66 @@ mod tests {
 			}),
 		)
 		.await;
+	}
 
-		backdate_stored_media(services, Duration::from_hours(72))?;
-		let fresh = upload(services, "sweepFresh", bot, sidecar).await?;
+	/// A redacted long-text message loses its `url` in the timeline, but its
+	/// unredacted original stays retained for moderators and still references
+	/// the sidecar.
+	async fn send_and_redact(
+		services: &Services,
+		router: &Router,
+		room_id: &str,
+		sidecar: &str,
+	) -> Result {
+		let event_id = send(
+			router,
+			room_id,
+			"sweep-redacted",
+			json!({
+				"msgtype": "m.file",
+				"body": "redacted answer",
+				"filename": "message-content.json",
+				"url": sidecar,
+				"io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+			}),
+		)
+		.await;
+		request(
+			router,
+			"PUT",
+			&format!(
+				"/_matrix/client/v3/rooms/{}/redact/{}/sweep-redaction",
+				enc(room_id),
+				enc(&event_id)
+			),
+			Some(json!({"reason": "test"})),
+		)
+		.await;
 
-		let refused = admin(services, &format!("{COMMAND} --older-than 1d")).await;
-		check_output(&refused, false, &["must be at least"]);
-
-		let bot_sweep = format!("{COMMAND} --older-than 2d --uploader-prefix @mindroom_");
-		let dry_run = admin(services, &bot_sweep).await;
-		check_output(&dry_run, true, &[
-			"dry run",
-			"- Unencrypted sidecars examined: 4",
-			"- Encrypted sidecars skipped: 1",
-			"- Kept, referenced by a retained event: 2",
-			"- Kept, newer than the cutoff: 1",
-			"- Deletable: 1",
-			&orphan,
-		]);
-		assert_media(services, &[
-			(&orphan, true),
-			(&streaming, true),
-			(&terminal, true),
-			(&alice_orphan, true),
-			(&encrypted, true),
-			(&other_json, true),
-			(&not_json, true),
-			(&fresh, true),
-		])
-		.await?;
-
-		let executed = admin(services, &format!("{bot_sweep} --execute")).await;
-		check_output(&executed, true, &["- Deleted: 1", "- Failed: 0"]);
-		assert_media(services, &[
-			(&orphan, false),
-			(&streaming, true),
-			(&terminal, true),
-			(&alice_orphan, true),
-			(&encrypted, true),
-			(&other_json, true),
-			(&not_json, true),
-			(&fresh, true),
-		])
-		.await?;
-
-		let alice_sweep = format!(
-			"{COMMAND} --older-than 2d --uploader-regex ^@alice:localhost$ --limit 10 --execute"
+		let timeline_copy = request(
+			router,
+			"GET",
+			&format!("/_matrix/client/v3/rooms/{}/event/{}", enc(room_id), enc(&event_id)),
+			None,
+		)
+		.await;
+		assert!(
+			timeline_copy["content"].get("url").is_none(),
+			"the timeline copy is redacted: {timeline_copy}"
 		);
-		let executed = admin(services, &alice_sweep).await;
-		check_output(&executed, true, &["- Unencrypted sidecars examined: 1", "- Deleted: 1"]);
-		assert_media(services, &[(&alice_orphan, false), (&streaming, true), (&terminal, true)])
-			.await
+		let original = services
+			.retention
+			.get_original_pdu(event_id.as_str().try_into()?)
+			.await?;
+		assert!(
+			original
+				.get_content_as_value()
+				.get("url")
+				.is_some(),
+			"the retained original keeps the sidecar reference"
+		);
+
+		Ok(())
 	}
 
 	async fn upload(
@@ -273,10 +352,7 @@ mod tests {
 		let sent = request(
 			router,
 			"PUT",
-			&format!(
-				"/_matrix/client/v3/rooms/{}/send/m.room.message/{txn_id}",
-				room_id.replace('!', "%21").replace(':', "%3A")
-			),
+			&format!("/_matrix/client/v3/rooms/{}/send/m.room.message/{txn_id}", enc(room_id)),
 			Some(content),
 		)
 		.await;
@@ -316,5 +392,15 @@ mod tests {
 		assert_eq!(status, StatusCode::OK, "{method} {uri} should succeed: {body}");
 
 		body
+	}
+
+	/// Percent-encode a room or event ID for use as a URI path segment.
+	fn enc(id: &str) -> String {
+		id.replace('$', "%24")
+			.replace('!', "%21")
+			.replace(':', "%3A")
+			.replace('+', "%2B")
+			.replace('/', "%2F")
+			.replace('=', "%3D")
 	}
 }
