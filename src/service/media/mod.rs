@@ -15,7 +15,7 @@ use std::{
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
-use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt, pin_mut};
+use futures::{Stream, StreamExt, TryFutureExt, TryStreamExt, pin_mut};
 use http::StatusCode;
 use object_store::ObjectMeta;
 use ruma::{
@@ -327,13 +327,13 @@ impl Service {
 					trace!(?mxc, "MXC Key: {key:?}");
 					debug_info!(?mxc, "Deleting from storage provider");
 
-					if let Err(e) = self.remove_media_file(&key).await {
-						debug_error!(?mxc, "Failed to remove media file: {e}");
-					}
-
-					debug_info!(?mxc, "Deleting from database");
-					self.db.delete_file_mxc(mxc).await;
+					self.remove_media_file(&key).await?;
 				}
+
+				// Keep every variant and its uploader indexed until storage
+				// deletion finishes, so a partial failure can be retried.
+				debug_info!(?mxc, "Deleting from database");
+				self.db.delete_file_mxc(mxc).await;
 
 				Ok(())
 			},
@@ -712,6 +712,12 @@ impl Service {
 		})
 	}
 
+	/// Every (MXC, uploader) pair in the uploader index, which records the
+	/// uploading local user of each upload, in MXC order.
+	pub fn uploads(&self) -> impl Stream<Item = (OwnedMxcUri, OwnedUserId)> + Send + '_ {
+		self.db.all_uploads()
+	}
+
 	/// Uploader, byte length and storage modification time of every media item
 	/// uploaded by a local user, one row per upload; media missing from every
 	/// storage provider are skipped.
@@ -942,28 +948,25 @@ impl Service {
 
 	async fn remove_media_file(&self, key: &[u8]) -> Result {
 		let path = self.get_media_name_sha256(key);
-		self.storage_providers()
-			.stream()
-			.filter_map(async |provider| {
-				debug!(
-					?key, ?path, provider = ?provider.name,
-					"Deleting media file from provider",
-				);
+		let mut removed = false;
+		for provider in self.storage_providers() {
+			debug!(
+				?key, ?path, provider = ?provider.name,
+				"Deleting media file from provider",
+			);
 
-				provider
-					.delete_one(&path)
-					.await
-					.log_debug_err()
-					.ok()
-			})
-			.count()
-			.map(|count| {
-				count
-					.ge(&0)
-					.into_option()
-					.ok_or_else(|| err!(Request(NotFound("Failed to remove on any provider."))))
-			})
-			.await
+			match provider.delete_one(&path).await {
+				// An absent replica is expected when retrying a partial deletion
+				// or when this provider never stored the upload.
+				| Ok(()) | Err(Error::ObjectStore(object_store::Error::NotFound { .. })) => {},
+				| Err(e) => return Err(e),
+			}
+			removed = true;
+		}
+
+		removed
+			.then_some(())
+			.ok_or_else(|| err!(Request(NotFound("No media storage providers available."))))
 	}
 
 	async fn create_media_file(&self, key: &[u8], file: &[u8]) -> Result {
