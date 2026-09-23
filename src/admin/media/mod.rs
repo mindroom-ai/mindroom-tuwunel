@@ -72,10 +72,15 @@ pub(super) enum MediaCommand {
 	/// `message-content.json`) uploaded by local users are considered.
 	/// Encrypted-room sidecars are skipped and counted, since the server cannot
 	/// read the encrypted events that may reference them. Every retained event
-	/// is scanned once for references. Without --execute nothing is deleted.
+	/// (timeline, retained originals of redacted events, outliers) is scanned
+	/// once for references. Without --execute nothing is deleted; this does
+	/// not consult mindroom_edit_purge_dry_run. A long sweep occupies the admin
+	/// command queue until it finishes.
 	DeleteOrphanedLongTextSidecars {
-		/// - Only media whose stored file is older than this (e.g. 2d). Must be
-		///   at least mindroom_edit_purge_min_age_secs plus one day.
+		/// - Only media whose stored file is older than this (e.g. 7d). Must be
+		///   at least mindroom_edit_purge_min_age_secs plus one day; prefer a
+		///   week or more, since a client may hold an upload in an outbox for a
+		///   while before sending the event that references it.
 		#[arg(long)]
 		older_than: String,
 
@@ -84,7 +89,8 @@ pub(super) enum MediaCommand {
 		#[arg(long, conflicts_with = "uploader_regex")]
 		uploader_prefix: Option<String>,
 
-		/// - Only media uploaded by users whose ID matches this regex
+		/// - Only media uploaded by users whose whole ID matches this regex
+		///   (anchored, e.g. `@bot_.*:example\.com`)
 		#[arg(long)]
 		uploader_regex: Option<String>,
 

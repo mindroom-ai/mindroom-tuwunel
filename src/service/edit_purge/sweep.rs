@@ -44,11 +44,19 @@ pub enum UploaderFilter {
 	Any,
 	/// Local uploaders whose full user ID starts with this prefix.
 	Prefix(String),
-	/// Local uploaders whose full user ID matches this expression.
+	/// Local uploaders whose full user ID matches this expression. Build it
+	/// with [`UploaderFilter::regex`], which anchors the pattern so that it
+	/// must match the whole ID.
 	Regex(Regex),
 }
 
 impl UploaderFilter {
+	/// A filter matching user IDs that `pattern` matches in full, as if it
+	/// were written `^(?:pattern)$`.
+	pub fn regex(pattern: &str) -> Result<Self> {
+		Ok(Self::Regex(Regex::new(&format!("^(?:{pattern})$"))?))
+	}
+
 	fn matches(&self, user: &UserId) -> bool {
 		match self {
 			| Self::Any => true,

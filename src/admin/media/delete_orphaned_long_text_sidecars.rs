@@ -1,6 +1,5 @@
 use std::fmt::{Error as FmtError, Write as _};
 
-use regex::Regex;
 use tuwunel_core::{
 	Result,
 	utils::{bytes, time},
@@ -20,7 +19,7 @@ pub(super) async fn delete_orphaned_long_text_sidecars(
 ) -> Result {
 	let uploader = match (uploader_prefix, uploader_regex) {
 		| (Some(prefix), _) => UploaderFilter::Prefix(prefix),
-		| (None, Some(regex)) => UploaderFilter::Regex(Regex::new(&regex)?),
+		| (None, Some(regex)) => UploaderFilter::regex(&regex)?,
 		| (None, None) => UploaderFilter::Any,
 	};
 

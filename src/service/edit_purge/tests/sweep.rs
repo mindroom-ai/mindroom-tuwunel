@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use regex::Regex;
 use ruma::OwnedMxcUri;
 use tuwunel_core::utils;
 
@@ -47,7 +46,7 @@ fn add_upload(
 		});
 }
 
-fn add_sidecar(harness: &TestHarness, mxc: &str, uploader: &str, age: Duration) {
+pub(super) fn add_sidecar(harness: &TestHarness, mxc: &str, uploader: &str, age: Duration) {
 	add_upload(
 		harness,
 		mxc,
@@ -242,9 +241,7 @@ async fn sweep_selects_only_local_media_of_local_uploaders() {
 async fn sweep_uploader_filter_restricts_selection() {
 	let filters = [
 		UploaderFilter::Prefix("@mindroom_".to_owned()),
-		UploaderFilter::Regex(
-			Regex::new(r"^@mindroom_[a-z]+:example\.com$").expect("valid regex"),
-		),
+		UploaderFilter::regex(r"@mindroom_[a-z]+:example\.com").expect("valid regex"),
 	];
 	for filter in filters {
 		let harness = make_harness(HarnessConfig::default()).await;
@@ -265,6 +262,26 @@ async fn sweep_uploader_filter_restricts_selection() {
 		assert_eq!(report.deleted, 1, "without a filter the other sidecar is deleted");
 		assert_media_absent(&harness, alice_orphan);
 	}
+}
+
+#[tokio::test]
+async fn sweep_uploader_regex_matches_whole_user_id() {
+	let harness = make_harness(HarnessConfig::default()).await;
+	let bot_orphan = "mxc://example.com/anchoredBotSidecar";
+	add_sidecar(&harness, bot_orphan, BOT, DAY.saturating_mul(3));
+
+	// Unanchored, the alternation's first branch would match a prefix.
+	for partial in ["mindroom_", "@mindroom_bot", r"bot:example\.com", "@mindroom_bot|nobody"] {
+		let filter = UploaderFilter::regex(partial).expect("valid regex");
+		let report = run(&harness, &sweep(filter, 100, true)).await;
+		assert_eq!(report.examined, 0, "{partial} matches only part of the user ID");
+	}
+	assert_media_present(&harness, bot_orphan);
+
+	let filter = UploaderFilter::regex(r"@mindroom_.*|@other:example\.com").expect("valid regex");
+	let report = run(&harness, &sweep(filter, 100, true)).await;
+	assert_eq!(report.deleted, 1, "an alternation is anchored as a whole");
+	assert_media_absent(&harness, bot_orphan);
 }
 
 #[tokio::test]
