@@ -3,7 +3,10 @@ use synapse_admin_api::users::deactivate_account::v1 as deactivate_account;
 use tuwunel_core::{Err, Result};
 use tuwunel_service::users::DeactivationReason;
 
-use crate::{Ruma, client::admin::require_admin};
+use crate::{
+	Ruma,
+	client::admin::{refuse_server_user, require_admin},
+};
 
 /// # `POST /_synapse/admin/v1/deactivate/{user_id}`
 pub(crate) async fn admin_deactivate_account_route(
@@ -15,6 +18,8 @@ pub(crate) async fn admin_deactivate_account_route(
 	if !services.globals.user_is_local(&body.user_id) {
 		return Err!(Request(InvalidParam("Can only deactivate local users")));
 	}
+
+	refuse_server_user(services, &body.user_id)?;
 
 	if !services.users.exists(&body.user_id).await {
 		return Err!(Request(NotFound("User not found")));
