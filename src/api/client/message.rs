@@ -421,7 +421,7 @@ pub(crate) async fn visibility_filter(
 
 	services
 		.state_accessor
-		.user_can_see_event(user_id, pdu.room_id(), pdu.event_id())
+		.user_can_see_event(user_id, pdu)
 		.await
 		.then_some(item)
 }
