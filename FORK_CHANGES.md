@@ -55,8 +55,7 @@ not backfilled) now lowers its root's count by one, stopping at zero, in the
 same write as the redacted reply. A one-time startup recount
 (`recount_thread_replies` marker) corrects existing roots from the thread
 replies they can still serve. Backfilled roots are not recounted and keep any
-earlier excess, a count of zero keeps its bundle, and `latest_event` is
-unchanged. Files: `src/service/rooms/{threads/mod.rs,timeline/redact.rs}`,
+earlier excess, and `latest_event` is unchanged. Files: `src/service/rooms/{threads/mod.rs,timeline/redact.rs}`,
 `src/service/migrations/mod.rs`; tests in `src/service/rooms/threads/tests/redact.rs`
 and `src/service/migrations/tests.rs`.
 
@@ -73,7 +72,7 @@ Files: `src/service/rooms/timeline/redact.rs`, `src/service/rooms/threads/mod.rs
 
 A root's stored `m.thread.latest_event` copies its newest reply, so redacting
 that reply kept serving its content (clients, federation, appservices). Redaction
-now swaps in the newest remaining reply, or drops `latest_event` if none remains.
+now swaps in the newest remaining reply, or drops the summary if none remains.
 A one-time startup scrub (`scrub_redacted_thread_latest` marker) fixes affected
 roots. Upstream has the same bug. Files: `src/service/rooms/threads/mod.rs`.
 

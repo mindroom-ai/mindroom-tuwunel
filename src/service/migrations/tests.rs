@@ -95,6 +95,13 @@ async fn redacted_thread_latest_scrub_runs_once() -> Result {
 		assert_eq!(root_thread(services).await?["latest_event"]["event_id"], latest, "run {run}");
 	}
 
+	// A latest reply that can no longer be loaded is scrubbed too.
+	services.db["global"].remove(marker);
+	set_root_latest(services, &json!({ "event_id": "$purged:localhost" }));
+	migrate(services, false).await?;
+
+	assert_eq!(root_thread(services).await?, Value::Null);
+
 	Ok(())
 }
 

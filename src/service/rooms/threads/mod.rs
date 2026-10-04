@@ -122,6 +122,20 @@ pub(crate) fn thread_bundle(root: &mut CanonicalJsonObject) -> Option<&mut Canon
 		})
 }
 
+/// Drop a root's `m.thread` bundle, and `m.relations` if nothing else remains.
+fn remove_thread_bundle(root: &mut CanonicalJsonObject) {
+	let Some(CanonicalJsonValue::Object(unsigned)) = root.get_mut("unsigned") else {
+		return;
+	};
+
+	if let Some(CanonicalJsonValue::Object(relations)) = unsigned.get_mut("m.relations") {
+		relations.remove("m.thread");
+		if relations.is_empty() {
+			unsigned.remove("m.relations");
+		}
+	}
+}
+
 /// The event ID of a root's bundled `latest_event`.
 fn thread_latest(root: &mut CanonicalJsonObject) -> Option<&str> {
 	let latest = thread_bundle(root)?
@@ -371,12 +385,11 @@ impl Service {
 			serde_json::from_str(latest.json().get()).ok()
 		});
 
-		let thread = thread_bundle(json)?;
-
-		_ = match latest {
-			| Some(latest) => thread.insert("latest_event".into(), latest),
-			| None => thread.remove("latest_event"),
-		};
+		// A summary needs a latest event; with no reply left, drop it entirely.
+		match latest {
+			| Some(latest) => _ = thread_bundle(json)?.insert("latest_event".into(), latest),
+			| None => remove_thread_bundle(json),
+		}
 
 		Some(())
 	}
@@ -624,9 +637,12 @@ impl Service {
 		let mut json = timeline.get_pdu_json_from_id(&root).await.ok()?;
 		let latest: OwnedEventId = thread_latest(&mut json)?.try_into().ok()?;
 
-		let latest_pdu = timeline.get_pdu(&latest).await.ok()?;
+		// A reply that can no longer be loaded is scrubbed too.
+		let redacted = timeline.get_pdu(&latest).await;
 
-		latest_pdu.is_redacted().then_some(())?;
+		redacted
+			.map_or(true, |pdu| pdu.is_redacted())
+			.then_some(())?;
 		self.replace_thread_latest(&mut json, root, &latest)
 			.await?;
 
