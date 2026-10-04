@@ -77,6 +77,10 @@ const FORCE_MIGRATION_DELAY: Duration = Duration::from_secs(15);
 
 const CLEAR_STATE_LOCAL_ERROR_MEMOS: &str = "clear_state_local_error_memos";
 
+/// Thread counts kept before redaction decremented them include redacted
+/// replies.
+const RECOUNT_THREAD_REPLIES: &str = "recount_thread_replies";
+
 /// A marker written by a sibling conduwuit-lineage server but never by tuwunel.
 /// Its presence identifies a foreign database at a higher schema number even
 /// after tuwunel has stamped its own `server_name`, so a database opened by
@@ -251,6 +255,7 @@ async fn fresh(services: &Services) -> Result {
 	db["global"].insert("rebuild_relatesto_typed", []);
 	db["global"].insert("migrate_profile_keys_to_useridprofilekey", []);
 	db["global"].insert("rebuild_thread_activity", []);
+	db["global"].insert(RECOUNT_THREAD_REPLIES, []);
 	db["global"].insert("clear_servername_status", []);
 	db["global"].insert(CLEAR_STATE_LOCAL_ERROR_MEMOS, []);
 	db["global"].insert("adopt_foreign_account_status", []);
@@ -360,6 +365,13 @@ async fn migrate(services: &Services, foreign_lineage: bool) -> Result {
 		services.threads.rebuild_thread_activity().await?;
 
 		db["global"].insert("rebuild_thread_activity", []);
+	}
+
+	if pending(services, RECOUNT_THREAD_REPLIES).await? {
+		let changed = services.threads.recount_thread_replies().await?;
+
+		db["global"].insert(RECOUNT_THREAD_REPLIES, []);
+		info!("Corrected the reply count of {changed} thread roots.");
 	}
 
 	if pending(services, "clear_servername_status").await? {

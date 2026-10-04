@@ -326,7 +326,7 @@ pub(super) enum DebugCommand {
 	RebuildRelationIndex,
 
 	/// - Rebuild the thread activity index (threadactivityid_rootid) from all
-	///   thread roots
+	///   thread roots, and recount their replies
 	RebuildThreadIndex,
 
 	/// - Retrieves the saved original PDU before it has been redacted

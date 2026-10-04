@@ -1,9 +1,11 @@
 use ruma::{
-	EventId, RoomId,
+	CanonicalJsonObject, EventId, OwnedEventId, RoomId,
 	canonical_json::{RedactedBecause, redact_in_place},
+	events::room::encrypted::Relation,
 };
 use tuwunel_core::{Result, err, implement, matrix::event::Event};
 
+use super::ExtractRelatesTo;
 use crate::rooms::{short::ShortRoomId, timeline::RoomMutexGuard};
 
 /// Replace a PDU with the redacted form.
@@ -64,6 +66,9 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.delete_typed_relation(&pdu_id, &pdu)
 		.await;
 
+	// Read before `redact_in_place` strips `m.relates_to`.
+	let thread_root = thread_root(&pdu);
+
 	redact_in_place(
 		&mut pdu,
 		&room_version_rules.redaction,
@@ -71,5 +76,28 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 	)
 	.map_err(|err| err!("invalid event: {err}"))?;
 
-	self.replace_pdu(&pdu_id, &pdu).await
+	self.replace_pdu(&pdu_id, &pdu).await?;
+
+	if let Some(root_event_id) = thread_root {
+		self.services
+			.threads
+			.remove_from_thread(&root_event_id, &pdu_id)
+			.await;
+	}
+
+	Ok(())
+}
+
+/// The thread root a reply names, read as `append_pdu_effects` reads it before
+/// counting the reply. An already redacted reply names none.
+fn thread_root(pdu: &CanonicalJsonObject) -> Option<OwnedEventId> {
+	let content = pdu.get("content")?.clone();
+
+	match serde_json::from_value::<ExtractRelatesTo>(content.into())
+		.ok()?
+		.relates_to
+	{
+		| Relation::Thread(thread) => Some(thread.event_id),
+		| _ => None,
+	}
 }

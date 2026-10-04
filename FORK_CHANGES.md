@@ -45,6 +45,43 @@ When enabled, ordinary room visibility rules still apply unless
 This changes directory visibility only; exclusive namespace ownership is
 unchanged.
 
+### Thread reply counts exclude redacted replies
+Files:
+- `src/service/rooms/timeline/redact.rs`, `src/service/rooms/threads/mod.rs`
+- `src/service/migrations/mod.rs`
+- `src/admin/debug/mod.rs`, `src/admin/debug/rebuild_thread_index.rs`
+- `src/service/rooms/threads/tests.rs`, `src/service/rooms/threads/tests/redact.rs`,
+  `src/service/migrations/tests.rs`
+- `src/mindroom-tests/tests/thread_count_redaction.rs`
+
+Behavior:
+- Upstream keeps a thread root's bundled `unsigned.m.relations.m.thread.count`
+  on the stored root and only ever increments it. Redacting a reply left the
+  count unchanged, while the redaction strips the reply's `m.relates_to`, so
+  clients can no longer find it as a thread reply. MindRoom Chat compares the
+  count with the replies it finds and, always one short, re-fetched the whole
+  thread on every open. Synapse drops redacted relations, so its count
+  excludes redacted replies. Upstream tuwunel (main as of `14afe57d8`) has the
+  same bug, and this change could be upstreamed.
+- Redacting a thread reply now takes it off its root's count, saturating at
+  zero. The relation is read before redaction strips it, as appending reads
+  it, and the root is rewritten after the reply, under the room's state lock.
+  Redacting an already redacted reply, a non-thread event, an edit, a
+  reaction, a backfilled reply (never counted), a reply naming a root in
+  another room, or the root itself leaves counts unchanged. A root without a
+  thread bundle (a redacted root) does not gain one.
+- The relation index row stays: unfiltered `/relations` still serves the
+  redacted reply so clients learn of the redaction, and
+  `/relations/{root}/m.thread` already omitted it. `latest_event`, thread
+  participants and the thread activity index are unchanged.
+- A one-time startup migration (`global` marker `recount_thread_replies`,
+  stamped on fresh databases) recounts every root in `threadid_userids` from
+  the thread replies still in its relation index. It rewrites only roots that
+  have a thread bundle whose count differs, each under its room's state lock.
+  Backfilled roots are skipped because their replies are not in the relation
+  index. `!admin debug rebuild-thread-index` also runs the recount and
+  reports how many roots it corrected.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
@@ -299,8 +336,12 @@ departure, edit-purge/bundling composition, the orphaned long-text sidecar
 sweep command and its retry after a storage failure
 (`orphaned_sidecar_sweep.rs`, `orphaned_sidecar_delete_retry.rs`),
 device-key immutability/cleanup/
-concurrency, and real gateway stream/invite notifications. Stream classification
-also has unit tests in `src/service/pusher/tests.rs`.
+concurrency, real gateway stream/invite notifications, and thread reply counts
+across client redactions and the admin recount (`thread_count_redaction.rs`).
+Stream classification also has unit tests in `src/service/pusher/tests.rs`.
+Redaction and recount edge cases have service tests in
+`src/service/rooms/threads/tests/redact.rs`, and the recount's once-only
+migration marker in `src/service/migrations/tests.rs`.
 
 Database-path isolation, pagination bounds, quiet-room full-state sync, and
 stored-key corruption coverage use upstream's native tests under `src/main/tests/`.
@@ -343,6 +384,8 @@ native_client_ids = ["chat.mindroom.app"]
 - A client that lost its crypto store but kept its access token receives 403
   `M_FORBIDDEN` on `/keys/upload` until it logs in again (device identity keys
   are immutable per device id).
+- A thread root's `m.thread.count` excludes redacted replies, as on Synapse.
+  The first start on this version corrects existing roots once.
 - Non-terminal `io.mindroom.stream_status` events do not push; terminal events
   use ordinary recipient push rules. The classifier does not deduplicate
   multiple distinct terminal events for the same stream.

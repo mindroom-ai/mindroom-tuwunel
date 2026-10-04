@@ -1,11 +1,21 @@
-use std::{collections::BTreeMap, pin::pin, sync::Arc};
+use std::{
+	collections::BTreeMap,
+	pin::pin,
+	sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	},
+};
 
 use futures::{Stream, StreamExt, TryFutureExt, future::join3};
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, OwnedUserId, RoomId, UInt,
 	UserId,
 	api::{Direction, client::threads::get_threads::v1::IncludeThreads},
-	events::{AnySyncMessageLikeEvent, TimelineEventType, relation::RelationType},
+	events::{
+		AnySyncMessageLikeEvent, TimelineEventType, relation::RelationType,
+		room::encrypted::Relation,
+	},
 	serde::Raw,
 	uint,
 };
@@ -38,6 +48,14 @@ struct ExtractThreadRelation {
 struct ThreadRelation {
 	rel_type: RelationType,
 	event_id: OwnedEventId,
+}
+
+/// The relation `append_pdu_effects` reads before `add_to_thread` counts a
+/// reply.
+#[derive(Deserialize)]
+struct ExtractRelatesTo {
+	#[serde(rename = "m.relates_to")]
+	relates_to: Relation,
 }
 
 fn canonical_object_field<'a>(
@@ -91,6 +109,55 @@ fn update_thread_bundle_raw(
 	if !matches!(thread.get("current_user_participated"), Some(CanonicalJsonValue::Bool(_))) {
 		thread.insert("current_user_participated".into(), CanonicalJsonValue::Bool(true));
 	}
+}
+
+/// The `m.thread` bundle stored on a thread root, if it has one.
+fn thread_bundle(root: &mut CanonicalJsonObject) -> Option<&mut CanonicalJsonObject> {
+	let Some(CanonicalJsonValue::Object(unsigned)) = root.get_mut("unsigned") else {
+		return None;
+	};
+
+	let Some(CanonicalJsonValue::Object(relations)) = unsigned.get_mut("m.relations") else {
+		return None;
+	};
+
+	let Some(CanonicalJsonValue::Object(thread)) = relations.get_mut("m.thread") else {
+		return None;
+	};
+
+	Some(thread)
+}
+
+fn thread_count(thread: &CanonicalJsonObject) -> Option<UInt> {
+	thread
+		.get("count")
+		.cloned()
+		.and_then(|count| serde_json::from_value(count.into()).ok())
+}
+
+/// Set the root's bundled reply count, returning whether it changed. A root
+/// without a thread bundle is left alone.
+fn set_thread_count(root: &mut CanonicalJsonObject, count: UInt) -> bool {
+	let Some(thread) = thread_bundle(root) else {
+		return false;
+	};
+
+	if thread_count(thread) == Some(count) {
+		return false;
+	}
+
+	thread.insert("count".into(), CanonicalJsonValue::Integer(count.into()));
+
+	true
+}
+
+/// Take one reply off the root's bundled count, returning whether it changed.
+/// A missing, invalid or zero count is left alone.
+fn remove_thread_reply(root: &mut CanonicalJsonObject) -> bool {
+	thread_bundle(root)
+		.and_then(|thread| thread_count(thread))
+		.and_then(|count| count.checked_sub(uint!(1)))
+		.is_some_and(|count| set_thread_count(root, count))
 }
 
 pub struct Service {
@@ -265,6 +332,54 @@ impl Service {
 
 		txn.execute();
 		Ok(())
+	}
+
+	/// Take a redacted reply off its root's bundled `m.thread.count`, undoing
+	/// what `add_to_thread` counted when the reply was appended. The caller
+	/// holds the room's state lock and reads `root_event_id` from the reply
+	/// before redacting it; an already redacted reply names no root.
+	///
+	/// Backfilled replies and replies from another room were never counted. A
+	/// root without a thread bundle (itself redacted) is left alone, and the
+	/// count stops at zero. The relation row and `latest_event` are kept.
+	pub async fn remove_from_thread(&self, root_event_id: &EventId, reply_id: &RawPduId) {
+		if !matches!(reply_id.pdu_count(), PduCount::Normal(_)) {
+			return;
+		}
+
+		let Ok(root_id) = self
+			.services
+			.timeline
+			.get_pdu_id(root_event_id)
+			.await
+		else {
+			return;
+		};
+
+		if root_id.shortroomid() != reply_id.shortroomid() {
+			return;
+		}
+
+		let Ok(mut root_pdu_json) = self
+			.services
+			.timeline
+			.get_pdu_json_from_id(&root_id)
+			.await
+		else {
+			return;
+		};
+
+		if !remove_thread_reply(&mut root_pdu_json) {
+			return;
+		}
+
+		let mut txn = self.services.db.txn();
+
+		self.services
+			.timeline
+			.stage_replace_pdu(&mut txn, &root_id, &root_pdu_json);
+
+		txn.execute();
 	}
 
 	pub fn threads_until<'a>(
@@ -474,5 +589,95 @@ impl Service {
 		txn.insert_raw(&self.db.threadactivityid_rootid, activity_id, root_id);
 		txn.insert_raw(&self.db.threadrootid_latestcount, root_id, latest.to_be_bytes());
 		txn.execute();
+	}
+
+	/// Recount every thread root's bundled `m.thread.count` from the replies it
+	/// still has, and return how many roots changed. Counts kept before
+	/// redaction decremented them still include redacted replies, which no
+	/// longer carry `m.relates_to`. Only roots whose count differs are
+	/// rewritten. Run once at startup behind a `global` marker, and on demand
+	/// from the admin command.
+	pub async fn recount_thread_replies(&self) -> Result<usize> {
+		let changed = AtomicUsize::new(0);
+
+		self.db
+			.threadid_userids
+			.raw_keys()
+			.ignore_err()
+			.map(RawPduId::from)
+			.for_each_concurrent(automatic_width(), async |root_id| {
+				if self.recount_thread(root_id).await {
+					changed.fetch_add(1, Ordering::Relaxed);
+				}
+			})
+			.await;
+
+		Ok(changed.into_inner())
+	}
+
+	async fn recount_thread(&self, root_id: RawPduId) -> bool {
+		let root: PduId = root_id.into();
+
+		// Replies to a backfilled root are not in the relation index.
+		if !matches!(root.count, PduCount::Normal(_)) {
+			return false;
+		}
+
+		let Ok(root_pdu) = self
+			.services
+			.timeline
+			.get_pdu_from_id(&root_id)
+			.await
+		else {
+			return false;
+		};
+
+		// Appends and redactions rewrite the root under this lock too.
+		let _lock = self
+			.services
+			.state
+			.mutex
+			.lock(root_pdu.room_id())
+			.await;
+
+		let Ok(mut root_pdu_json) = self
+			.services
+			.timeline
+			.get_pdu_json_from_id(&root_id)
+			.await
+		else {
+			return false;
+		};
+
+		let replies = self
+			.services
+			.pdu_metadata
+			.get_relations(root.shortroomid, root.count, None, Direction::Forward, None)
+			.ready_filter(|(_, pdu)| {
+				pdu.get_content()
+					.is_ok_and(|content: ExtractRelatesTo| {
+						matches!(content.relates_to, Relation::Thread(_))
+					})
+			})
+			.count()
+			.await;
+
+		let Ok(replies) = UInt::try_from(replies) else {
+			return false;
+		};
+
+		if !set_thread_count(&mut root_pdu_json, replies) {
+			return false;
+		}
+
+		let mut txn = self.services.db.txn();
+
+		self.services
+			.timeline
+			.stage_replace_pdu(&mut txn, &root_id, &root_pdu_json);
+
+		txn.execute();
+
+		true
 	}
 }
