@@ -5,12 +5,16 @@
 //! effects are coordinated under the caller's room timeline guard.
 
 use ruma::{
-	EventId, RoomId,
+	CanonicalJsonValue, EventId, RoomId,
 	canonical_json::{RedactedBecause, redact_in_place},
 };
 use tuwunel_core::{Err, Result, err, implement, matrix::event::Event, utils::result::NotFound};
 
-use crate::rooms::{short::ShortRoomId, threads::thread_root, timeline::RoomMutexGuard};
+use crate::rooms::{
+	short::ShortRoomId,
+	threads::{thread_bundle, thread_root},
+	timeline::RoomMutexGuard,
+};
 
 /// Replaces an accepted PDU with its room-version redacted form.
 ///
@@ -79,12 +83,26 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 	let content = pdu.get("content").cloned();
 	let root_event_id = content.and_then(|content| thread_root(content.into()));
 
+	// Redaction replaces `unsigned`; a thread root keeps its thread summary,
+	// unless it names itself as root and its summary quotes its own content.
+	let thread = (root_event_id.as_deref() != Some(event_id))
+		.then(|| thread_bundle(&mut pdu).map(|thread| thread.clone()))
+		.flatten();
+
 	redact_in_place(
 		&mut pdu,
 		&room_version_rules.redaction,
 		Some(RedactedBecause::from_json(reason.to_canonical_object())),
 	)
 	.map_err(|err| err!("invalid event: {err}"))?;
+
+	if let (Some(thread), Some(CanonicalJsonValue::Object(unsigned))) =
+		(thread, pdu.get_mut("unsigned"))
+	{
+		let relations = [("m.thread".into(), CanonicalJsonValue::Object(thread))].into();
+
+		unsigned.insert("m.relations".into(), CanonicalJsonValue::Object(relations));
+	}
 
 	// `replace_pdu`'s check; the reply and its root's count land together.
 	let (pduid_pdu, mut txn) = (&self.db.pduid_pdu, self.db.db.txn());

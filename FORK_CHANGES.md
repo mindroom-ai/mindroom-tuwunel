@@ -50,6 +50,15 @@ unchanged. Files: `src/service/rooms/{threads/mod.rs,timeline/redact.rs}`,
 `src/service/migrations/mod.rs`; tests in `src/service/rooms/threads/tests/redact.rs`
 and `src/service/migrations/tests.rs`.
 
+### Redacted thread roots keep their thread summary
+
+Redaction replaces an event's whole `unsigned`, so redacting a thread root
+dropped its stored `m.thread` bundle and the next reply restarted the count at
+one. The redacted root now keeps that bundle (only `m.relations.m.thread`), as
+Synapse keeps a redacted root's thread summary, except an event naming itself as
+its root, whose summary quotes its own content. Upstream has the same bug.
+Files: `src/service/rooms/timeline/redact.rs`, `src/service/rooms/threads/mod.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
