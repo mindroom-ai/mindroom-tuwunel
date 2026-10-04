@@ -1,17 +1,16 @@
-use futures::{Stream, StreamExt, TryStreamExt, future::Either};
+use futures::{Stream, StreamExt, future::Either};
 use ruma::{
 	EventId, OwnedUserId, UserId,
 	api::Direction,
 	events::{reaction::ReactionEventContent, relation::RelationType},
 };
 use tuwunel_core::{
-	PduId, Result,
+	PduId,
 	arrayvec::ArrayVec,
 	implement, is_equal_to,
 	matrix::{Event, Pdu, PduCount, RawPduId, event::RelationTypeEqual},
 	utils::{
-		result::NotFound,
-		stream::{ReadyExt, TryIgnore, TryReadyExt, WidebandExt},
+		stream::{ReadyExt, TryIgnore, WidebandExt},
 		u64_from_u8,
 	},
 };
@@ -164,36 +163,4 @@ pub fn get_relations<'a>(
 
 		Some((count, pdu))
 	})
-}
-
-/// The events relating to `target`, oldest first, for callers that must not
-/// act on a partial walk: an index or event read error is yielded instead of
-/// skipped as in [`Service::get_relations`]. A relation whose event is not
-/// stored in this room (purged since, or sent in another room) is still
-/// skipped.
-#[implement(Service)]
-pub fn try_get_relations(
-	&self,
-	shortroomid: ShortRoomId,
-	target: PduCount,
-) -> impl Stream<Item = Result<(PduCount, Pdu)>> + Send + '_ {
-	let target = target.to_be_bytes();
-
-	self.db
-		.tofrom_relation
-		.raw_keys_from(&target)
-		.ready_try_take_while(move |key| Ok(key.starts_with(&target)))
-		.map_ok(|to_from| PduCount::from_unsigned(u64_from_u8(&to_from[8..16])))
-		.map_ok(move |count| (shortroomid, count))
-		.try_filter_map(async |(shortroomid, count)| {
-			let pdu_id: RawPduId = PduId { shortroomid, count }.into();
-
-			Ok(self
-				.services
-				.timeline
-				.get_pdu_from_id(&pdu_id)
-				.await
-				.optional()?
-				.map(|pdu| (count, pdu)))
-		})
 }

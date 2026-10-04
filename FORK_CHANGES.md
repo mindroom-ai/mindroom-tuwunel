@@ -46,54 +46,19 @@ This changes directory visibility only; exclusive namespace ownership is
 unchanged.
 
 ### Thread reply counts exclude redacted replies
-Files:
-- `src/service/rooms/timeline/redact.rs`, `src/service/rooms/threads/mod.rs`
-- `src/service/rooms/pdu_metadata/relations.rs` (fallible relation walk)
-- `src/service/migrations/mod.rs`
-- `src/admin/debug/mod.rs`, `src/admin/debug/rebuild_thread_index.rs`
-- `src/service/rooms/threads/tests.rs`, `src/service/rooms/threads/tests/redact.rs`,
-  `src/service/migrations/tests.rs`
-- `src/mindroom-tests/tests/thread_count_redaction.rs`
 
-Behavior:
-- Upstream keeps a thread root's bundled `unsigned.m.relations.m.thread.count`
-  on the stored root and only ever increments it. Redacting a reply left the
-  count unchanged, while the redaction strips the reply's `m.relates_to`, so
-  clients can no longer find it as a thread reply. MindRoom Chat compares the
-  count with the replies it finds and, always one short, re-fetched the whole
-  thread on every open. Synapse drops redacted relations, so its count
-  excludes redacted replies. Upstream tuwunel (main as of `14afe57d8`) has the
-  same bug, and this change could be upstreamed.
-- Redacting a thread reply recounts its root. The relation is read before
-  redaction strips it, as appending reads it (`m.thread` and the legacy
-  `io.element.thread`). A timeline root's count is set to the thread replies
-  in its relation index, leaving out the redacted reply, so a count that had
-  drifted (a reply appended while its root was missing, or a redacted root
-  whose bundle restarted at one) is corrected too. Replies to a backfilled
-  root are not in that index, so its count only drops by one, stopping at
-  zero. The redacted reply and the root are written in one transaction under
-  the room's state lock. If the root's events cannot be read, the reply is
-  still redacted and the root is left as it was, with a warning.
-- Redacting an already redacted reply, a non-thread event, an edit, a
-  reaction, a backfilled reply, a reply naming a root in another room, or the
-  root itself leaves counts unchanged. A root without a thread bundle (a
-  redacted root) does not gain one, and a count of zero keeps its bundle.
-- The relation index row stays: unfiltered `/relations` still serves the
-  redacted reply so clients learn of the redaction, and
-  `/relations/{root}/m.thread` already omitted it. `latest_event`, thread
-  participants and the thread activity index are unchanged.
-- A one-time startup migration (`global` marker `recount_thread_replies`,
-  stamped on fresh databases) recounts every root in `threadid_userids` the
-  same way, rewriting only roots that have a thread bundle whose count
-  differs, each under its room's state lock. Backfilled roots are skipped. A
-  root with an event that cannot be read keeps its count and is logged, and
-  the marker is then left unset so the next start retries; startup itself
-  continues. Shutdown interrupts the recount without setting the marker.
-  Progress is logged every 1000 roots. `!admin debug rebuild-thread-index`
-  also runs the recount and reports the roots checked, corrected and failed.
-- Missing and unreadable events are told apart: an event deleted since its
-  relation was indexed (purged, or a relation from another room) is not a
-  reply, while any other read or decode error fails that root.
+Upstream only ever increments a thread root's stored `m.thread.count`, so a
+redacted reply stays counted while clients can no longer find it. MindRoom Chat
+then re-fetched the whole thread on every open. Upstream has the same bug.
+Redacting a thread reply (`m.thread` or `io.element.thread`, in the root's room,
+not backfilled) now lowers its root's count by one, stopping at zero, in the
+same write as the redacted reply. A one-time startup recount
+(`recount_thread_replies` marker) corrects existing roots from the thread
+replies they can still serve. Backfilled roots are not recounted and keep any
+earlier excess, a count of zero keeps its bundle, and `latest_event` is
+unchanged. Files: `src/service/rooms/{threads/mod.rs,timeline/redact.rs}`,
+`src/service/migrations/mod.rs`; tests in `src/service/rooms/threads/tests/redact.rs`
+and `src/service/migrations/tests.rs`.
 
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
@@ -349,15 +314,8 @@ departure, edit-purge/bundling composition, the orphaned long-text sidecar
 sweep command and its retry after a storage failure
 (`orphaned_sidecar_sweep.rs`, `orphaned_sidecar_delete_retry.rs`),
 device-key immutability/cleanup/
-concurrency, real gateway stream/invite notifications, and thread reply counts
-across client redactions, `/event`, `/threads` and the admin recount
-(`thread_count_redaction.rs`).
-Stream classification also has unit tests in `src/service/pusher/tests.rs`.
-Redaction and recount edge cases (one write for reply and root, drift,
-legacy relations, backfilled roots, unreadable events, shutdown) have
-service tests in `src/service/rooms/threads/tests/redact.rs`, and the
-recount's migration marker (once only, unset after a failure) in
-`src/service/migrations/tests.rs`.
+concurrency, and real gateway stream/invite notifications. Stream classification
+also has unit tests in `src/service/pusher/tests.rs`.
 
 Database-path isolation, pagination bounds, quiet-room full-state sync, and
 stored-key corruption coverage use upstream's native tests under `src/main/tests/`.
@@ -400,12 +358,6 @@ native_client_ids = ["chat.mindroom.app"]
 - A client that lost its crypto store but kept its access token receives 403
   `M_FORBIDDEN` on `/keys/upload` until it logs in again (device identity keys
   are immutable per device id).
-- A thread root's `m.thread.count` excludes redacted replies. The first start
-  on this version corrects existing roots once. Unlike Synapse, a root whose
-  replies are all redacted keeps its bundle with `count: 0` (Synapse drops
-  the bundle), and the bundled `latest_event` is not recomputed.
-- Backfilled thread roots are not recounted, because their replies are not in
-  the relation index, so they keep any excess count from before this version.
 - Non-terminal `io.mindroom.stream_status` events do not push; terminal events
   use ordinary recipient push rules. The classifier does not deduplicate
   multiple distinct terminal events for the same stream.

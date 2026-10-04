@@ -77,10 +77,6 @@ const FORCE_MIGRATION_DELAY: Duration = Duration::from_secs(15);
 
 const CLEAR_STATE_LOCAL_ERROR_MEMOS: &str = "clear_state_local_error_memos";
 
-/// Thread counts kept before redaction decremented them include redacted
-/// replies.
-const RECOUNT_THREAD_REPLIES: &str = "recount_thread_replies";
-
 /// A marker written by a sibling conduwuit-lineage server but never by tuwunel.
 /// Its presence identifies a foreign database at a higher schema number even
 /// after tuwunel has stamped its own `server_name`, so a database opened by
@@ -255,7 +251,7 @@ async fn fresh(services: &Services) -> Result {
 	db["global"].insert("rebuild_relatesto_typed", []);
 	db["global"].insert("migrate_profile_keys_to_useridprofilekey", []);
 	db["global"].insert("rebuild_thread_activity", []);
-	db["global"].insert(RECOUNT_THREAD_REPLIES, []);
+	db["global"].insert("recount_thread_replies", []);
 	db["global"].insert("clear_servername_status", []);
 	db["global"].insert(CLEAR_STATE_LOCAL_ERROR_MEMOS, []);
 	db["global"].insert("adopt_foreign_account_status", []);
@@ -367,22 +363,11 @@ async fn migrate(services: &Services, foreign_lineage: bool) -> Result {
 		db["global"].insert("rebuild_thread_activity", []);
 	}
 
-	// A cosmetic repair: a failure leaves the marker unset for the next start
-	// to retry instead of refusing this one.
-	if pending(services, RECOUNT_THREAD_REPLIES).await? {
-		match services.threads.recount_thread_replies().await {
-			| Ok(recount) if recount.failed == 0 => {
-				db["global"].insert(RECOUNT_THREAD_REPLIES, []);
-			},
-			| Ok(recount) => warn!(
-				failed = recount.failed,
-				"Some thread reply counts could not be recounted; retrying on the next start."
-			),
-			| Err(error) if error.is_interrupted() => return Err(error),
-			| Err(error) => {
-				warn!(%error, "Thread reply recount failed; retrying on the next start.");
-			},
-		}
+	if pending(services, "recount_thread_replies").await? {
+		let changed = services.threads.recount_thread_replies().await;
+
+		db["global"].insert("recount_thread_replies", []);
+		info!("Recounted thread replies, correcting {changed} thread roots.");
 	}
 
 	if pending(services, "clear_servername_status").await? {

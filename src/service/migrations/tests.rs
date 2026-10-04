@@ -1,9 +1,9 @@
-use ruma::{event_id, server_name};
+use ruma::server_name;
 use serde_json::{Value, json};
-use tuwunel_core::{Result, config::Figment, matrix::PduCount};
+use tuwunel_core::{Result, config::Figment};
 use tuwunel_database::Json;
 
-use super::{RECOUNT_THREAD_REPLIES, fresh, local_user_id, marker_present, migrate};
+use super::{fresh, local_user_id, marker_present, migrate};
 use crate::{
 	Services,
 	test_utils::{fixture, pdu_id},
@@ -39,85 +39,34 @@ async fn thread_reply_recount_runs_once() -> Result {
 	};
 
 	let services = &fixture.services;
+	let marker = "recount_thread_replies";
 
-	// A new database has no thread counts to correct.
+	// A new database has no counts to correct.
 	fresh(services).await?;
 
-	assert!(marker_present(services, RECOUNT_THREAD_REPLIES).await?);
+	assert!(marker_present(services, marker).await?);
 
-	// A root whose count still includes three replies redacted earlier.
+	// A root still counting three replies redacted earlier.
 	set_root_count(services, 3);
 	services.db["threadid_userids"].insert(&pdu_id(1), "@alice:localhost");
-	services.db["global"].remove(RECOUNT_THREAD_REPLIES);
-
+	services.db["global"].remove(marker);
 	migrate(services, false).await?;
 
 	assert_eq!(root_count(services).await?, 0);
-	assert!(marker_present(services, RECOUNT_THREAD_REPLIES).await?);
 
 	set_root_count(services, 3);
 	migrate(services, false).await?;
 
 	assert_eq!(root_count(services).await?, 3);
-
-	Ok(())
-}
-
-#[tokio::test]
-async fn failed_thread_reply_recount_retries_on_the_next_start() -> Result {
-	let config = Figment::new().merge(("create_admin_room", false));
-	let Some(fixture) = fixture(config).await? else {
-		return Ok(());
-	};
-
-	let services = &fixture.services;
-
-	fresh(services).await?;
-
-	// A reply the recount must read is stored but cannot be decoded.
-	set_root_count(services, 3);
-	services.db["threadid_userids"].insert(&pdu_id(1), "@alice:localhost");
-	services
-		.pdu_metadata
-		.add_relation(PduCount::Normal(2), PduCount::Normal(1));
-	services.db["pduid_pdu"].insert(&pdu_id(2), b"not a PDU");
-	services.db["global"].remove(RECOUNT_THREAD_REPLIES);
-
-	migrate(services, false).await?;
-
-	assert_eq!(root_count(services).await?, 3);
-	assert!(!marker_present(services, RECOUNT_THREAD_REPLIES).await?);
-
-	// Once the row is gone, the next start completes the recount.
-	services.db["pduid_pdu"].remove(&pdu_id(2));
-	migrate(services, false).await?;
-
-	assert_eq!(root_count(services).await?, 0);
-	assert!(marker_present(services, RECOUNT_THREAD_REPLIES).await?);
 
 	Ok(())
 }
 
 fn set_root_count(services: &Services, count: u64) {
-	let root = event_id!("$root:localhost");
+	let thread = json!({ "m.relations": { "m.thread": { "count": count } } });
+	let root = json!({ "room_id": "!thread:localhost", "unsigned": thread });
 
-	services.db["eventid_pduid"].insert(root.as_bytes(), pdu_id(1).as_bytes());
-	services.db["pduid_pdu"].raw_put(
-		pdu_id(1),
-		Json(json!({
-			"type": "m.room.message",
-			"event_id": root,
-			"room_id": "!thread:localhost",
-			"sender": "@alice:localhost",
-			"origin_server_ts": 1,
-			"depth": 1,
-			"hashes": { "sha256": "hash" },
-			"prev_events": [],
-			"auth_events": [],
-			"content": { "msgtype": "m.text", "body": "root" },
-			"unsigned": { "m.relations": { "m.thread": { "count": count } } },
-		})),
-	);
+	services.db["pduid_pdu"].raw_put(pdu_id(1), Json(root));
 }
 
 async fn root_count(services: &Services) -> Result<Value> {

@@ -1,14 +1,10 @@
 use ruma::{
-	CanonicalJsonObject, EventId, OwnedEventId, RoomId,
+	EventId, RoomId,
 	canonical_json::{RedactedBecause, redact_in_place},
-	events::room::encrypted::Relation,
 };
-use tuwunel_core::{
-	Err, Result, err, implement, matrix::event::Event, utils::result::NotFound, warn,
-};
+use tuwunel_core::{Err, Result, err, implement, matrix::event::Event, utils::result::NotFound};
 
-use super::ExtractRelatesTo;
-use crate::rooms::{short::ShortRoomId, timeline::RoomMutexGuard};
+use crate::rooms::{short::ShortRoomId, threads::thread_root, timeline::RoomMutexGuard};
 
 /// Replace a PDU with the redacted form.
 #[implement(super::Service)]
@@ -68,8 +64,9 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.delete_typed_relation(&pdu_id, &pdu)
 		.await;
 
-	// Read before `redact_in_place` strips `m.relates_to`.
-	let thread_root = thread_root(&pdu);
+	// Read before redaction strips `m.relates_to`.
+	let content = pdu.get("content").cloned();
+	let root_event_id = content.and_then(|content| thread_root(content.into()));
 
 	redact_in_place(
 		&mut pdu,
@@ -78,49 +75,23 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 	)
 	.map_err(|err| err!("invalid event: {err}"))?;
 
-	// The check `replace_pdu` makes, kept for the staged write.
-	if self
-		.db
-		.pduid_pdu
-		.get(&pdu_id)
-		.await
-		.is_not_found()
-	{
+	// `replace_pdu`'s check; the reply and its root's count land together.
+	let (pduid_pdu, mut txn) = (&self.db.pduid_pdu, self.db.db.txn());
+
+	if pduid_pdu.get(&pdu_id).await.is_not_found() {
 		return Err!(Request(NotFound("PDU does not exist.")));
 	}
 
-	// The redacted reply and its root's thread count are written together.
-	let mut txn = self.db.db.txn();
-
-	if let Some(root_event_id) = thread_root
-		&& let Err(error) = self
-			.services
+	if let Some(root_event_id) = root_event_id {
+		self.services
 			.threads
-			.stage_reply_redaction(&mut txn, &root_event_id, &pdu_id, state_lock)
-			.await
-	{
-		warn!(%event_id, %root_event_id, %error, "Thread count not updated for redacted reply");
+			.stage_redacted_reply(&mut txn, &root_event_id, &pdu_id)
+			.await;
 	}
 
-	// Staged last, so the redacted form wins should the reply name itself as
-	// its root.
+	// Staged last, so the redacted form wins if the reply names itself as root.
 	self.stage_replace_pdu(&mut txn, &pdu_id, &pdu);
-
 	txn.execute();
 
 	Ok(())
-}
-
-/// The thread root a reply names, read as `append_pdu_effects` reads it before
-/// counting the reply. An already redacted reply names none.
-fn thread_root(pdu: &CanonicalJsonObject) -> Option<OwnedEventId> {
-	let content = pdu.get("content")?.clone();
-
-	match serde_json::from_value::<ExtractRelatesTo>(content.into())
-		.ok()?
-		.relates_to
-	{
-		| Relation::Thread(thread) => Some(thread.event_id),
-		| _ => None,
-	}
 }
