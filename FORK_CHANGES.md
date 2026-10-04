@@ -35,6 +35,21 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Thread reply counts exclude redacted replies
+
+Upstream only ever increments a thread root's stored `m.thread.count`, so a
+redacted reply stays counted while clients can no longer find it. MindRoom Chat
+then re-fetched the whole thread on every open. Upstream has the same bug.
+Redacting a thread reply (`m.thread` or `io.element.thread`, in the root's room,
+not backfilled) now lowers its root's count by one, stopping at zero, in the
+same write as the redacted reply. A one-time startup recount
+(`recount_thread_replies` marker) corrects existing roots from the thread
+replies they can still serve. Backfilled roots are not recounted and keep any
+earlier excess, a count of zero keeps its bundle, and `latest_event` is
+unchanged. Files: `src/service/rooms/{threads/mod.rs,timeline/redact.rs}`,
+`src/service/migrations/mod.rs`; tests in `src/service/rooms/threads/tests/redact.rs`
+and `src/service/migrations/tests.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
