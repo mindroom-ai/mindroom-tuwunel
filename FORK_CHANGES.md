@@ -55,7 +55,8 @@ not backfilled) now lowers its root's count by one, stopping at zero, in the
 same write as the redacted reply. A one-time startup recount
 (`recount_thread_replies` marker) corrects existing roots from the thread
 replies they can still serve. Backfilled roots are not recounted and keep any
-earlier excess, and `latest_event` is unchanged. Files: `src/service/rooms/{threads/mod.rs,timeline/redact.rs}`,
+earlier excess. `latest_event` handling is described below. Files:
+`src/service/rooms/{threads/mod.rs,timeline/redact.rs}`,
 `src/service/migrations/mod.rs`; tests in `src/service/rooms/threads/tests/redact.rs`
 and `src/service/migrations/tests.rs`.
 
@@ -73,8 +74,10 @@ Files: `src/service/rooms/timeline/redact.rs`, `src/service/rooms/threads/mod.rs
 A root's stored `m.thread.latest_event` copies its newest reply, so redacting
 that reply kept serving its content (clients, federation, appservices). Redaction
 now swaps in the newest remaining reply, or drops the summary if none remains.
-A one-time startup scrub (`scrub_redacted_thread_latest` marker) fixes affected
-roots. Upstream has the same bug. Files: `src/service/rooms/threads/mod.rs`.
+A backfilled root's replies are not indexed, so it drops the summary even when
+older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
+marker) fixes affected roots. Upstream has the same bug. Files:
+`src/service/rooms/threads/mod.rs`.
 
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
