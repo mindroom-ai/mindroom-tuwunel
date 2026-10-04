@@ -114,7 +114,7 @@ mod tests {
 
 		assert!(
 			output.is_some_and(
-				|output| output.contains("corrected the reply count of 1 thread roots")
+				|output| output.contains("Thread roots checked: 1, corrected: 1, failed: 0.")
 			),
 			"rebuild-thread-index reports one corrected root"
 		);
@@ -137,6 +137,8 @@ mod tests {
 		})
 	}
 
+	/// The root's thread count as `/event` and `/threads` serve it, which
+	/// must agree.
 	async fn thread_count(router: &Router, room: &str, root: &str) -> JsonValue {
 		let event = request(
 			router,
@@ -145,8 +147,28 @@ mod tests {
 			None,
 		)
 		.await;
+		let threads = request(
+			router,
+			"GET",
+			&format!("/_matrix/client/v1/rooms/{}/threads", enc(room)),
+			None,
+		)
+		.await;
+		let listed = threads["chunk"]
+			.as_array()
+			.expect("threads returns a chunk")
+			.iter()
+			.find(|thread| thread["event_id"] == root)
+			.expect("threads lists the root");
 
-		event["unsigned"]["m.relations"]["m.thread"]["count"].clone()
+		let count = event["unsigned"]["m.relations"]["m.thread"]["count"].clone();
+
+		assert_eq!(
+			listed["unsigned"]["m.relations"]["m.thread"]["count"], count,
+			"/threads and /event serve the same count"
+		);
+
+		count
 	}
 
 	/// Event IDs `/relations` serves for `target`, newest first.

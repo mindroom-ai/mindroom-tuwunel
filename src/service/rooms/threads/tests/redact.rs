@@ -1,12 +1,20 @@
-//! Thread reply counts across redaction: redacting a reply takes it off its
-//! root's bundled `m.thread.count`, and the recount repairs counts kept before
-//! that.
+//! Thread reply counts across redaction: redacting a reply recounts its root's
+//! bundled `m.thread.count` in the same write, and the recount repairs counts
+//! kept before that.
 
-use std::sync::Arc;
+use std::{
+	pin::pin,
+	sync::{Arc, Mutex},
+	task::{Context, Wake, Waker},
+};
 
 use futures::StreamExt;
 use ruma::{
-	EventId, OwnedEventId, RoomId, api::Direction, event_id, events::StateEventType, room_id,
+	EventId, OwnedEventId, RoomId,
+	api::Direction,
+	event_id,
+	events::{StateEventType, room::encrypted::Relation},
+	room_id,
 };
 use serde_json::{Value, json};
 use tuwunel_core::{
@@ -30,6 +38,14 @@ struct Room<'a> {
 	shortroomid: ShortRoomId,
 }
 
+/// The root's stored thread count at the moment the redacted reply's write is
+/// announced to watchers, which is when it becomes visible.
+struct CountAtReplyWrite {
+	services: Arc<Services>,
+	root_id: RawPduId,
+	count: Mutex<Option<Value>>,
+}
+
 #[tokio::test]
 async fn redacting_a_thread_reply_decrements_its_root_once() -> Result {
 	let Some(fixture) = fixture(Figment::new()).await? else {
@@ -40,6 +56,7 @@ async fn redacting_a_thread_reply_decrements_its_root_once() -> Result {
 	let root = event_id!("$root:localhost");
 	let first = event_id!("$first:localhost");
 	let second = event_id!("$second:localhost");
+	let legacy = event_id!("$legacy:localhost");
 
 	room.append(1, root, MESSAGE, text("root"))
 		.await?;
@@ -47,30 +64,161 @@ async fn redacting_a_thread_reply_decrements_its_root_once() -> Result {
 		.await?;
 	room.append(3, second, MESSAGE, reply(root, "second"))
 		.await?;
+	room.append(4, legacy, MESSAGE, legacy_reply(root, "legacy"))
+		.await?;
 
-	assert_eq!(room.thread(root).await?["count"], 2);
+	assert_eq!(room.thread(root).await?["count"], 3);
 
 	room.redact(first).await?;
 
 	let thread = room.thread(root).await?;
 
-	assert_eq!(thread["count"], 1);
-	assert_eq!(thread["latest_event"]["event_id"], second.as_str());
+	assert_eq!(thread["count"], 2);
+	assert_eq!(thread["latest_event"]["event_id"], legacy.as_str());
 
 	// The reply is already redacted, so it no longer names a thread.
 	room.redact(first).await?;
 
+	assert_eq!(room.thread(root).await?["count"], 2);
+
+	room.redact(legacy).await?;
+
 	assert_eq!(room.thread(root).await?["count"], 1);
 
-	// `/relations` still serves the redacted reply, so clients learn of the
-	// redaction.
-	assert_eq!(room.relations(root).await?, [first, second]);
+	// `/relations` still serves the redacted replies, so clients learn of the
+	// redactions.
+	assert_eq!(room.relations(root).await?, [first, second, legacy]);
 
-	// A count that is already zero stays there.
-	room.set_count(root, 0).await?;
-	room.redact(second).await?;
+	Ok(())
+}
 
-	assert_eq!(room.thread(root).await?["count"], 0);
+#[tokio::test]
+async fn redaction_corrects_a_drifted_count() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let room = Room::new(&fixture.services, room_id!("!thread:localhost")).await?;
+	let root = event_id!("$root:localhost");
+	let first = event_id!("$first:localhost");
+
+	room.append(1, root, MESSAGE, text("root"))
+		.await?;
+	room.append(2, first, MESSAGE, reply(root, "first"))
+		.await?;
+	room.append(3, event_id!("$second:localhost"), MESSAGE, reply(root, "second"))
+		.await?;
+
+	// Redaction drops the root's bundle; the next reply restarts it at one.
+	room.redact(root).await?;
+	room.append(4, event_id!("$third:localhost"), MESSAGE, reply(root, "third"))
+		.await?;
+
+	assert_eq!(room.thread(root).await?["count"], 1);
+
+	room.redact(first).await?;
+
+	assert_eq!(room.thread(root).await?["count"], 2);
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn redacted_reply_and_root_count_are_written_together() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let room = Room::new(services, room_id!("!thread:localhost")).await?;
+	let root = event_id!("$root:localhost");
+	let first = event_id!("$first:localhost");
+
+	let root_id = room
+		.append(1, root, MESSAGE, text("root"))
+		.await?;
+	let first_id = room
+		.append(2, first, MESSAGE, reply(root, "first"))
+		.await?;
+	room.append(3, event_id!("$second:localhost"), MESSAGE, reply(root, "second"))
+		.await?;
+
+	let observed = Arc::new(CountAtReplyWrite {
+		services: services.clone(),
+		root_id,
+		count: Mutex::new(None),
+	});
+
+	let waker = Waker::from(observed.clone());
+	let mut watcher = pin!(services.db["pduid_pdu"].watch_raw_prefix_once(first_id)); // Future::poll requires mutable access.
+
+	assert!(
+		watcher
+			.as_mut()
+			.poll(&mut Context::from_waker(&waker))
+			.is_pending()
+	);
+
+	room.redact(first).await?;
+
+	assert_eq!(*observed.count.lock().expect("locked"), Some(json!(1)));
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn unreadable_reply_still_redacts_and_leaves_the_root() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let room = Room::new(services, room_id!("!thread:localhost")).await?;
+	let root = event_id!("$root:localhost");
+	let first = event_id!("$first:localhost");
+
+	room.append(1, root, MESSAGE, text("root"))
+		.await?;
+	room.append(2, first, MESSAGE, reply(root, "first"))
+		.await?;
+	let second_id = room
+		.append(3, event_id!("$second:localhost"), MESSAGE, reply(root, "second"))
+		.await?;
+
+	services.db["pduid_pdu"].insert(&second_id, b"not a PDU");
+
+	room.redact(first).await?;
+
+	let redacted = room.stored(first).await?;
+
+	assert_eq!(redacted["content"], json!({}));
+	assert!(redacted["unsigned"]["redacted_because"].is_object());
+	assert_eq!(room.thread(root).await?["count"], 2);
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn reply_naming_itself_as_root_stays_redacted() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let room = Room::new(&fixture.services, room_id!("!thread:localhost")).await?;
+	let looped = event_id!("$looped:localhost");
+
+	room.append(1, looped, MESSAGE, reply(looped, "looped"))
+		.await?;
+
+	assert_eq!(room.thread(looped).await?["count"], 1);
+
+	room.redact(looped).await?;
+
+	let redacted = room.stored(looped).await?;
+
+	assert_eq!(redacted["content"], json!({}));
+	assert!(redacted["unsigned"]["redacted_because"].is_object());
+	assert!(room.thread(looped).await?.is_null());
 
 	Ok(())
 }
@@ -130,6 +278,37 @@ async fn redacting_other_events_keeps_the_count() -> Result {
 }
 
 #[tokio::test]
+async fn backfilled_root_count_drops_by_one_down_to_zero() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let room = Room::new(&fixture.services, room_id!("!thread:localhost")).await?;
+	let root = event_id!("$root:localhost");
+	let first = event_id!("$first:localhost");
+	let second = event_id!("$second:localhost");
+
+	room.store(PduCount::Backfilled(-1), root, MESSAGE, text("root"));
+	room.append(2, first, MESSAGE, reply(root, "first"))
+		.await?;
+	room.append(3, second, MESSAGE, legacy_reply(root, "second"))
+		.await?;
+
+	assert_eq!(room.thread(root).await?["count"], 2);
+
+	room.redact(first).await?;
+
+	assert_eq!(room.thread(root).await?["count"], 1);
+
+	room.set_count(root, 0).await?;
+	room.redact(second).await?;
+
+	assert_eq!(room.thread(root).await?["count"], 0);
+
+	Ok(())
+}
+
+#[tokio::test]
 async fn redacted_root_gains_no_thread_bundle() -> Result {
 	let Some(fixture) = fixture(Figment::new()).await? else {
 		return Ok(());
@@ -165,38 +344,39 @@ async fn recount_drops_redacted_replies_and_leaves_other_roots() -> Result {
 	let services = &fixture.services;
 	let room = Room::new(services, room_id!("!thread:localhost")).await?;
 
-	// Counted before redaction decremented it: one reply is gone.
+	// Counted before redaction updated it: one reply is gone.
 	let stale = event_id!("$stale:localhost");
-	let stale_live = event_id!("$stale-live:localhost");
 	let stale_gone = event_id!("$stale-gone:localhost");
 
 	room.append(1, stale, MESSAGE, text("stale"))
 		.await?;
-	room.append(2, stale_live, MESSAGE, reply(stale, "live"))
+	room.append(2, event_id!("$stale-live:localhost"), MESSAGE, reply(stale, "live"))
 		.await?;
 	room.append(3, stale_gone, MESSAGE, reply(stale, "gone"))
 		.await?;
 	room.redact(stale_gone).await?;
 	room.set_count(stale, 2).await?;
 
-	// Correct, beside relations that are not thread replies.
+	// Correct, with a legacy reply, beside relations that are not replies.
 	let kept = event_id!("$kept:localhost");
 
 	room.append(4, kept, MESSAGE, text("kept"))
 		.await?;
 	room.append(5, event_id!("$kept-reply:localhost"), MESSAGE, reply(kept, "reply"))
 		.await?;
-	room.append(6, event_id!("$kept-edit:localhost"), MESSAGE, edit(kept))
+	room.append(6, event_id!("$kept-legacy:localhost"), MESSAGE, legacy_reply(kept, "legacy"))
 		.await?;
-	room.append(7, event_id!("$kept-reaction:localhost"), REACTION, react(kept))
+	room.append(7, event_id!("$kept-edit:localhost"), MESSAGE, edit(kept))
+		.await?;
+	room.append(8, event_id!("$kept-reaction:localhost"), REACTION, react(kept))
 		.await?;
 
 	// Redacted: no bundle to correct.
 	let redacted = event_id!("$redacted:localhost");
 
-	room.append(8, redacted, MESSAGE, text("redacted"))
+	room.append(9, redacted, MESSAGE, text("redacted"))
 		.await?;
-	room.append(9, event_id!("$redacted-reply:localhost"), MESSAGE, reply(redacted, "reply"))
+	room.append(10, event_id!("$redacted-reply:localhost"), MESSAGE, reply(redacted, "reply"))
 		.await?;
 	room.redact(redacted).await?;
 
@@ -205,7 +385,7 @@ async fn recount_drops_redacted_replies_and_leaves_other_roots() -> Result {
 
 	room.store(PduCount::Backfilled(-1), backfilled, MESSAGE, text("backfilled"));
 	room.append(
-		10,
+		11,
 		event_id!("$backfilled-reply:localhost"),
 		MESSAGE,
 		reply(backfilled, "reply"),
@@ -217,10 +397,10 @@ async fn recount_drops_redacted_replies_and_leaves_other_roots() -> Result {
 	let backfilled_thread = room.thread(backfilled).await?;
 
 	assert_eq!(stale_thread["count"], 2);
-	assert_eq!(kept_thread["count"], 1);
+	assert_eq!(kept_thread["count"], 2);
 	assert_eq!(backfilled_thread["count"], 1);
 
-	assert_eq!(services.threads.recount_thread_replies().await?, 1);
+	assert_eq!(recount(services).await?, (1, 0));
 
 	let mut expected = stale_thread;
 
@@ -234,8 +414,70 @@ async fn recount_drops_redacted_replies_and_leaves_other_roots() -> Result {
 	// Nothing left to correct, so nothing is written.
 	let sequence = services.db.engine.current_sequence();
 
-	assert_eq!(services.threads.recount_thread_replies().await?, 0);
+	assert_eq!(recount(services).await?, (0, 0));
 	assert_eq!(services.db.engine.current_sequence(), sequence);
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn recount_leaves_a_root_it_cannot_read_in_full() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let room = Room::new(services, room_id!("!thread:localhost")).await?;
+	let broken = event_id!("$broken:localhost");
+	let stale = event_id!("$stale:localhost");
+
+	room.append(1, broken, MESSAGE, text("broken"))
+		.await?;
+	let unreadable = room
+		.append(2, event_id!("$unreadable:localhost"), MESSAGE, reply(broken, "unreadable"))
+		.await?;
+	room.set_count(broken, 5).await?;
+	services.db["pduid_pdu"].insert(&unreadable, b"not a PDU");
+
+	room.append(3, stale, MESSAGE, text("stale"))
+		.await?;
+	room.set_count(stale, 5).await?;
+	services.db["threadid_userids"]
+		.insert(&services.timeline.get_pdu_id(stale).await?, "@alice:localhost");
+
+	assert_eq!(recount(services).await?, (1, 1));
+	assert_eq!(room.thread(broken).await?["count"], 5);
+	assert_eq!(room.thread(stale).await?["count"], 0);
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn recount_stops_at_shutdown() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let room = Room::new(services, room_id!("!thread:localhost")).await?;
+	let root = event_id!("$root:localhost");
+
+	room.append(1, root, MESSAGE, text("root"))
+		.await?;
+	room.append(2, event_id!("$reply:localhost"), MESSAGE, reply(root, "reply"))
+		.await?;
+	room.set_count(root, 5).await?;
+
+	services.server.shutdown()?;
+
+	let error = services
+		.threads
+		.recount_thread_replies()
+		.await
+		.expect_err("recount stops at shutdown");
+
+	assert!(error.is_interrupted(), "{error}");
+	assert_eq!(room.thread(root).await?["count"], 5);
 
 	Ok(())
 }
@@ -286,12 +528,18 @@ impl<'a> Room<'a> {
 	}
 
 	/// Store an event and index it the way `append_pdu_effects` does.
-	async fn append(&self, count: u64, event_id: &EventId, kind: &str, content: Value) -> Result {
+	async fn append(
+		&self,
+		count: u64,
+		event_id: &EventId,
+		kind: &str,
+		content: Value,
+	) -> Result<RawPduId> {
 		let relates_to = content.get("m.relates_to").cloned();
 		let (pdu_id, pdu) = self.store(PduCount::Normal(count), event_id, kind, content);
 
 		let Some(relates_to) = relates_to else {
-			return Ok(());
+			return Ok(pdu_id);
 		};
 
 		let target: OwnedEventId = serde_json::from_value(relates_to["event_id"].clone())?;
@@ -305,14 +553,14 @@ impl<'a> Room<'a> {
 			.pdu_metadata
 			.add_relation(pdu_id.pdu_count(), target_count);
 
-		if relates_to["rel_type"] == "m.thread" {
+		if let Ok(Relation::Thread(thread)) = serde_json::from_value(relates_to) {
 			self.services
 				.threads
-				.add_to_thread(&target, pdu_id, &pdu)
+				.add_to_thread(&thread.event_id, pdu_id, &pdu)
 				.await?;
 		}
 
-		Ok(())
+		Ok(pdu_id)
 	}
 
 	fn store(
@@ -417,6 +665,27 @@ impl<'a> Room<'a> {
 	}
 }
 
+impl Wake for CountAtReplyWrite {
+	fn wake(self: Arc<Self>) { self.wake_by_ref(); }
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		let count = self.services.db["pduid_pdu"]
+			.get_blocking(&self.root_id)
+			.ok()
+			.and_then(|pdu| serde_json::from_slice::<Value>(&pdu).ok())
+			.map(|pdu| pdu["unsigned"]["m.relations"]["m.thread"]["count"].clone());
+
+		*self.count.lock().expect("locked") = count;
+	}
+}
+
+/// Run the recount, returning how many roots it changed and failed.
+async fn recount(services: &Services) -> Result<(usize, usize)> {
+	let recount = services.threads.recount_thread_replies().await?;
+
+	Ok((recount.changed, recount.failed))
+}
+
 fn create_id(room: &RoomId) -> Result<OwnedEventId> {
 	OwnedEventId::try_from(format!("$create-{}", room.as_str().trim_start_matches('!')))
 		.map_err(|e| err!("test create event ID: {e}"))
@@ -429,6 +698,16 @@ fn reply(root: &EventId, body: &str) -> Value {
 		"msgtype": "m.text",
 		"body": body,
 		"m.relates_to": { "rel_type": "m.thread", "event_id": root },
+	})
+}
+
+/// A reply with the unstable thread relation type clients sent before Matrix
+/// 1.4.
+fn legacy_reply(root: &EventId, body: &str) -> Value {
+	json!({
+		"msgtype": "m.text",
+		"body": body,
+		"m.relates_to": { "rel_type": "io.element.thread", "event_id": root },
 	})
 }
 

@@ -367,11 +367,22 @@ async fn migrate(services: &Services, foreign_lineage: bool) -> Result {
 		db["global"].insert("rebuild_thread_activity", []);
 	}
 
+	// A cosmetic repair: a failure leaves the marker unset for the next start
+	// to retry instead of refusing this one.
 	if pending(services, RECOUNT_THREAD_REPLIES).await? {
-		let changed = services.threads.recount_thread_replies().await?;
-
-		db["global"].insert(RECOUNT_THREAD_REPLIES, []);
-		info!("Corrected the reply count of {changed} thread roots.");
+		match services.threads.recount_thread_replies().await {
+			| Ok(recount) if recount.failed == 0 => {
+				db["global"].insert(RECOUNT_THREAD_REPLIES, []);
+			},
+			| Ok(recount) => warn!(
+				failed = recount.failed,
+				"Some thread reply counts could not be recounted; retrying on the next start."
+			),
+			| Err(error) if error.is_interrupted() => return Err(error),
+			| Err(error) => {
+				warn!(%error, "Thread reply recount failed; retrying on the next start.");
+			},
+		}
 	}
 
 	if pending(services, "clear_servername_status").await? {

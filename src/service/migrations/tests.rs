@@ -1,6 +1,6 @@
 use ruma::{event_id, server_name};
 use serde_json::{Value, json};
-use tuwunel_core::{Result, config::Figment};
+use tuwunel_core::{Result, config::Figment, matrix::PduCount};
 use tuwunel_database::Json;
 
 use super::{RECOUNT_THREAD_REPLIES, fresh, local_user_id, marker_present, migrate};
@@ -59,6 +59,41 @@ async fn thread_reply_recount_runs_once() -> Result {
 	migrate(services, false).await?;
 
 	assert_eq!(root_count(services).await?, 3);
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn failed_thread_reply_recount_retries_on_the_next_start() -> Result {
+	let config = Figment::new().merge(("create_admin_room", false));
+	let Some(fixture) = fixture(config).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+
+	fresh(services).await?;
+
+	// A reply the recount must read is stored but cannot be decoded.
+	set_root_count(services, 3);
+	services.db["threadid_userids"].insert(&pdu_id(1), "@alice:localhost");
+	services
+		.pdu_metadata
+		.add_relation(PduCount::Normal(2), PduCount::Normal(1));
+	services.db["pduid_pdu"].insert(&pdu_id(2), b"not a PDU");
+	services.db["global"].remove(RECOUNT_THREAD_REPLIES);
+
+	migrate(services, false).await?;
+
+	assert_eq!(root_count(services).await?, 3);
+	assert!(!marker_present(services, RECOUNT_THREAD_REPLIES).await?);
+
+	// Once the row is gone, the next start completes the recount.
+	services.db["pduid_pdu"].remove(&pdu_id(2));
+	migrate(services, false).await?;
+
+	assert_eq!(root_count(services).await?, 0);
+	assert!(marker_present(services, RECOUNT_THREAD_REPLIES).await?);
 
 	Ok(())
 }

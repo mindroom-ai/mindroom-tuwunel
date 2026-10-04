@@ -7,7 +7,7 @@ use std::{
 	},
 };
 
-use futures::{Stream, StreamExt, TryFutureExt, future::join3};
+use futures::{Stream, StreamExt, TryFutureExt, TryStreamExt, future::join3};
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, OwnedUserId, RoomId, UInt,
 	UserId,
@@ -22,14 +22,18 @@ use ruma::{
 use serde::Deserialize;
 use serde_json::json;
 use tuwunel_core::{
-	Event, Result, err,
+	Event, Result, err, info,
 	matrix::pdu::{PduCount, PduEvent, PduId, RawPduId},
 	utils::{
 		ReadyExt,
-		stream::{TryIgnore, WidebandExt, automatic_width},
+		result::NotFound,
+		stream::{TryIgnore, TryReadyExt, WidebandExt, automatic_width},
 	},
+	warn,
 };
 use tuwunel_database::{Deserialized, Map, Txn};
+
+use crate::rooms::timeline::RoomMutexGuard;
 
 #[cfg(test)]
 mod tests;
@@ -37,6 +41,20 @@ mod tests;
 /// Maximum relation hops walked when resolving thread membership, per
 /// the Matrix v1.4 spec recommendation (also MSC3771/MSC3773).
 const MAX_THREAD_HOPS: usize = 3;
+
+/// Thread roots a recount checks between progress reports.
+const RECOUNT_PROGRESS_INTERVAL: usize = 1000;
+
+/// What [`Service::recount_thread_replies`] did.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ThreadRecount {
+	/// Thread roots visited.
+	pub checked: usize,
+	/// Roots whose stored count was rewritten.
+	pub changed: usize,
+	/// Roots left unchanged because one of their events could not be read.
+	pub failed: usize,
+}
 
 #[derive(Deserialize)]
 struct ExtractThreadRelation {
@@ -151,13 +169,9 @@ fn set_thread_count(root: &mut CanonicalJsonObject, count: UInt) -> bool {
 	true
 }
 
-/// Take one reply off the root's bundled count, returning whether it changed.
-/// A missing, invalid or zero count is left alone.
-fn remove_thread_reply(root: &mut CanonicalJsonObject) -> bool {
-	thread_bundle(root)
-		.and_then(|thread| thread_count(thread))
-		.and_then(|count| count.checked_sub(uint!(1)))
-		.is_some_and(|count| set_thread_count(root, count))
+fn is_thread_reply(pdu: &PduEvent) -> bool {
+	pdu.get_content()
+		.is_ok_and(|content: ExtractRelatesTo| matches!(content.relates_to, Relation::Thread(_)))
 }
 
 pub struct Service {
@@ -334,52 +348,115 @@ impl Service {
 		Ok(())
 	}
 
-	/// Take a redacted reply off its root's bundled `m.thread.count`, undoing
-	/// what `add_to_thread` counted when the reply was appended. The caller
-	/// holds the room's state lock and reads `root_event_id` from the reply
-	/// before redacting it; an already redacted reply names no root.
+	/// Stage the root's bundled `m.thread.count` for the redaction of one of
+	/// its replies, in the transaction that stages the redacted reply, so the
+	/// two are written together. The caller reads `root_event_id` from the
+	/// reply before redacting it; an already redacted reply names no root.
 	///
-	/// Backfilled replies and replies from another room were never counted. A
-	/// root without a thread bundle (itself redacted) is left alone, and the
-	/// count stops at zero. The relation row and `latest_event` are kept.
-	pub async fn remove_from_thread(&self, root_event_id: &EventId, reply_id: &RawPduId) {
-		if !matches!(reply_id.pdu_count(), PduCount::Normal(_)) {
-			return;
-		}
-
-		let Ok(root_id) = self
+	/// The count is corrected as the recount corrects it, leaving the reply
+	/// out. A root in another room was never counted for this reply and is
+	/// left alone. Nothing is staged on error.
+	pub async fn stage_reply_redaction(
+		&self,
+		txn: &mut Txn,
+		root_event_id: &EventId,
+		reply_id: &RawPduId,
+		_state_lock: &RoomMutexGuard,
+	) -> Result {
+		let Some(root_id) = self
 			.services
 			.timeline
 			.get_pdu_id(root_event_id)
 			.await
+			.optional()?
 		else {
-			return;
+			return Ok(());
 		};
 
 		if root_id.shortroomid() != reply_id.shortroomid() {
-			return;
+			return Ok(());
 		}
 
-		let Ok(mut root_pdu_json) = self
+		self.stage_thread_count(txn, root_id, Some(reply_id.pdu_count()))
+			.await?;
+
+		Ok(())
+	}
+
+	/// Stage a corrected `m.thread.count` for a thread root, returning whether
+	/// it changed. The caller holds the root's room state lock.
+	///
+	/// A timeline root is recounted from the thread replies in its relation
+	/// index, leaving out `redacted`, a reply whose redaction is staged in the
+	/// same transaction and not yet visible. Replies to a backfilled root are
+	/// not in that index, so its count only drops by one for a redacted reply
+	/// that `add_to_thread` counted, stopping at zero. A root without a thread
+	/// bundle (itself redacted) is left alone. The relation rows and
+	/// `latest_event` are kept. Nothing is staged on error.
+	async fn stage_thread_count(
+		&self,
+		txn: &mut Txn,
+		root_id: RawPduId,
+		redacted: Option<PduCount>,
+	) -> Result<bool> {
+		let Some(mut root_pdu_json) = self
 			.services
 			.timeline
 			.get_pdu_json_from_id(&root_id)
 			.await
+			.optional()?
 		else {
-			return;
+			return Ok(false);
 		};
 
-		if !remove_thread_reply(&mut root_pdu_json) {
-			return;
-		}
+		let Some(stored) = thread_bundle(&mut root_pdu_json).map(|thread| thread_count(thread))
+		else {
+			return Ok(false);
+		};
 
-		let mut txn = self.services.db.txn();
+		let root: PduId = root_id.into();
+		let count = match (root.count, redacted) {
+			| (PduCount::Normal(_), redacted) =>
+				self.count_thread_replies(root, redacted).await?,
+			| (PduCount::Backfilled(_), Some(PduCount::Normal(_))) => {
+				let Some(count) = stored.and_then(|count| count.checked_sub(uint!(1))) else {
+					return Ok(false);
+				};
+
+				count
+			},
+			| (PduCount::Backfilled(_), _) => return Ok(false),
+		};
+
+		if !set_thread_count(&mut root_pdu_json, count) {
+			return Ok(false);
+		}
 
 		self.services
 			.timeline
-			.stage_replace_pdu(&mut txn, &root_id, &root_pdu_json);
+			.stage_replace_pdu(txn, &root_id, &root_pdu_json);
 
-		txn.execute();
+		Ok(true)
+	}
+
+	/// The thread replies in the relation index of `root`, a timeline root,
+	/// leaving out `except`. Fails on a read error rather than count a partial
+	/// walk.
+	async fn count_thread_replies(&self, root: PduId, except: Option<PduCount>) -> Result<UInt> {
+		let replies = self
+			.services
+			.pdu_metadata
+			.try_get_relations(root.shortroomid, root.count)
+			.ready_try_fold(0_usize, |replies, (count, pdu)| {
+				Ok(if Some(count) != except && is_thread_reply(&pdu) {
+					replies.saturating_add(1)
+				} else {
+					replies
+				})
+			})
+			.await?;
+
+		Ok(replies.try_into()?)
 	}
 
 	pub fn threads_until<'a>(
@@ -591,45 +668,74 @@ impl Service {
 		txn.execute();
 	}
 
-	/// Recount every thread root's bundled `m.thread.count` from the replies it
-	/// still has, and return how many roots changed. Counts kept before
-	/// redaction decremented them still include redacted replies, which no
-	/// longer carry `m.relates_to`. Only roots whose count differs are
-	/// rewritten. Run once at startup behind a `global` marker, and on demand
-	/// from the admin command.
-	pub async fn recount_thread_replies(&self) -> Result<usize> {
+	/// Recount every thread root's bundled `m.thread.count` from the thread
+	/// replies in its relation index, rewriting only counts that differ.
+	/// Counts kept before redaction updated them still include redacted
+	/// replies, which no longer carry `m.relates_to`. A root with an event that
+	/// cannot be read is logged, counted as failed and left unchanged. Stops
+	/// with an error at shutdown or if the roots cannot be listed. Run once at
+	/// startup behind a `global` marker, and on demand from the admin command.
+	pub async fn recount_thread_replies(&self) -> Result<ThreadRecount> {
+		let checked = AtomicUsize::new(0);
 		let changed = AtomicUsize::new(0);
+		let failed = AtomicUsize::new(0);
 
 		self.db
 			.threadid_userids
 			.raw_keys()
-			.ignore_err()
-			.map(RawPduId::from)
-			.for_each_concurrent(automatic_width(), async |root_id| {
-				if self.recount_thread(root_id).await {
-					changed.fetch_add(1, Ordering::Relaxed);
-				}
-			})
-			.await;
+			.map_ok(RawPduId::from)
+			.try_for_each_concurrent(automatic_width(), async |root_id| {
+				self.services.server.check_running()?;
 
-		Ok(changed.into_inner())
+				match self.recount_thread(root_id).await {
+					| Ok(true) => {
+						changed.fetch_add(1, Ordering::Relaxed);
+					},
+					| Ok(false) => {},
+					| Err(error) => {
+						failed.fetch_add(1, Ordering::Relaxed);
+						warn!(?root_id, %error, "Thread replies could not be recounted");
+					},
+				}
+
+				let checked = checked
+					.fetch_add(1, Ordering::Relaxed)
+					.saturating_add(1);
+
+				if checked.is_multiple_of(RECOUNT_PROGRESS_INTERVAL) {
+					let changed = changed.load(Ordering::Relaxed);
+					info!(checked, changed, "Recounting thread replies");
+				}
+
+				Ok(())
+			})
+			.await?;
+
+		let recount = ThreadRecount {
+			checked: checked.into_inner(),
+			changed: changed.into_inner(),
+			failed: failed.into_inner(),
+		};
+
+		info!(?recount, "Recounted thread replies");
+
+		Ok(recount)
 	}
 
-	async fn recount_thread(&self, root_id: RawPduId) -> bool {
-		let root: PduId = root_id.into();
-
+	async fn recount_thread(&self, root_id: RawPduId) -> Result<bool> {
 		// Replies to a backfilled root are not in the relation index.
-		if !matches!(root.count, PduCount::Normal(_)) {
-			return false;
+		if !matches!(root_id.pdu_count(), PduCount::Normal(_)) {
+			return Ok(false);
 		}
 
-		let Ok(root_pdu) = self
+		let Some(root_pdu) = self
 			.services
 			.timeline
 			.get_pdu_from_id(&root_id)
 			.await
+			.optional()?
 		else {
-			return false;
+			return Ok(false);
 		};
 
 		// Appends and redactions rewrite the root under this lock too.
@@ -640,44 +746,17 @@ impl Service {
 			.lock(root_pdu.room_id())
 			.await;
 
-		let Ok(mut root_pdu_json) = self
-			.services
-			.timeline
-			.get_pdu_json_from_id(&root_id)
-			.await
-		else {
-			return false;
-		};
-
-		let replies = self
-			.services
-			.pdu_metadata
-			.get_relations(root.shortroomid, root.count, None, Direction::Forward, None)
-			.ready_filter(|(_, pdu)| {
-				pdu.get_content()
-					.is_ok_and(|content: ExtractRelatesTo| {
-						matches!(content.relates_to, Relation::Thread(_))
-					})
-			})
-			.count()
-			.await;
-
-		let Ok(replies) = UInt::try_from(replies) else {
-			return false;
-		};
-
-		if !set_thread_count(&mut root_pdu_json, replies) {
-			return false;
-		}
-
 		let mut txn = self.services.db.txn();
 
-		self.services
-			.timeline
-			.stage_replace_pdu(&mut txn, &root_id, &root_pdu_json);
+		if !self
+			.stage_thread_count(&mut txn, root_id, None)
+			.await?
+		{
+			return Ok(false);
+		}
 
 		txn.execute();
 
-		true
+		Ok(true)
 	}
 }

@@ -3,7 +3,9 @@ use ruma::{
 	canonical_json::{RedactedBecause, redact_in_place},
 	events::room::encrypted::Relation,
 };
-use tuwunel_core::{Result, err, implement, matrix::event::Event};
+use tuwunel_core::{
+	Err, Result, err, implement, matrix::event::Event, utils::result::NotFound, warn,
+};
 
 use super::ExtractRelatesTo;
 use crate::rooms::{short::ShortRoomId, timeline::RoomMutexGuard};
@@ -76,14 +78,35 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 	)
 	.map_err(|err| err!("invalid event: {err}"))?;
 
-	self.replace_pdu(&pdu_id, &pdu).await?;
-
-	if let Some(root_event_id) = thread_root {
-		self.services
-			.threads
-			.remove_from_thread(&root_event_id, &pdu_id)
-			.await;
+	// The check `replace_pdu` makes, kept for the staged write.
+	if self
+		.db
+		.pduid_pdu
+		.get(&pdu_id)
+		.await
+		.is_not_found()
+	{
+		return Err!(Request(NotFound("PDU does not exist.")));
 	}
+
+	// The redacted reply and its root's thread count are written together.
+	let mut txn = self.db.db.txn();
+
+	if let Some(root_event_id) = thread_root
+		&& let Err(error) = self
+			.services
+			.threads
+			.stage_reply_redaction(&mut txn, &root_event_id, &pdu_id, state_lock)
+			.await
+	{
+		warn!(%event_id, %root_event_id, %error, "Thread count not updated for redacted reply");
+	}
+
+	// Staged last, so the redacted form wins should the reply name itself as
+	// its root.
+	self.stage_replace_pdu(&mut txn, &pdu_id, &pdu);
+
+	txn.execute();
 
 	Ok(())
 }
