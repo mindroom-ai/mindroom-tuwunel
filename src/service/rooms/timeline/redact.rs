@@ -114,7 +114,7 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 	if let Some(root_event_id) = root_event_id {
 		self.services
 			.threads
-			.stage_redacted_reply(&mut txn, &root_event_id, &pdu_id)
+			.stage_redacted_reply(&mut txn, &root_event_id, &pdu_id, event_id)
 			.await;
 	}
 
