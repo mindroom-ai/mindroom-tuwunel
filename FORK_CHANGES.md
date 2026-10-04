@@ -69,6 +69,14 @@ Synapse keeps a redacted root's thread summary, except an event naming itself as
 its root, whose summary quotes its own content. Upstream has the same bug.
 Files: `src/service/rooms/timeline/redact.rs`, `src/service/rooms/threads/mod.rs`.
 
+### Redacted replies leave the thread summary
+
+A root's stored `m.thread.latest_event` copies its newest reply, so redacting
+that reply kept serving its content (clients, federation, appservices). Redaction
+now swaps in the newest remaining reply, or drops `latest_event` if none remains.
+A one-time startup scrub (`scrub_redacted_thread_latest` marker) fixes affected
+roots. Upstream has the same bug. Files: `src/service/rooms/threads/mod.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
