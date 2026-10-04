@@ -167,9 +167,35 @@ async fn redacted_root_keeps_its_thread_summary() -> Result {
 			.is_none()
 	);
 
+	// Redacting a reply still counts down from the kept summary.
+	room.redact(&first).await?;
+	assert_eq!(room.count(&root).await?, 1);
+
 	room.append(5, &third, thread(&root)).await?;
 
-	assert_eq!(room.count(&root).await?, 3);
+	assert_eq!(room.count(&root).await?, 2);
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn redacted_self_rooted_reply_keeps_no_summary() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let room = Room::new(&fixture.services).await?;
+	let looped = id("looped");
+
+	room.append(1, &looped, thread(&looped)).await?;
+	assert_eq!(room.count(&looped).await?, 1);
+
+	room.redact(&looped).await?;
+
+	let (_, redacted) = room.stored(&looped).await?;
+
+	assert_eq!(redacted["content"], json!({}));
+	assert!(redacted["unsigned"].get("m.relations").is_none());
 
 	Ok(())
 }

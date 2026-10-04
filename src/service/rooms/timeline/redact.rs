@@ -72,8 +72,11 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 	let content = pdu.get("content").cloned();
 	let root_event_id = content.and_then(|content| thread_root(content.into()));
 
-	// Redaction replaces `unsigned`; a thread root keeps its thread summary.
-	let thread = thread_bundle(&mut pdu).map(|thread| thread.clone());
+	// Redaction replaces `unsigned`; a thread root keeps its thread summary,
+	// unless it names itself as root and its summary quotes its own content.
+	let thread = (root_event_id.as_deref() != Some(event_id))
+		.then(|| thread_bundle(&mut pdu).map(|thread| thread.clone()))
+		.flatten();
 
 	redact_in_place(
 		&mut pdu,
