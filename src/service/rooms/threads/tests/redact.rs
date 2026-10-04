@@ -23,7 +23,7 @@ use crate::{
 };
 
 /// A room with just its create event, so redaction can read its version.
-struct Room<'a>(&'a Services, ShortRoomId);
+struct Room<'a>(&'a Services, ShortRoomId, &'static RoomId);
 
 /// The root's stored count when the redacted reply's write is announced.
 struct CountAtReplyWrite(Arc<Services>, RawPduId, Mutex<Value>);
@@ -109,12 +109,81 @@ async fn recount_fixes_a_stale_root_and_leaves_a_correct_one() -> Result {
 	Ok(())
 }
 
+#[tokio::test]
+async fn redacting_uncounted_replies_keeps_the_count() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let room = Room::new(&fixture.services).await?;
+	let other = Room::create(&fixture.services, room_id!("!other:localhost")).await?;
+	let [root, answer, backfilled, elsewhere] =
+		["root", "answer", "backfilled", "elsewhere"].map(id);
+
+	room.append(1, &root, text()).await?;
+	room.append(2, &answer, thread(&root)).await?;
+	room.store(PduCount::Backfilled(-1), &backfilled, thread(&root))?;
+	other.append(3, &elsewhere, thread(&root)).await?;
+	room.redact(&backfilled).await?;
+	other.redact(&elsewhere).await?;
+
+	assert_eq!(room.count(&root).await?, 1);
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn redacted_root_keeps_its_thread_summary() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let room = Room::new(&fixture.services).await?;
+	let [root, first, second, third, alone] =
+		["root", "first", "second", "third", "alone"].map(id);
+
+	room.append(1, &root, text()).await?;
+	room.append(2, &first, thread(&root)).await?;
+	room.append(3, &second, thread(&root)).await?;
+	room.append(4, &alone, text()).await?;
+
+	let summary = room.stored(&root).await?.1["unsigned"]["m.relations"]["m.thread"].clone();
+
+	assert_eq!(
+		(&summary["count"], &summary["latest_event"]["event_id"]),
+		(&json!(2), &json!(second))
+	);
+
+	room.redact(&root).await?;
+	room.redact(&alone).await?;
+
+	let (_, redacted) = room.stored(&root).await?;
+
+	assert_eq!(redacted["content"], json!({}));
+	assert_eq!(redacted["unsigned"]["m.relations"], json!({ "m.thread": summary }));
+	assert!(
+		room.stored(&alone).await?.1["unsigned"]
+			.get("m.relations")
+			.is_none()
+	);
+
+	room.append(5, &third, thread(&root)).await?;
+
+	assert_eq!(room.count(&root).await?, 3);
+
+	Ok(())
+}
+
 impl<'a> Room<'a> {
 	async fn new(services: &'a Services) -> Result<Self> {
-		let (short, state, room) = (&services.short, &services.state, room());
-		let create = event_id!("$create:localhost");
+		Self::create(services, room_id!("!thread:localhost")).await
+	}
+
+	async fn create(services: &'a Services, room: &'static RoomId) -> Result<Self> {
+		let (short, state) = (&services.short, &services.state);
+		let create = &id(&format!("create-{}", room.strip_sigil().replace(':', "-")));
 		let content = json!({ "creator": "@alice:localhost", "room_version": "10" });
-		let mut pdu = event(create, "m.room.create", content);
+		let mut pdu = event(room, create, "m.room.create", content);
 
 		pdu["state_key"] = json!("");
 		services.db["eventid_outlierpdu"].raw_put(create, Json(pdu));
@@ -128,18 +197,14 @@ impl<'a> Room<'a> {
 
 		state.set_room_state(room, state_hash.await?, &state.mutex.lock(room).await);
 
-		Ok(Self(services, short.get_or_create_shortroomid(room).await))
+		Ok(Self(services, short.get_or_create_shortroomid(room).await, room))
 	}
 
 	/// Store an event and index its relation as `append_pdu_effects` does.
 	async fn append(&self, count: u64, event_id: &EventId, content: Value) -> Result<RawPduId> {
-		let (Self(services, shortroomid), count) = (self, PduCount::Normal(count));
+		let (Self(services, ..), count) = (self, PduCount::Normal(count));
 		let (timeline, threads) = (&services.timeline, &services.threads);
-		let pdu_id: RawPduId = PduId { shortroomid: *shortroomid, count }.into();
-		let pdu: PduEvent = serde_json::from_value(event(event_id, "m.room.message", content))?;
-
-		services.db["eventid_pduid"].insert(event_id.as_bytes(), pdu_id.as_bytes());
-		services.db["pduid_pdu"].raw_put(pdu_id, Json(&pdu));
+		let (pdu_id, pdu) = self.store(count, event_id, content)?;
 
 		if let Some(target) = pdu.get_content_as_value()["m.relates_to"]["event_id"].as_str() {
 			let target = timeline.get_pdu_count(target.try_into()?).await?;
@@ -154,12 +219,30 @@ impl<'a> Room<'a> {
 		Ok(pdu_id)
 	}
 
+	/// Store an event without indexing it, as backfill does.
+	fn store(
+		&self,
+		count: PduCount,
+		event_id: &EventId,
+		content: Value,
+	) -> Result<(RawPduId, PduEvent)> {
+		let Self(services, shortroomid, room) = self;
+		let pdu_id: RawPduId = PduId { shortroomid: *shortroomid, count }.into();
+		let pdu: PduEvent =
+			serde_json::from_value(event(room, event_id, "m.room.message", content))?;
+
+		services.db["eventid_pduid"].insert(event_id.as_bytes(), pdu_id.as_bytes());
+		services.db["pduid_pdu"].raw_put(pdu_id, Json(&pdu));
+
+		Ok((pdu_id, pdu))
+	}
+
 	async fn redact(&self, target: &EventId) -> Result {
+		let Self(services, shortroomid, room) = self;
 		let content = json!({ "redacts": target });
-		let reason = event(event_id!("$redaction:localhost"), "m.room.redaction", content);
+		let reason = event(room, event_id!("$redaction:localhost"), "m.room.redaction", content);
 		let reason: PduEvent = serde_json::from_value(reason)?;
-		let (Self(services, shortroomid), room) = (self, room());
-		let lock = services.state.mutex.lock(room).await;
+		let lock = services.state.mutex.lock(*room).await;
 
 		let redacted = services
 			.timeline
@@ -203,17 +286,15 @@ impl Wake for CountAtReplyWrite {
 	}
 }
 
-fn room() -> &'static RoomId { room_id!("!thread:localhost") }
-
 fn id(name: &str) -> OwnedEventId {
 	format!("${name}:localhost")
 		.try_into()
 		.expect("test event ID")
 }
 
-fn event(event_id: &EventId, kind: &str, content: Value) -> Value {
+fn event(room: &RoomId, event_id: &EventId, kind: &str, content: Value) -> Value {
 	let mut event = json!({
-		"type": kind, "event_id": event_id, "room_id": room(), "sender": "@alice:localhost",
+		"type": kind, "event_id": event_id, "room_id": room, "sender": "@alice:localhost",
 		"origin_server_ts": 1, "depth": 1, "hashes": { "sha256": "hash" },
 		"prev_events": [], "auth_events": [],
 	});
