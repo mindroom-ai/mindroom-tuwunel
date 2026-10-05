@@ -89,7 +89,7 @@ Files:
 - `tuwunel-example.toml`
 
 Behavior:
-- Adds `/sync` timeline compaction for superseded `m.replace` events.
+- Adds `/sync` timeline compaction for superseded non-state `m.replace` events.
 - Adds a background purge worker that deletes old superseded edit events from
   storage and indexes, retaining the newest eligible edit per (room, target,
   sender). Candidates and originals must be non-state events with matching

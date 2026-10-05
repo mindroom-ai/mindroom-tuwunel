@@ -13,9 +13,9 @@ use tuwunel_core::{
 /// the same sender into just the latest one by timeline order (`PduCount`),
 /// with `event_id` as a deterministic tie-break.
 ///
-/// Non-replace events are always kept. For each `(target_event_id, sender)`
-/// group with multiple replacements in the batch, only the newest replacement
-/// is retained.
+/// State events and non-replace events are always kept. For each
+/// `(target_event_id, sender)` group with multiple replacements in the batch,
+/// only the newest replacement is retained.
 pub(super) fn collapse_superseded_edits(
 	events: Vec<(PduCount, PduEvent)>,
 ) -> Vec<(PduCount, PduEvent)> {
@@ -23,7 +23,8 @@ pub(super) fn collapse_superseded_edits(
 		HashMap::new();
 
 	for (idx, (_, pdu)) in events.iter().enumerate() {
-		if let Ok(content) = pdu.get_content::<ExtractRelatesToInfo>()
+		if pdu.state_key.is_none()
+			&& let Ok(content) = pdu.get_content::<ExtractRelatesToInfo>()
 			&& content.relates_to.rel_type == "m.replace"
 		{
 			replace_events_by_target_sender
@@ -284,6 +285,23 @@ mod tests {
 		assert!(event_ids.contains(&"$edit_a2:example.com"));
 		assert!(event_ids.contains(&"$edit_b1:example.com"));
 		assert!(!event_ids.contains(&"$edit_a1:example.com"));
+	}
+
+	#[test]
+	fn collapse_keeps_state_events_with_replace_relation() {
+		let (count, mut state) = make_pdu("$state1:example.com", 2000, Some("$msg1:example.com"));
+		state.kind = ruma::events::TimelineEventType::RoomTopic;
+		state.state_key = Some("".into());
+
+		let events = vec![
+			make_pdu("$msg1:example.com", 1000, None),
+			(count, state),
+			make_pdu("$edit1:example.com", 3000, Some("$msg1:example.com")),
+		];
+
+		let result = collapse_superseded_edits(events);
+		assert_eq!(result.len(), 3);
+		assert_eq!(result[1].1.event_id.as_str(), "$state1:example.com");
 	}
 
 	#[test]
