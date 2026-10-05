@@ -18,7 +18,10 @@ use tuwunel_database::Json;
 
 use crate::{
 	Services,
-	rooms::{short::ShortRoomId, threads::thread_root},
+	rooms::{
+		short::ShortRoomId,
+		threads::{MAX_LATEST_REPLY_SCAN, thread_root},
+	},
 	test_utils::fixture,
 };
 
@@ -238,6 +241,38 @@ async fn redacting_the_latest_reply_shows_the_newest_remaining_one() -> Result {
 	room.redact(&second).await?;
 
 	// With no reply left, the summary goes, as on Synapse.
+	assert!(
+		room.stored(&root).await?.1["unsigned"]
+			.get("m.relations")
+			.is_none()
+	);
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn replacing_the_latest_reply_searches_only_the_newest_relations() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let room = Room::new(&fixture.services).await?;
+	let [root, old, newest] = ["root", "old", "newest"].map(id);
+	let scan: u64 = MAX_LATEST_REPLY_SCAN.try_into()?;
+
+	room.append(1, &root, text()).await?;
+	room.append(2, &old, thread(&root)).await?;
+
+	for count in 3..scan + 3 {
+		room.append(count, &id(&format!("edit-{count}")), edit(&root))
+			.await?;
+	}
+
+	room.append(scan + 3, &newest, thread(&root))
+		.await?;
+	room.redact(&newest).await?;
+
+	// The older reply lies beyond the search, so the summary goes.
 	assert!(
 		room.stored(&root).await?.1["unsigned"]
 			.get("m.relations")
