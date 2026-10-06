@@ -183,6 +183,7 @@ pub use self::{
 	keys::{claim_keys_helper, get_keys_helper},
 	message::{MessagesArgs, get_messages, with_membership},
 	notice::{notice_tag, room_is_notice},
+	read_marker::room_event_pdu_id,
 	space::{HierarchyArgs, get_client_hierarchy},
 	sync::calculate_heroes,
 };
