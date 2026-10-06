@@ -223,6 +223,7 @@ Files:
 
 Behavior:
 - Adds `/sync` timeline compaction for superseded non-state `m.replace` events.
+  Redactions are never compacted, even when their content claims a relation.
 - Adds a background purge worker that deletes old superseded edit events from
   storage and indexes, retaining the newest eligible edit per (room, target,
   sender). Candidates and originals must be non-state events with matching
