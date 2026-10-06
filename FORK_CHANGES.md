@@ -83,6 +83,15 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Federated key queries keep only the answering server's users
+
+A remote server's `/user/keys/query` answer was taken as a whole, so entries
+naming users of other servers, local users included, had their master key
+stored as that user's and replaced the local keys in the client's response.
+Entries whose user does not belong to the answering server are now dropped, as
+the device list and signing key update EDUs already do. Upstream has the same
+bug. File: `src/api/client/keys/get_keys.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
