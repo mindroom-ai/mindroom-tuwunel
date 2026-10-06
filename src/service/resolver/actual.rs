@@ -448,18 +448,24 @@ fn validate_dest_ip_literal(&self, dest: &ServerName) -> Result {
 		dest.is_ip_literal() || !IPAddress::is_valid(dest.host()),
 		"Destination is not an IP literal."
 	);
-	let ip = IPAddress::parse(dest.host()).map_err(|e| {
-		err!(BadServerResponse(debug_error!("Failed to parse IP literal from string: {e}")))
-	})?;
+	let host = dest.host();
+	let ip: IpAddr = host
+		.strip_prefix('[')
+		.and_then(|host| host.strip_suffix(']'))
+		.unwrap_or(host)
+		.parse()
+		.map_err(|e| {
+			err!(BadServerResponse(debug_error!("Failed to parse IP literal from string: {e}")))
+		})?;
 
-	self.validate_ip(&ip)?;
+	self.validate_ip(ip)?;
 
 	Ok(())
 }
 
 #[implement(super::Service)]
-pub(crate) fn validate_ip(&self, ip: &IPAddress) -> Result {
-	if !self.services.client.valid_cidr_range(ip) {
+fn validate_ip(&self, ip: IpAddr) -> Result {
+	if !self.services.client.valid_cidr_range_ip(ip) {
 		return Err!(BadServerResponse("Not allowed to send requests to this IP"));
 	}
 

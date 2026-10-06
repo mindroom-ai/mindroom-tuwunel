@@ -199,12 +199,12 @@ fn state_coverage_resolves_wildcards_and_own_user() {
 	let kind = StateEventType::BeaconInfo;
 
 	for key in ["*", "$ME", user.as_str()] {
-		let previous = [required_state_hash(&kind, key)];
+		let previous = [required_state_hash(&kind, key)].into();
 
 		assert!(state_was_requested(&previous, &kind, user.as_str(), user));
 	}
 
-	let previous = [required_state_hash(&kind, "$ME")];
+	let previous = [required_state_hash(&kind, "$ME")].into();
 
 	assert!(!state_was_requested(&previous, &kind, "@other:example.com", user));
 	assert!(!state_was_requested(
@@ -219,11 +219,26 @@ fn state_coverage_resolves_wildcards_and_own_user() {
 fn lazy_membership_does_not_claim_general_state_coverage() {
 	let user = user_id!("@share:example.com");
 	let kind = StateEventType::RoomMember;
-	let previous = [required_state_hash(&kind, "$LAZY")];
+	let previous = [required_state_hash(&kind, "$LAZY")].into();
 	let details = (0, [(kind.clone(), "$LAZY".into())].into());
 
 	assert!(room_config(&details).1.is_empty());
 	assert!(!state_was_requested(&previous, &kind, user.as_str(), user));
+}
+
+#[test]
+fn state_coverage_lookup_handles_many_selectors() {
+	let user = user_id!("@share:example.com");
+	let kind = StateEventType::RoomName;
+	let keys: Vec<String> = (0..100_000).map(|key| key.to_string()).collect();
+	let previous: HashSet<_> = keys
+		.iter()
+		.map(|key| required_state_hash(&kind, key))
+		.collect();
+
+	for key in &keys {
+		assert!(state_was_requested(&previous, &kind, key, user));
+	}
 }
 
 fn timeline(positions: &[u64]) -> Vec<(PduCount, ())> {

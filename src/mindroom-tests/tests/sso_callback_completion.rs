@@ -34,7 +34,7 @@ mod tests {
 	/// it still compiles, so these drive the real router (redirect -> callback)
 	/// to catch that.
 	///
-	/// The three scenarios run against three separate providers/identities in a
+	/// The login scenarios run against separate providers/identities in a
 	/// single server, because each `with_services` initializes the global
 	/// tracing subscriber and a test binary can only do that once.
 	#[test]
@@ -51,6 +51,8 @@ mod tests {
 		// Scenario C: a self-deactivated account is reactivated on re-login.
 		let reactivate =
 			harness.mock_server(idp_router("sub-self", "reusethree@example.test"))?;
+		// Scenario E: a locked account is rejected on re-login.
+		let locked = harness.mock_server(idp_router("sub-locked", "locked@example.test"))?;
 
 		harness
 			.args
@@ -65,6 +67,10 @@ mod tests {
 			"reactivate-client",
 			&reactivate.base_url,
 		));
+		harness
+			.args
+			.option
+			.extend(provider_options("locked", "locked-client", &locked.base_url));
 
 		let result = harness.with_services(async |services| {
 			let (state, _guard) = tuwunel_api::router::state::create(services.clone());
@@ -248,12 +254,34 @@ mod tests {
 				"serialized-second",
 			);
 
+			// --- Scenario E: locked accounts cannot re-login -------------------
+			let locked_user = user_id!("@locked:localhost");
+			let (_e1, locked_status1, _el1) = drive_login(&router, "locked-client").await;
+			assert_eq!(locked_status1, StatusCode::FOUND, "first locked login registers");
+
+			services
+				.users
+				.set_locked(locked_user, &services.globals.server_user);
+
+			let (_e2, locked_status2, locked_location2) =
+				drive_login(&router, "locked-client").await;
+			assert_eq!(
+				locked_status2,
+				StatusCode::UNAUTHORIZED,
+				"a locked account must not complete SSO login: {locked_location2:?}",
+			);
+			assert!(
+				!has_login_token(locked_location2.as_ref()),
+				"a locked account's login must not mint a loginToken: {locked_location2:?}",
+			);
+
 			Ok(())
 		});
 
 		reuse.handle.abort();
 		admin.handle.abort();
 		reactivate.handle.abort();
+		locked.handle.abort();
 		result
 	}
 
