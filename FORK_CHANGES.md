@@ -83,6 +83,17 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Leaving without a membership records no departure
+
+When room state held no member event for the user, or a `leave` or `ban` one,
+`/leave` still wrote a leave row at a fresh stream position. A user who had
+never joined then got the room in `/sync` as a left room, with its recent
+timeline and current state, and a kicked or banned user's departure moved
+forward past the events their removal hides. The leave row is now written only
+when it clears a cached join, invite or knock. Upstream has the same bug.
+Files: `src/service/membership/leave.rs`; test in
+`src/main/tests/leave_without_membership.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
