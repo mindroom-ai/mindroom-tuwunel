@@ -48,6 +48,16 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### UIAA keeps only small request bodies for pending sessions
+
+A UIAA request sent without `auth` keeps its JSON body in memory so the
+follow-up request can omit fields, and nothing removed a body again, not even
+when its session finished. The bodies now live in an LRU of 1024 sessions,
+bodies over 4 KiB of serialized JSON are not kept (the client resends the full
+request, as after a restart), and a finished session releases its body.
+Upstream has the same bug. Files: `src/service/uiaa/mod.rs`; test in
+`src/service/uiaa/tests.rs`.
+
 ### `/context` keeps current state from requesters who may not read it
 
 A room's create event and backfilled events have no state snapshot, so
