@@ -35,6 +35,18 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Deleting an alias by power level takes room membership
+
+`DELETE /directory/room/{alias}` let anyone holding the room's
+`m.room.canonical_alias` power level delete an alias they did not create,
+whether or not they were in the room. A user who had left, been kicked or been
+banned with a level still on record, or any local user for a room whose
+`users_default` meets the level, could delete its aliases. Apart from the alias
+creator and server admins, the user must now also be joined to the room, as
+Synapse requires. Upstream has the same bug. File:
+`src/service/rooms/alias/mod.rs`; test in
+`src/main/tests/alias_delete_membership.rs`.
+
 ### Auth chain fetch walks are bounded
 
 Fetching the missing auth events of an incoming event walked the remote server's
