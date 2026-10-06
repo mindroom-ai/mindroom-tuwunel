@@ -48,6 +48,15 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### Banned rooms refuse member events sent through `/state`
+
+`/join`, `/knock` and `/invite` refuse a room the server admin banned, but the
+same member events sent through `PUT /rooms/{id}/state/m.room.member/{user}`
+were accepted. A non-admin's member event in a banned room is now refused with
+`M_FORBIDDEN` unless it is a leave or a ban, as in Synapse; this includes a
+per-room profile update. Upstream has the same bug. Files:
+`src/api/client/state.rs`; test in `src/main/tests/state_member_banned_room.rs`.
+
 ### A withdrawn knock does not move a former member's departure
 
 Under `shared` history visibility a former member reads events up to their
