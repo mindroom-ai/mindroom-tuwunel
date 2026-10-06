@@ -511,7 +511,8 @@ fn finalize_login_redirect(
 /// Whether a login token may go to `redirect_url` without asking the user.
 ///
 /// The OIDC completion on this server's client origin asks for itself; any
-/// other target is vetted as an OIDC client's redirect target would be.
+/// other target is vetted as an OIDC client's redirect target would be, or
+/// listed in `sso_trusted_redirect_hosts`.
 fn redirect_vetted(services: &Services, redirect_url: &Url) -> bool {
 	let own_origin = services
 		.config
@@ -551,6 +552,11 @@ fn confirm_login_redirect(
 	// A javascript: link would run on this page rather than leave it.
 	if redirect_url.scheme() == "javascript" {
 		return Err!(Request(InvalidParam("Unsupported redirect_url scheme.")));
+	}
+
+	// Userinfo would put a name other than the real host first on the page.
+	if !redirect_url.username().is_empty() || redirect_url.password().is_some() {
+		return Err!(Request(InvalidParam("redirect_url must not contain userinfo.")));
 	}
 
 	let mut target = redirect_url.clone();

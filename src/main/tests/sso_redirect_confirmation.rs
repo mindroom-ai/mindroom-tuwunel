@@ -137,9 +137,11 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		assert_eq!(token_owner(services, &destination).await?, carol);
 	}
 
-	let response = sign_in(&client, base, "javascript:alert(1)//", "carol").await?;
+	for target in ["javascript:alert(1)//", "https://web.example@unlisted.example/"] {
+		let response = sign_in(&client, base, target, "carol").await?;
 
-	assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+		assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+	}
 
 	Ok(())
 }
