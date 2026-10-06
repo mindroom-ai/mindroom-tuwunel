@@ -14,7 +14,7 @@ use ruma::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{Connection, Lists, Room, Subscriptions};
+use super::{Connection, Lists, MAX_SYNC_FIELDS, Room, Subscriptions};
 
 const LIST_ID: &str = "main";
 
@@ -505,6 +505,21 @@ fn widened_fields_clear_once_acknowledged() {
 
 	assert!(!conn.profiles_fields_owed());
 	assert!(!conn.profiles_fields_widened);
+}
+
+#[test]
+fn a_long_field_list_keeps_only_the_first_fields() {
+	let fields: Vec<ProfileFieldName> = (0..=MAX_SYNC_FIELDS)
+		.map(|i| format!("org.example.field{i}").into())
+		.collect();
+
+	let mut conn = Connection::default();
+
+	conn.update_cache(&request_with_fields(&fields));
+
+	let cached = conn.extensions.profiles.fields.as_deref();
+
+	assert_eq!(cached, Some(&fields[..MAX_SYNC_FIELDS]));
 }
 
 #[test]

@@ -84,6 +84,14 @@ pub(crate) async fn room_initial_sync_route(
 		.wide_and_then(|item| visibility_filter(&services, item, sender_user).map(Ok))
 		.ready_try_filter_map(Ok)
 		.try_take(limit)
+		.wide_and_then(async |(count, pdu)| {
+			let pdu = services
+				.pdu_metadata
+				.bundle_aggregations(sender_user, pdu)
+				.await;
+
+			Ok((count, pdu))
+		})
 		.try_collect()
 		.map_ok(|mut vec: Vec<_>| {
 			vec.reverse();
