@@ -142,6 +142,7 @@ async fn fetch_auth_chain(
 	// c. Ask origin server over federation
 	// We also handle its auth chain here so we don't get a stack overflow in
 	// handle_outlier_pdu.
+	let limit = self.services.server.config.max_fetch_prev_events;
 	let mut events_all = HashSet::new();
 	let mut events_in_reverse_order = Vec::new();
 	let mut todo_auth_events: VecDeque<_> = [event_id.to_owned()].into();
@@ -171,6 +172,11 @@ async fn fetch_auth_chain(
 		if self.services.server.check_running().is_err() {
 			debug_warn!(?next_id, "Server shutting down");
 			break;
+		}
+
+		if events_in_reverse_order.len() >= usize::from(limit) {
+			debug_warn!(?limit, "Max auth chain fetch limit reached for {event_id}");
+			return (event_id.to_owned(), None, Vec::new());
 		}
 
 		debug!("Fetching {next_id} over federation.");

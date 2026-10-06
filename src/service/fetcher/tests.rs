@@ -11,7 +11,7 @@ use tokio::{
 	sync::Notify,
 	task::{spawn, yield_now},
 };
-use tuwunel_core::err;
+use tuwunel_core::{err, matrix::pdu::MAX_PDU_BYTES};
 
 use super::*;
 use crate::federation::Candidates;
@@ -62,6 +62,9 @@ enum Behavior {
 
 	/// Valid empty JSON array.
 	EmptyBatch,
+
+	/// Valid JSON object larger than the PDU size limit.
+	Oversized,
 
 	/// Block until released, then answer with garbage.
 	BlockGarbage,
@@ -188,6 +191,10 @@ impl Transport for MockTransport {
 			| Behavior::Fail => Err(err!("mock transport failure")),
 			| Behavior::Batch => Ok(Bytes::from_static(BATCH_BODY)),
 			| Behavior::EmptyBatch => Ok(Bytes::from_static(b"[]")),
+			| Behavior::Oversized => {
+				let pad = "x".repeat(MAX_PDU_BYTES);
+				Ok(Bytes::from(format!(r#"{{"pad":"{pad}"}}"#)))
+			},
 			| Behavior::BlockGarbage => {
 				let mut guard = CancelGuard {
 					dropped: &self.dropped,
@@ -393,6 +400,28 @@ async fn fails_over_past_poisoned_server() {
 
 	assert_eq!(outcome.origin, b);
 	assert_eq!(mock.calls(), vec![a, b], "poisoned server attempted before the good one");
+}
+
+#[tokio::test]
+async fn fails_over_past_oversized_event() {
+	let a = server_name!("a.test.local").to_owned();
+	let b = server_name!("b.test.local").to_owned();
+	let event = event_id!("$ev:test.local").to_owned();
+
+	let mock = Arc::new(MockTransport::new([
+		(a.clone(), Behavior::Oversized),
+		(b.clone(), Behavior::Good),
+	]));
+	let select = Arc::new(MockSelect::new([(event.clone(), vec![a.clone(), b.clone()])]));
+	let svc = Service::test_spawn(mock.clone(), select, 4);
+
+	let outcome = svc
+		.fetch(test_opts(&event))
+		.await
+		.expect("fails over to the good server");
+
+	assert_eq!(outcome.origin, b, "the oversized event is a miss");
+	assert_eq!(mock.calls(), vec![a, b], "oversized server attempted before the good one");
 }
 
 #[tokio::test]
