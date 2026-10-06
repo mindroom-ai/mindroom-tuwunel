@@ -560,8 +560,11 @@ been removed from a room still got a thread's newest reply and the newest edit
 of an event they could read, even when those were sent after they left. A
 requester who is no longer in the room now gets an edit only when the room's
 history visibility lets them see it, and no thread summary when it hides the
-latest reply. Upstream has the same bug. File:
-`src/service/rooms/pdu_metadata/bundling.rs`; test in
+latest reply. `/rooms/{roomId}/initialSync` and `/notifications`, which served
+the stored event without this step, now apply it as well. Upstream has the same
+bug.
+Files: `src/service/rooms/pdu_metadata/bundling.rs`,
+`src/api/client/{room/initial_sync.rs,push/notifications.rs}`; test in
 `src/main/tests/bundled_relations_after_leave.rs`.
 
 ### A device's tokens rotate under its device lock
