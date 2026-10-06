@@ -6,7 +6,7 @@ use std::{borrow::Cow, collections::BTreeMap, net::IpAddr, time::Duration};
 use axum::extract::State;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as b64};
-use futures::{FutureExt, TryFutureExt, future::try_join};
+use futures::{TryFutureExt, future::try_join};
 use reqwest::header::{CONTENT_TYPE, HeaderValue};
 use ruma::{
 	Mxc, OwnedMxcUri, OwnedUserId, ServerName, UserId,
@@ -24,7 +24,6 @@ use tuwunel_core::{
 	itertools::Itertools,
 	utils,
 	utils::{
-		OptionExt,
 		content_disposition::make_content_disposition,
 		hash::sha256,
 		result::{FlatOk, LogErr},
@@ -146,10 +145,9 @@ pub(crate) async fn sso_login_with_provider_route(
 ) -> Result<sso_login_with_provider::v3::Response> {
 	let idp_id = body.body.idp_id;
 	let redirect_url = body.body.redirect_url;
-	let login_token = body.body.login_token;
 	let action = body.body.action;
 
-	handle_sso_login(&services, &client, idp_id, redirect_url, login_token, action).await
+	handle_sso_login(&services, &client, idp_id, redirect_url, None, action).await
 }
 
 async fn handle_sso_login(
@@ -157,7 +155,7 @@ async fn handle_sso_login(
 	_client: &IpAddr,
 	idp_id: String,
 	redirect_url: String,
-	login_token: Option<String>,
+	user_id: Option<OwnedUserId>,
 	action: Option<SsoRedirectAction>,
 ) -> Result<sso_login_with_provider::v3::Response> {
 	let redirect_url: Url = redirect_url.parse().map_err(|e| {
@@ -263,12 +261,7 @@ async fn handle_sso_login(
 			.map(timepoint_from_now)
 			.transpose()?,
 
-		user_id: login_token
-			.as_deref()
-			.map_async(|token| services.users.find_from_login_token(token))
-			.map(FlatOk::flat_ok)
-			.await,
-
+		user_id,
 		..Default::default()
 	};
 
@@ -394,9 +387,28 @@ pub(crate) async fn sso_callback_route(
 		return handle_uiaa(&services, &user_id, cookie, redirect_url).await;
 	}
 
-	let next_idp_url = chain_next_idp_url(&services, &provider, &session, idp_id);
+	let redirect_url = session
+		.redirect_url
+		.ok_or_else(|| err!(Request(InvalidParam("Missing redirect URL in session data"))))?;
 
-	let location = finalize_login_redirect(&services, &session, next_idp_url, &user_id)?;
+	if let Some(next_idp_id) = chain_next_idp_id(&services, idp_id) {
+		let next = handle_sso_login(
+			&services,
+			&client,
+			next_idp_id,
+			redirect_url.into(),
+			Some(user_id),
+			None,
+		)
+		.await?;
+
+		return Ok(sso_callback::unstable::Response {
+			location: next.location,
+			cookie: next.cookie,
+		});
+	}
+
+	let location = finalize_login_redirect(&services, redirect_url, &user_id);
 
 	Ok(sso_callback::unstable::Response { location, cookie: Some(cookie) })
 }
@@ -455,12 +467,11 @@ fn apply_token_response(session: Session, token: TokenResponse) -> Result<Sessio
 	})
 }
 
-fn chain_next_idp_url(
-	services: &Services,
-	provider: &Provider,
-	session: &Session,
-	idp_id: &str,
-) -> Option<Url> {
+/// The provider authorized next in a multi-provider flow, if any.
+///
+/// The browser goes straight on to it carrying the user just authorized, so
+/// the association never travels as a bearer credential in a URL.
+fn chain_next_idp_id(services: &Services, idp_id: &str) -> Option<String> {
 	services
 		.config
 		.identity_provider
@@ -469,41 +480,24 @@ fn chain_next_idp_url(
 		.skip_while(|idp| idp.id() != idp_id)
 		.nth(1)
 		.map(IdentityProvider::id)
-		.and_then(|next_idp| {
-			provider.callback_url.clone().map(|mut url| {
-				let path = format!("/_matrix/client/v3/login/sso/redirect/{next_idp}");
-				url.set_path(&path);
-
-				if let Some(redirect_url) = session.redirect_url.as_ref() {
-					url.query_pairs_mut()
-						.append_pair("redirectUrl", redirect_url.as_str());
-				}
-
-				url
-			})
-		})
+		.map(ToOwned::to_owned)
 }
 
 fn finalize_login_redirect(
 	services: &Services,
-	session: &Session,
-	next_idp_url: Option<Url>,
+	mut redirect_url: Url,
 	user_id: &UserId,
-) -> Result<String> {
+) -> String {
 	let login_token = utils::random_string(TOKEN_LENGTH);
 	let _login_token_expires_in = services
 		.users
 		.create_login_token(user_id, &login_token);
 
-	let location = next_idp_url
-		.or_else(|| session.redirect_url.clone())
-		.ok_or_else(|| err!(Request(InvalidParam("Missing redirect URL in session data"))))?
+	redirect_url
 		.query_pairs_mut()
-		.append_pair("loginToken", &login_token)
-		.finish()
-		.to_string();
+		.append_pair("loginToken", &login_token);
 
-	Ok(location)
+	redirect_url.into()
 }
 
 /// Map an authenticated SSO/OIDC identity onto a local account and return the
