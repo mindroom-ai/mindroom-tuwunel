@@ -92,6 +92,18 @@ were accepted. A non-admin's member event in a banned room is now refused with
 per-room profile update. Upstream has the same bug. Files:
 `src/api/client/state.rs`; test in `src/main/tests/state_member_banned_room.rs`.
 
+### A withdrawn knock does not move a former member's departure
+
+Under `shared` history visibility a former member reads events up to their
+latest leave. Knocking again after leaving or being kicked dropped that leave,
+and withdrawing the knock recorded a new one, so the user then read everything
+sent since their removal; rejecting a later invite did the same. A former
+member now sees an event they were not joined for only if they joined at or
+after it, found by walking back from their current membership event to their
+last join. Upstream has the same bug. File:
+`src/service/rooms/state_accessor/user_can.rs`; test in
+`src/main/tests/knock_withdrawal_history.rs`.
+
 ### Left rooms carry state only for users who joined
 
 A user who withdrew a knock or rejected an invite has the room among their left
@@ -333,6 +345,17 @@ Entries whose user does not belong to the answering server are now dropped, as
 the device list and signing key update EDUs already do. Upstream has the same
 bug. File: `src/api/client/keys/get_keys.rs`.
 
+### Remote hierarchy answers leave summaries of local rooms alone
+
+A remote server's `/hierarchy` answer for a space was cached for every child
+it listed, so the cached summary (name, topic, avatar, join rule, member count)
+of a room this server is in could be replaced by the remote's version, which
+`/hierarchy` then served until the room's state changed or the entry expired.
+Children this server is in are now skipped when caching such an answer; their
+summaries come from local state. Upstream has the same bug. File:
+`src/service/rooms/spaces/federation.rs`; test in
+`src/service/rooms/spaces/tests.rs`.
+
 ### Sliding Sync caps the timeline limit
 
 Sliding Sync lists and room subscriptions passed their `timeline_limit` to the
@@ -353,6 +376,18 @@ sends ephemeral events only for joined rooms. The user's own private read
 receipt and room account data are unchanged. Upstream has the same bug. Files:
 `src/api/client/sync/v5/{range.rs,rooms.rs,extensions/typing.rs}`; test in
 `src/main/tests/sync_v5_departed_ephemeral.rs`.
+
+### Former members read the room state from when they left
+
+`/rooms/{roomId}/state`, `/state/{eventType}/{stateKey}` and `/members` admit
+a former member under `shared` history visibility, but answered from the
+room's current state, so a user who had left or been kicked or banned kept
+seeing later renames, topics, power levels and new members. A former member
+now reads the state as of their leave or ban, as the spec requires and as
+`/initialSync` already did. Upstream has the same bug. Files:
+`src/service/rooms/state_accessor/user_can.rs`,
+`src/api/client/{state.rs,membership/members.rs,room/initial_sync.rs}`; test
+in `src/main/tests/state_departed_member.rs`.
 
 ### UIAA keeps only small request bodies for pending sessions
 
@@ -385,6 +420,31 @@ browser presenting it. The callback now starts the next provider's sign-in
 itself with the account it just signed in, and the endpoint ignores
 `loginToken`. Upstream has the same bug. File:
 `src/api/client/session/sso.rs`; test in `src/main/tests/sso_login_redirect.rs`.
+
+### Bundled aggregations follow the requester's visibility
+
+A served event's bundled `m.thread` summary and `m.replace` edits were added
+without checking whether the requester may see them, so a user who had left or
+been removed from a room still got a thread's newest reply and the newest edit
+of an event they could read, even when those were sent after they left. A
+requester who is no longer in the room now gets an edit only when the room's
+history visibility lets them see it, and no thread summary when it hides the
+latest reply. Upstream has the same bug. File:
+`src/service/rooms/pdu_metadata/bundling.rs`; test in
+`src/main/tests/bundled_relations_after_leave.rs`.
+
+### A device's tokens rotate under its device lock
+
+Refresh-token rotation read the token a device points at, removed it, and wrote
+the new one without a lock, so two concurrent refreshes of one token could each
+write a refresh token while the device kept pointing at only one. Logout and
+device removal delete only the token the device points at, so the other one
+stayed. A refresh already in flight could also issue tokens to a device removed
+meanwhile. `set_access_token` now takes the per-device lock that
+`remove_device` already holds and refuses a device that no longer exists, so
+concurrent refreshes rotate one after another. Upstream has the same bug. File:
+`src/service/users/device.rs`; test in
+`src/main/tests/refresh_removed_device.rs`.
 
 ### SSO username fallback skips accounts linked to another identity
 

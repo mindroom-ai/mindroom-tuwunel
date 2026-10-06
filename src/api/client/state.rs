@@ -1,5 +1,5 @@
 use axum::extract::State;
-use futures::{FutureExt, TryFutureExt, TryStreamExt};
+use futures::{FutureExt, StreamExt, TryFutureExt};
 use ruma::{
 	CanonicalJsonObject, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomAliasId, RoomId,
 	UserId,
@@ -27,7 +27,7 @@ use tuwunel_core::{
 		Event,
 		pdu::{PduBuilder, PduEvent},
 	},
-	utils::{BoolExt, stream::TryBroadbandExt},
+	utils::{BoolExt, stream::BroadbandExt},
 };
 use tuwunel_service::Services;
 
@@ -98,16 +98,19 @@ pub(crate) async fn get_state_events_route(
 		.is_encrypted_room(&body.room_id)
 		.await;
 
+	let shortstatehash = services
+		.state_accessor
+		.user_visible_shortstatehash(sender_user, &body.room_id)
+		.await?;
+
 	let room_state = services
 		.state_accessor
-		.room_state_full_pdus(&body.room_id)
-		.map_ok(Event::into_pdu)
-		.broad_and_then(async |pdu| {
-			Ok(with_membership(&services, pdu, sender_user, encrypted).await)
-		})
-		.map_ok(Event::into_format)
-		.try_collect()
-		.await?;
+		.state_full_pdus(shortstatehash)
+		.map(Event::into_pdu)
+		.broad_then(async |pdu| with_membership(&services, pdu, sender_user, encrypted).await)
+		.map(Event::into_format)
+		.collect()
+		.await;
 
 	Ok(get_state_events::v3::Response { room_state })
 }
@@ -136,9 +139,14 @@ pub(crate) async fn get_state_events_for_key_route(
 		))));
 	}
 
+	let shortstatehash = services
+		.state_accessor
+		.user_visible_shortstatehash(sender_user, &body.room_id)
+		.await?;
+
 	let event = services
 		.state_accessor
-		.room_state_get(&body.room_id, &body.event_type, &body.state_key)
+		.state_get(shortstatehash, &body.event_type, &body.state_key)
 		.await
 		.map_err(|e| {
 			err!(Request(NotFound(debug_warn!(
