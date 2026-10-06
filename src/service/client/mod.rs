@@ -136,6 +136,8 @@ fn make_clients(services: &Services) -> Result<Clients> {
 			.pool_max_idle_per_host(0)
 			.redirect(Policy::limited(4))),
 
+		// A redirect target is not checked against `ip_range_denylist` like the
+		// resolved destination is, so federation requests follow no redirects.
 		federation: with!(cb => cb
 			.dns_resolver(Arc::clone(&services.resolver.resolver.hooked))
 			.read_timeout(Duration::from_secs(services.config.federation_timeout))
@@ -143,13 +145,13 @@ fn make_clients(services: &Services) -> Result<Clients> {
 			.pool_idle_timeout(Duration::from_secs(
 				services.config.federation_idle_timeout,
 			))
-			.redirect(Policy::limited(3))),
+			.redirect(Policy::none())),
 
 		synapse: with!(cb => cb
 			.dns_resolver(Arc::clone(&services.resolver.resolver.hooked))
 			.read_timeout(Duration::from_secs(305))
 			.pool_max_idle_per_host(0)
-			.redirect(Policy::limited(3))),
+			.redirect(Policy::none())),
 
 		sender: with!(cb => cb
 			.dns_resolver(Arc::clone(&services.resolver.resolver.hooked))
@@ -159,7 +161,7 @@ fn make_clients(services: &Services) -> Result<Clients> {
 			.pool_idle_timeout(Duration::from_secs(
 				services.config.sender_idle_timeout,
 			))
-			.redirect(Policy::limited(2))),
+			.redirect(Policy::none())),
 
 		appservice: with!(cb => cb
 			.dns_resolver(appservice_resolver(services))
