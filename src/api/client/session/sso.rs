@@ -378,8 +378,6 @@ pub(crate) async fn sso_callback_route(
 	let (user_id, session) =
 		complete_sso_session(&services, &provider, session, userinfo).await?;
 
-	services.users.locked_check(&user_id).await?;
-
 	let cookie = Cookie::build((GRANT_SESSION_COOKIE, EMPTY))
 		.path(grant_session_cookie_path(provider.callback_url.as_ref()))
 		.removal()
@@ -700,6 +698,8 @@ async fn complete_sso_session(
 	if !services.users.is_active_local(&user_id).await {
 		return Err!(Request(UserDeactivated("This user has been deactivated.")));
 	}
+
+	services.users.locked_check(&user_id).await?;
 
 	Ok((user_id, session))
 }

@@ -8,8 +8,8 @@ use std::{
 
 use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt, future::join};
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue, OwnedEventId, OwnedServerName, OwnedUserId, RoomId,
-	RoomOrAliasId, RoomVersionId, UserId,
+	CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, OwnedServerName, OwnedUserId,
+	RoomId, RoomOrAliasId, RoomVersionId, UserId,
 	api::{error::ErrorKind, federation},
 	canonical_json::to_canonical_value,
 	events::{
@@ -22,6 +22,7 @@ use ruma::{
 	},
 	room::{AllowRule, JoinRule},
 	room_version_rules::RoomVersionRules,
+	signatures::Verified,
 };
 use serde_json::value::{RawValue as RawJsonValue, to_raw_value};
 use tuwunel_core::{
@@ -622,20 +623,17 @@ async fn ingest_send_join_state(
 		})
 		.inspect_err(|e| debug_error!("Invalid send_join state event: {e:?}"))
 		.ready_filter_map(Result::ok)
-		.ready_filter_map(|(event_id, value)| {
+		.ready_filter_map(|(event_id, value, verified)| {
 			Pdu::from_object_federation(room_id, &event_id, value, room_version_rules)
 				.inspect_err(|error| {
 					debug_warn!(?event_id, %error, "Invalid PDU in the join response.");
 				})
-				.map(move |(pdu, value)| (event_id, pdu, value))
+				.map(move |(pdu, value)| (event_id, verified, pdu, value))
 				.ok()
 		})
-		.fold(HashMap::new(), async |mut state, (event_id, pdu, value)| {
-			if !self.services.timeline.pdu_exists(&event_id).await {
-				self.services
-					.timeline
-					.add_pdu_outlier(&event_id, &value);
-			}
+		.fold(HashMap::new(), async |mut state, (event_id, verified, pdu, value)| {
+			self.add_send_join_outlier(&event_id, &value, verified)
+				.await;
 
 			if let Some(state_key) = &pdu.state_key {
 				let shortstatekey = self
@@ -675,24 +673,47 @@ async fn ingest_send_join_auth_chain(
 		})
 		.inspect_err(|e| debug_error!("Invalid send_join auth_chain event: {e:?}"))
 		.ready_filter_map(Result::ok)
-		.ready_filter_map(|(event_id, value)| {
+		.ready_filter_map(|(event_id, value, verified)| {
 			Pdu::from_object_federation(room_id, &event_id, value, room_version_rules)
 				.inspect_err(|e| {
 					debug_warn!("Invalid PDU {event_id:?} in send_join auth_chain: {e:?}");
 				})
-				.map(move |(_, value)| (event_id, value))
+				.map(move |(_, value)| (event_id, value, verified))
 				.ok()
 		})
-		.for_each(async |(event_id, value)| {
-			if !self.services.timeline.pdu_exists(&event_id).await {
-				self.services
-					.timeline
-					.add_pdu_outlier(&event_id, &value);
-			}
+		.for_each(async |(event_id, value, verified)| {
+			self.add_send_join_outlier(&event_id, &value, verified)
+				.await;
 		})
 		.await;
 
 	drop(cork);
+}
+
+/// Stores a checked event of the send_join response as an outlier.
+///
+/// An event in the timeline keeps its stored copy, and so does any stored event
+/// whose new copy had to be redacted. A copy whose content matches its hash
+/// replaces an outlier, such as knock state stored unchecked.
+#[implement(Service)]
+async fn add_send_join_outlier(
+	&self,
+	event_id: &EventId,
+	value: &CanonicalJsonObject,
+	verified: Verified,
+) {
+	let timeline = &self.services.timeline;
+	let stored = match verified {
+		| Verified::All => timeline
+			.non_outlier_pdu_exists(event_id)
+			.await
+			.is_ok(),
+		| Verified::Signatures => timeline.pdu_exists(event_id).await,
+	};
+
+	if !stored {
+		timeline.add_pdu_outlier(event_id, value);
+	}
 }
 
 #[implement(Service)]

@@ -31,15 +31,7 @@ async fn send_join_auth_chain_is_checked_before_storing() -> Result {
 	let (unknown_id, unknown) = topic(services, room_id, "unknown")?;
 	let (foreign_id, foreign) = topic(services, room_id!("!other:localhost"), "foreign")?;
 
-	// The send_join path verifies only with keys already in storage.
-	let (key_id, verify_key) = services.server_keys.active_verify_key();
-	let server_name = services.globals.server_name();
-	let mut keys =
-		ServerSigningKeys::new(server_name.to_owned(), MilliSecondsSinceUnixEpoch::now());
-	keys.verify_keys
-		.insert(key_id.to_owned(), verify_key.clone());
-
-	services.db["server_signingkeys"].raw_put(server_name, Json(&keys));
+	store_own_keys(services);
 
 	services
 		.membership
@@ -70,6 +62,52 @@ async fn send_join_auth_chain_is_checked_before_storing() -> Result {
 	assert!(!services.timeline.pdu_exists(&foreign_id).await);
 
 	Ok(())
+}
+
+/// A send_join state event replaces the copy knock state stored for it.
+///
+/// Knock state is stored as the answering server sent it, unchecked, so the
+/// joined room's copy, whose content matches its hash, takes its place.
+#[tokio::test]
+async fn send_join_state_replaces_knock_state() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let room_id = room_id!("!join:localhost");
+	let version = RoomVersionId::V11;
+	let rules = room_version::rules(&version)?;
+	let (event_id, event) = topic(services, room_id, "joined")?;
+
+	store_own_keys(services);
+
+	services
+		.timeline
+		.add_pdu_outlier(&event_id, &serde_json::from_value(altered(&event))?);
+
+	services
+		.membership
+		.ingest_send_join_state(room_id, &version, &rules, &[to_raw_value(&event)?])
+		.await;
+
+	let stored: Value = services.timeline.get_outlier(&event_id).await?;
+	assert_eq!(stored["content"], json!({ "topic": "joined" }));
+
+	Ok(())
+}
+
+/// Stores this server's signing key, as the send_join path verifies only with
+/// keys already in storage.
+fn store_own_keys(services: &Services) {
+	let (key_id, verify_key) = services.server_keys.active_verify_key();
+	let server_name = services.globals.server_name();
+	let mut keys =
+		ServerSigningKeys::new(server_name.to_owned(), MilliSecondsSinceUnixEpoch::now());
+	keys.verify_keys
+		.insert(key_id.to_owned(), verify_key.clone());
+
+	services.db["server_signingkeys"].raw_put(server_name, Json(&keys));
 }
 
 /// A topic event signed by this server, as another server would relay it.
