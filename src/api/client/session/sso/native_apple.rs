@@ -86,6 +86,8 @@ struct AppleIdTokenClaims {
 struct CachedAppleJwks {
 	jwks: AppleJwks,
 	fetched_at: Instant,
+	/// Last refresh attempt for an unknown key id, successful or not.
+	refresh_attempted_at: Instant,
 }
 
 fn apple_native_audiences(provider: &Provider) -> BTreeSet<String> {
@@ -337,9 +339,11 @@ async fn cached_apple_jwks(services: &Services) -> Result<AppleJwks> {
 	}
 
 	let jwks = fetch_apple_jwks(services).await?;
+	let now = Instant::now();
 	*cached = Some(CachedAppleJwks {
 		jwks: jwks.clone(),
-		fetched_at: Instant::now(),
+		fetched_at: now,
+		refresh_attempted_at: now,
 	});
 
 	Ok(jwks)
@@ -351,19 +355,30 @@ async fn refresh_apple_jwks_from_cache(
 ) -> Result<AppleJwks> {
 	let mut cached = cache.write().await;
 
-	// Keys fetched within the interval (including by a request this one waited
-	// behind) are current, so an unknown key id must not trigger another fetch.
+	// A refresh attempted within the interval (including by a request this one
+	// waited behind, and including a failed one) is current, so an unknown key id
+	// must not trigger another fetch.
 	if let Some(cached) = cached
 		.as_ref()
-		.filter(|cached| cached.fetched_at.elapsed() < APPLE_JWKS_MIN_REFRESH_INTERVAL)
+		.filter(|cached| cached.refresh_attempted_at.elapsed() < APPLE_JWKS_MIN_REFRESH_INTERVAL)
 	{
 		return Ok(cached.jwks.clone());
 	}
 
-	let jwks = fetch.await?;
+	let jwks = match fetch.await {
+		| Ok(jwks) => jwks,
+		| Err(error) => {
+			if let Some(cached) = cached.as_mut() {
+				cached.refresh_attempted_at = Instant::now();
+			}
+			return Err(error);
+		},
+	};
+	let now = Instant::now();
 	*cached = Some(CachedAppleJwks {
 		jwks: jwks.clone(),
-		fetched_at: Instant::now(),
+		fetched_at: now,
+		refresh_attempted_at: now,
 	});
 
 	Ok(jwks)
@@ -561,6 +576,7 @@ mod tests {
 		let cache = RwLock::new(Some(CachedAppleJwks {
 			jwks: apple_test_jwks(&["cached-key"]),
 			fetched_at: Instant::now(),
+			refresh_attempted_at: Instant::now(),
 		}));
 		let fetches = AtomicUsize::new(0);
 
@@ -583,6 +599,7 @@ mod tests {
 		let cache = RwLock::new(Some(CachedAppleJwks {
 			jwks: apple_test_jwks(&["cached-key"]),
 			fetched_at,
+			refresh_attempted_at: fetched_at,
 		}));
 		let fetches = AtomicUsize::new(0);
 
@@ -601,6 +618,36 @@ mod tests {
 			.as_ref()
 			.expect("refreshed JWKS should be cached");
 		assert!(apple_jwks_contains_kid(&cached.jwks, "rotated-key"));
+	}
+
+	#[tokio::test]
+	async fn refresh_apple_jwks_failed_fetch_starts_refresh_interval() {
+		let fetched_at = Instant::now()
+			.checked_sub(APPLE_JWKS_MIN_REFRESH_INTERVAL + Duration::from_secs(1))
+			.expect("monotonic clock should be past the refresh interval");
+		let cache = RwLock::new(Some(CachedAppleJwks {
+			jwks: apple_test_jwks(&["cached-key"]),
+			fetched_at,
+			refresh_attempted_at: fetched_at,
+		}));
+		let fetches = AtomicUsize::new(0);
+
+		refresh_apple_jwks_from_cache(&cache, async {
+			fetches.fetch_add(1, Ordering::SeqCst);
+			Err(err!(Request(Unauthorized("Apple JWKS unavailable"))))
+		})
+		.await
+		.expect_err("a failed fetch should be reported");
+
+		let jwks = refresh_apple_jwks_from_cache(&cache, async {
+			fetches.fetch_add(1, Ordering::SeqCst);
+			Ok(apple_test_jwks(&["unused-network-key"]))
+		})
+		.await
+		.expect("a failed fetch should start the refresh interval");
+
+		assert!(apple_jwks_contains_kid(&jwks, "cached-key"));
+		assert_eq!(fetches.load(Ordering::SeqCst), 1);
 	}
 
 	#[test]
