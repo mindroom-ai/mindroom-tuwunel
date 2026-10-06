@@ -86,7 +86,8 @@ struct AppleIdTokenClaims {
 struct CachedAppleJwks {
 	jwks: AppleJwks,
 	fetched_at: Instant,
-	/// Last refresh attempt for an unknown key id, successful or not.
+	/// Last successful fetch or unknown-key-id refresh attempt; bounds refetches
+	/// for unknown key ids.
 	refresh_attempted_at: Instant,
 }
 
@@ -648,6 +649,11 @@ mod tests {
 
 		assert!(apple_jwks_contains_kid(&jwks, "cached-key"));
 		assert_eq!(fetches.load(Ordering::SeqCst), 1);
+		let cached = cache.read().await;
+		let cached = cached
+			.as_ref()
+			.expect("cached keys should be kept after a failed fetch");
+		assert_eq!(cached.fetched_at, fetched_at);
 	}
 
 	#[test]
