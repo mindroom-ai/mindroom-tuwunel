@@ -199,6 +199,18 @@ endpoint; anyone else gets an empty `state`. Upstream has the same bug. Files:
 `src/api/client/context.rs`; test in
 `src/main/tests/context_snapshotless_state.rs`.
 
+### SSO provider chaining does not read `loginToken` from the redirect URL
+
+The legacy `GET /_matrix/client/v3/login/sso/redirect/{idpId}` endpoint read a
+`loginToken` query parameter and linked the identity that signed in next to
+that token's account, ahead of the account the identity was already linked to.
+It served the multi-provider chain, whose callback sent the browser back
+through the endpoint with a fresh token, but nothing tied the token to the
+browser presenting it. The callback now starts the next provider's sign-in
+itself with the account it just signed in, and the endpoint ignores
+`loginToken`. Upstream has the same bug. File:
+`src/api/client/session/sso.rs`; test in `src/main/tests/sso_login_redirect.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
@@ -220,6 +232,7 @@ Files:
 
 Behavior:
 - Adds `/sync` timeline compaction for superseded non-state `m.replace` events.
+  Redactions are never compacted, even when their content claims a relation.
 - Adds a background purge worker that deletes old superseded edit events from
   storage and indexes, retaining the newest eligible edit per (room, target,
   sender). Candidates and originals must be non-state events with matching
@@ -483,6 +496,9 @@ Database-path isolation, pagination bounds, quiet-room full-state sync, and
 stored-key corruption coverage use upstream's native tests under `src/main/tests/`.
 Only the corruption fixture's normal replacement/retry expectations are adapted
 to the fork's immutable-device policy; all corrupt-byte cases remain intact.
+Upstream's `auto_accept_invites.rs` reads the accepted room's `m.direct` once
+after the join, racing the write that follows it; the fork polls for that write
+first.
 
 ## Runtime Configuration
 
