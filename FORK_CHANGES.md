@@ -428,6 +428,9 @@ Database-path isolation, pagination bounds, quiet-room full-state sync, and
 stored-key corruption coverage use upstream's native tests under `src/main/tests/`.
 Only the corruption fixture's normal replacement/retry expectations are adapted
 to the fork's immutable-device policy; all corrupt-byte cases remain intact.
+Upstream's `auto_accept_invites.rs` reads the accepted room's `m.direct` once
+after the join, racing the write that follows it; the fork polls for that write
+first.
 
 ## Runtime Configuration
 
