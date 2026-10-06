@@ -19,6 +19,10 @@ use tuwunel_core::{
 
 use crate::rooms::{short::ShortStateHash, state::RoomMutexGuard};
 
+/// How many of a former member's membership events are walked back to find
+/// their last join; past that they keep only the events they were joined for.
+const MEMBERSHIP_STEPS: usize = 16;
+
 /// Checks if a given user can redact a given event
 ///
 /// If federation is true, it allows redaction events from any user of the
@@ -91,9 +95,9 @@ pub async fn user_can_redact(
 ///
 /// Missing event state is allowed, and missing or invalid history visibility
 /// defaults to `shared`. The `shared` decision also accounts for the user's
-/// membership intervals around the event. Under `shared`, `joined` and
-/// `invited`, the user's own membership event is visible when the membership it
-/// sets qualifies, per the spec's before-or-after rule.
+/// membership intervals around the event. Under `joined` and `invited`, the
+/// user's own membership event is visible when the membership it sets
+/// qualifies, per the spec's before-or-after rule.
 #[implement(super::Service)]
 #[tracing::instrument(skip_all, level = "trace")]
 pub async fn user_can_see_event<Pdu>(&self, user_id: &UserId, pdu: &Pdu) -> bool
@@ -125,13 +129,10 @@ where
 					.user_was_joined(shortstatehash, user_id)
 					.await,
 
-		// Allow the user's own join, or a user who shared the history; an
-		// unrecognized value is treated as shared.
+		// An unrecognized value is treated as shared.
 		| HistoryVisibility::Shared | _ =>
-			matches!(pdu.membership_for(user_id), Some(MembershipState::Join))
-				|| self
-					.user_shared_history(shortstatehash, pdu.room_id(), pdu.event_id(), user_id)
-					.await,
+			self.user_shared_history(shortstatehash, pdu.room_id(), pdu.event_id(), user_id)
+				.await,
 	}
 }
 
@@ -165,8 +166,8 @@ async fn history_visibility_at(
 /// Whether a user may see an event under `shared` history visibility.
 ///
 /// A current member sees the whole room, which the first check answers without
-/// touching room state. A former member keeps events through their latest
-/// leave if it ended a join, and lookup failures deny access.
+/// touching room state. A former member keeps events up to their latest leave
+/// that were sent before their last join, and lookup failures deny access.
 #[implement(super::Service)]
 async fn user_shared_history(
 	&self,
@@ -207,28 +208,47 @@ async fn user_shared_history(
 		return false;
 	}
 
-	// A knock or an invite after the leave drops it, and leaving again records a
-	// later one, so only a leave that ended a join bounds the history. The leave is
-	// read from the room state, as rows written before v1.4.3 have no event at
-	// their count.
-	let Ok(leave_id) = self
-		.room_state_get_id(room_id, &StateEventType::RoomMember, user_id.as_str())
+	// A knock or an invite since the user's last join drops their leave count,
+	// and the next leave records a later one, so walk back from their current
+	// member event to their last join; the event is shared with them if they
+	// joined at or after it.
+	let Ok(mut member) = self
+		.room_state_get(room_id, &StateEventType::RoomMember, user_id.as_str())
 		.await
 	else {
 		return false;
 	};
 
-	let Ok(left_shortstatehash) = self
-		.services
-		.state
-		.pdu_shortstatehash(&leave_id)
-		.await
-	else {
-		return false;
-	};
+	for _ in 0..MEMBERSHIP_STEPS {
+		if member.membership_for(user_id) == Some(MembershipState::Join) {
+			return self
+				.services
+				.timeline
+				.get_pdu_count(member.event_id())
+				.await
+				.is_ok_and(|join_count| join_count >= event_count);
+		}
 
-	self.user_was_joined(left_shortstatehash, user_id)
-		.await
+		let Ok(before) = self
+			.services
+			.state
+			.pdu_shortstatehash(member.event_id())
+			.await
+		else {
+			return false;
+		};
+
+		let Ok(previous) = self
+			.state_get(before, &StateEventType::RoomMember, user_id.as_str())
+			.await
+		else {
+			return false;
+		};
+
+		member = previous;
+	}
+
+	false
 }
 
 /// Whether a user is allowed to see an event, based on

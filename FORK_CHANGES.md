@@ -88,9 +88,10 @@ marker) fixes affected roots. Upstream has the same bug. Files:
 Under `shared` history visibility a former member reads events up to their
 latest leave. Knocking again after leaving or being kicked dropped that leave,
 and withdrawing the knock recorded a new one, so the user then read everything
-sent since their removal; rejecting a later invite did the same. A leave now
-bounds this history only when it ended a join; otherwise the user keeps the
-events sent while they were joined. Upstream has the same bug. File:
+sent since their removal; rejecting a later invite did the same. A former
+member now sees an event they were not joined for only if they joined at or
+after it, found by walking back from their current membership event to their
+last join. Upstream has the same bug. File:
 `src/service/rooms/state_accessor/user_can.rs`; test in
 `src/main/tests/knock_withdrawal_history.rs`.
 
