@@ -5,9 +5,9 @@ use ruma::{
 	profile::ProfileFieldName,
 };
 use serde_json::Value;
-use tuwunel_core::{Result, implement, smallvec::SmallVec, utils::stream::TryReadyExt};
+use tuwunel_core::{Err, Result, implement, smallvec::SmallVec, utils::stream::TryReadyExt};
 
-use super::{Propagation, Service};
+use super::{MAX_PROFILE_SIZE, Propagation, Service, check_profile_key};
 
 type Removed = SmallVec<[ProfileFieldName; 1]>;
 
@@ -15,10 +15,9 @@ type Fields = Vec<(ProfileFieldName, Option<Value>)>;
 
 /// Replaces a remote user's cached profile with the one their server serves.
 ///
-/// Unlike `fetch_remote_profile`, which only adds and overwrites, a cached
-/// field missing from the response is removed, so a value the remote user has
-/// since deleted stops reaching clients. Returns the names of the removed
-/// fields.
+/// A cached field missing from the response is removed, so a value the remote
+/// user has since deleted stops reaching clients. Returns the names of the
+/// removed fields.
 #[implement(Service)]
 #[tracing::instrument(
 	level = "debug",
@@ -47,13 +46,17 @@ pub async fn mirror_remote_profile(&self, user_id: &UserId) -> Result<Removed> {
 ///
 /// Every returned field is written and every cached field the response omits
 /// is deleted in one logged write under the profile lock, so no concurrent
-/// write interleaves and connected clients see the removals.
+/// write interleaves and connected clients see the removals. A response a
+/// local user could not have set, with a field name outside the MSC4133
+/// grammar or over the 64 KiB cap, is refused and the cache is left as it was.
 #[implement(Service)]
 pub(super) async fn mirror_profile(
 	&self,
 	user_id: &UserId,
 	response: Response,
 ) -> Result<Removed> {
+	check_served_profile(&response)?;
+
 	let profile_lock = self.mutex.lock(user_id).await;
 	let removed: Removed = self
 		.try_profile_field_names(user_id)
@@ -71,4 +74,17 @@ pub(super) async fn mirror_profile(
 		.await?;
 
 	Ok(removed)
+}
+
+/// Checks a served profile against the field-name and size limits of a local one.
+fn check_served_profile(response: &Response) -> Result {
+	response
+		.iter()
+		.try_for_each(|(name, _)| check_profile_key(name))?;
+
+	if serde_json::to_vec(&response.data)?.len() > MAX_PROFILE_SIZE {
+		return Err!(Request(ProfileTooLarge("Profile exceeds the maximum size of 64 KiB.")));
+	}
+
+	Ok(())
 }
