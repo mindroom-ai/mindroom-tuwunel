@@ -57,7 +57,7 @@ pub(super) async fn get_summary_and_children_federation(
 			| Err(Fault::Error(error)) => debug!(?error, "federation error"),
 			| Err(fault) => debug!(?fault, "federation error"),
 		})
-		.first_acceptable(|_| true)
+		.first_acceptable(|response| response.room.summary.room_id == current_room)
 		.await
 		.map(|(_, response)| response);
 
