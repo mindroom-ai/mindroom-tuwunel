@@ -308,9 +308,10 @@ Behavior:
 
 ## Temporary upstream backports
 
-These upstream `main` commits are cherry-picked with `git cherry-pick -x`, one
-fork commit each. Drop them at the next rebase onto an upstream release that
-contains them (`99c6c320a` and `f4f5a03f5` are already in `v1.9.2`).
+These upstream `main` commits are cherry-picked with `git cherry-pick -x` and
+squash-merged as one fork commit, whose message keeps each "cherry picked from"
+line. Drop that commit at the next rebase onto an upstream release that contains
+them (`99c6c320a` and `f4f5a03f5` are already in `v1.9.2`).
 
 | Upstream commit | Change |
 | --- | --- |
