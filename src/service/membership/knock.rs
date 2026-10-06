@@ -578,6 +578,12 @@ async fn ingest_send_knock_state(
 			continue;
 		}
 
+		// Forcing this state replays its memberships, and nothing here is
+		// verified; the knock itself sets our user's membership.
+		if event_type == StateEventType::RoomMember {
+			continue;
+		}
+
 		let event_id = gen_event_id(&event, room_version_id)?;
 		let shortstatekey = self
 			.services
@@ -695,3 +701,6 @@ async fn make_knock_request(
 
 	make_knock_response_and_server
 }
+
+#[cfg(test)]
+mod tests;
