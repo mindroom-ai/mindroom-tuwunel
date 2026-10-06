@@ -19,7 +19,7 @@ use tuwunel_core::{
 	Result, debug, debug_warn, defer, err, implement,
 	matrix::{
 		Event, PduEvent,
-		pdu::PrevEvents,
+		pdu::{PrevEvents, check_room_id},
 		room_version::{self, from_create_event},
 	},
 	trace,
@@ -523,6 +523,11 @@ async fn walk_discover(&self, walk: &mut Walk<'_>) -> Result {
 			return Ok(());
 		};
 
+		if check_room_id(&pdu, walk.room_id).is_err() {
+			walk.fallback = Some(Fallback::Error);
+			return Ok(());
+		}
+
 		if walk.nodes.len() >= walk.max_nodes {
 			walk.fallback = Some(Fallback::Ceiling);
 			return Ok(());
@@ -744,6 +749,11 @@ async fn committed_state_after(
 		return None;
 	};
 
+	if check_room_id(&pdu, walk.room_id).is_err() {
+		walk.fallback = Some(Fallback::Error);
+		return None;
+	}
+
 	if let Some(state_key) = pdu.state_key() {
 		let event_type = pdu.event_type().to_cow_str().into();
 		let shortstatekey = self
@@ -796,6 +806,11 @@ async fn memoized_state_after(
 		walk.fallback = Some(Fallback::Error);
 		return None;
 	};
+
+	if check_room_id(&pdu, walk.room_id).is_err() {
+		walk.fallback = Some(Fallback::Error);
+		return None;
+	}
 
 	let before = Arc::new(state);
 	if pdu.state_key().is_none() {

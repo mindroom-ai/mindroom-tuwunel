@@ -3,7 +3,10 @@ use std::collections::{HashMap, hash_map};
 use futures::FutureExt;
 use ruma::{EventId, OwnedEventId, RoomId, RoomVersionId, ServerName, events::StateEventType};
 use serde::Deserialize;
-use tuwunel_core::{Err, Result, debug, debug_warn, err, implement, matrix::Event};
+use tuwunel_core::{
+	Err, Result, debug, debug_warn, err, implement,
+	matrix::{Event, pdu::check_room_id},
+};
 
 use crate::{
 	fetcher::{Op, Opts},
@@ -58,6 +61,8 @@ pub(super) async fn fetch_state(
 
 	let mut state: HashMap<ShortStateKey, OwnedEventId> = HashMap::with_capacity(state_vec.len());
 	for (pdu, _) in state_vec {
+		check_room_id(&pdu, room_id)?;
+
 		let state_key = pdu
 			.state_key()
 			.ok_or_else(|| err!(Database("Found non-state pdu in state events.")))?;
