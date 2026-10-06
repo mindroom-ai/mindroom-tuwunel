@@ -2002,6 +2002,11 @@ pub struct Config {
 	/// a person takes, a server that shows it wants a `login_token_ttl` long
 	/// enough to read the page.
 	///
+	/// The legacy SSO login takes its `redirectUrl` from whoever sent the
+	/// link, so it asks the same way: a login token for a target that is
+	/// neither on the `well_known.client` origin nor vetted as above is handed
+	/// over only from a page naming that target.
+	///
 	/// reloadable: yes
 	/// default: true
 	#[serde(default = "true_fn")]

@@ -83,6 +83,17 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Legacy SSO login asks before an unlisted `redirectUrl`
+
+The legacy SSO callback sent the fresh login token to whatever `redirectUrl`
+the sign-in link named. A target that is neither on the `well_known.client`
+origin nor waived as an OIDC client's redirect would be
+(`oidc_require_client_approval`, `oidc_registration_allowed_redirect_hosts`)
+now gets the token only from a Continue link on a page naming it, and a
+`javascript:` target is refused. Upstream has the same bug. Files:
+`src/api/client/session/sso.rs`, `src/api/router.rs`; test in
+`src/main/tests/sso_redirect_confirmation.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
