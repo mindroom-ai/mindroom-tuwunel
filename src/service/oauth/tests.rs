@@ -3,7 +3,12 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use super::{Ratelimiter, check_bucket_at};
+use serde_json::json;
+
+use super::{
+	GITHUB_LOGIN_ISSUER, Provider, Ratelimiter, check_bucket_at, parse_userinfo,
+	unique_id_iss_sub, unique_id_sub,
+};
 
 #[test]
 fn rate_limiter_evicts_oldest_without_exceeding_cap() {
@@ -37,4 +42,27 @@ fn rate_limiter_evicts_oldest_without_exceeding_cap() {
 
 	assert_eq!(buckets.len(), 2, "existing key must not grow the table");
 	assert!(buckets.contains_key(&retained), "existing hit must not evict another bucket");
+}
+
+#[test]
+fn github_identity_is_keyed_on_the_account_id() {
+	let provider: Provider = serde_json::from_value(json!({
+		"brand": "GitHub",
+		"client_id": "github",
+	}))
+	.expect("valid provider config");
+
+	let identity = |id: u64| {
+		let userinfo = parse_userinfo(&provider, json!({ "login": "alice", "id": id }))
+			.expect("valid GitHub user");
+
+		unique_id_sub((&provider, &userinfo.sub)).expect("identity key")
+	};
+
+	let account_id = unique_id_sub((&provider, "1")).expect("identity key");
+	let login = unique_id_iss_sub((GITHUB_LOGIN_ISSUER, "1")).expect("identity key");
+
+	assert_ne!(identity(1), identity(2), "a reassigned login must not keep the identity");
+	assert_eq!(identity(1), account_id, "the identity must be the account id");
+	assert_ne!(account_id, login, "an account id must not match an all-digit login's key");
 }
