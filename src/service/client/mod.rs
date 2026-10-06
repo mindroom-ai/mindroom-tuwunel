@@ -431,15 +431,6 @@ pub fn valid_cidr_range_remote_addr(&self, url: &Url, remote_addr: SocketAddr) -
 #[inline]
 #[must_use]
 #[implement(Service)]
-pub fn valid_cidr_range(&self, ip: &IPAddress) -> bool {
-	self.cidr_range_denylist
-		.iter()
-		.all(|cidr| !cidr.includes(ip))
-}
-
-#[inline]
-#[must_use]
-#[implement(Service)]
 pub fn valid_cidr_range_ip(&self, ip: IpAddr) -> bool {
 	let addr = ipaddress_from_std(ip);
 	self.cidr_range_denylist

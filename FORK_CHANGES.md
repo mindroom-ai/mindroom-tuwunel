@@ -383,6 +383,18 @@ always refuses `0.0.0.0` and `::`. Upstream has the same default. Files:
 `src/core/config/mod.rs`, `tuwunel-example.toml`; test in
 `src/core/config/tests.rs`.
 
+### Federation parses bracketed IPv6 literals for `ip_range_denylist`
+
+The federation checks of an IP literal destination parsed the host with its
+brackets (`[::1]`), which fails for every IPv6 address. A server name that is
+an IPv6 literal was therefore always refused, and a request to an IPv6 literal
+that a server name delegates to was sent without the denylist check. Both
+checks now parse the address without brackets and use the same address check
+as the other clients, which also matches IPv4-mapped addresses against the
+IPv4 ranges. Upstream has the same bug. Files:
+`src/service/resolver/actual.rs`, `src/service/federation/execute.rs`,
+`src/service/client/mod.rs`; test in `src/service/resolver/tests.rs`.
+
 ### GitHub sign-in uses the account id
 
 GitHub's user API has no `sub`, so a `login` alias made the username the
