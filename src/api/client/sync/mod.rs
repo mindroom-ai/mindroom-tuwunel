@@ -8,13 +8,19 @@ mod v5;
 use futures::{StreamExt, pin_mut};
 use ruma::{
 	OwnedUserId, RoomId, UserId,
-	events::{AnyStrippedStateEvent, TimelineEventType::RoomMember},
+	events::{
+		AnyStrippedStateEvent, TimelineEventType::RoomMember, room::member::MembershipState,
+	},
 	serde::Raw,
 };
 use tuwunel_core::{
 	Error, PduCount, Result, debug_warn, is_equal_to,
 	matrix::{Event, pdu::PduEvent},
-	utils::{ReadyExt, result::LogErr, stream::BroadbandExt},
+	utils::{
+		IterStream, ReadyExt,
+		result::LogErr,
+		stream::{BroadbandExt, WidebandExt},
+	},
 };
 use tuwunel_service::{Services, users::InviteFilter};
 
@@ -23,6 +29,7 @@ pub(crate) use self::{
 	v3::{calculate_heroes, sync_events_route},
 	v5::sync_events_v5_route,
 };
+use crate::client::visibility_filter;
 
 #[derive(Clone, Copy)]
 enum TimelineErrors {
@@ -120,6 +127,18 @@ async fn load_timeline_with_errors(
 	}
 
 	timeline_pdus.reverse();
+
+	// Drop the events the user's history visibility hides, as /messages does.
+	// The user's own leave stays, so a room left from an invite still shows it.
+	let timeline_pdus: Vec<_> = timeline_pdus
+		.into_iter()
+		.stream()
+		.wide_filter_map(async |item| match item.1.membership_for(sender_user) {
+			| Some(MembershipState::Leave) => Some(item),
+			| _ => visibility_filter(services, item, sender_user).await,
+		})
+		.collect()
+		.await;
 
 	// Collapse superseded m.replace events when enabled
 	let timeline_pdus = if services

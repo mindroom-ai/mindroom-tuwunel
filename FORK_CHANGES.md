@@ -83,6 +83,17 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Sync timelines follow history visibility
+
+Legacy `/sync` and sliding sync returned a room's newest events without
+checking history visibility, so a user who joined a `joined` or `invited` room
+received events sent before their join or invite, and a room left by
+rejecting an invite to a `shared` room carried its recent messages. Timeline
+events now pass the per-event check `/messages` uses, except that the user's
+own leave is always kept. `limited` is still decided over the unfiltered
+window. Upstream has the same bug. Files: `src/api/client/sync/mod.rs`; test
+in `src/main/tests/sync_history_visibility.rs`.
+
 ### GitHub sign-in uses the account id
 
 GitHub's user API has no `sub`, so a `login` alias made the username the
