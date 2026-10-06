@@ -83,6 +83,19 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Sliding sync profile changes only for joined rooms
+
+The MSC4262 profiles extension of simplified sliding sync read the profile
+change log of every room in the window and every room the connection had
+seen: rooms the user has left or been removed from, which the connection
+keeps, and rooms they are invited to or have knocked on. Their members'
+profile changes kept arriving after the user left. Rooms in the window now
+follow the required-state rule, as receipts and typing do, and a room known
+only to the connection counts while the user is joined. Upstream main only
+sends users who share a joined room with the requester, but still reads these
+rooms' change logs. Files: `src/api/client/sync/v5/extensions/profiles.rs`;
+test in `src/main/tests/sync_v5_departed_profiles.rs`.
+
 ### Sync timelines follow history visibility
 
 Legacy `/sync` and sliding sync returned a room's newest events without
