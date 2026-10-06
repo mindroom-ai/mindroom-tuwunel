@@ -307,6 +307,18 @@ async fn append_pdu_effects(
 			{
 				self.redact_pdu(redacts_id, pdu, shortroomid, state_lock)
 					.await?;
+
+				// The target's edits hold copies of its content in `m.new_content`.
+				let edits = self
+					.services
+					.pdu_metadata
+					.replacement_ids(redacts_id)
+					.await;
+
+				for edit in &edits {
+					self.redact_pdu(edit, pdu, shortroomid, state_lock)
+						.await?;
+				}
 			}
 		},
 		| TimelineEventType::RoomMember => self.append_member_effects(pdu, count).await?,
