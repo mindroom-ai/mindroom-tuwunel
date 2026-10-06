@@ -46,13 +46,14 @@ pub async fn validate_and_add_event_id(
 ///
 /// The method rejects the event before verification when any required key is
 /// absent. As with [`Self::validate_and_add_event_id`], the sender's `unsigned`
-/// data is dropped and an event whose content hash does not match is redacted.
+/// data is dropped and an event whose content hash does not match is redacted;
+/// [`Verified::Signatures`] reports the redaction.
 #[implement(super::Service)]
 pub async fn validate_and_add_event_id_no_fetch(
 	&self,
 	pdu: &RawJsonValue,
 	room_version_id: &RoomVersionId,
-) -> Result<(OwnedEventId, CanonicalJsonObject)> {
+) -> Result<(OwnedEventId, CanonicalJsonObject, Verified)> {
 	let (event_id, mut value) = gen_event_id_canonical_json(pdu, room_version_id)?;
 	let room_version_rules = room_version::rules(room_version_id)?;
 
@@ -65,7 +66,8 @@ pub async fn validate_and_add_event_id_no_fetch(
 		)));
 	}
 
-	self.verify_received_event(&event_id, &mut value, room_version_id)
+	let verified = self
+		.verify_received_event(&event_id, &mut value, room_version_id)
 		.await?;
 
 	// For v3+ rooms we add the event_id, but for v1/v2 rooms it's already present.
@@ -73,33 +75,36 @@ pub async fn validate_and_add_event_id_no_fetch(
 		value.insert("event_id".into(), CanonicalJsonValue::String(event_id.as_str().into()));
 	}
 
-	Ok((event_id, value))
+	Ok((event_id, value, verified))
 }
 
 /// Verifies an event received from another server in place.
 ///
 /// As for any other received event, the sender's `unsigned` data is dropped
-/// and an event whose content does not match its content hash is redacted.
+/// and an event whose content does not match its content hash is redacted,
+/// which the [`Verified::Signatures`] result reports.
 #[implement(super::Service)]
 async fn verify_received_event(
 	&self,
 	event_id: &EventId,
 	value: &mut CanonicalJsonObject,
 	room_version_id: &RoomVersionId,
-) -> Result {
+) -> Result<Verified> {
 	value.remove("unsigned");
 
 	match self
 		.verify_event(value, Some(room_version_id))
 		.await
 	{
-		| Ok(Verified::All) => Ok(()),
+		| Ok(Verified::All) => Ok(Verified::All),
 		| Ok(Verified::Signatures) => {
 			debug_info!("Calculated hash does not match (redaction): {event_id}");
 			let rules = room_version::rules(room_version_id)?;
 			redact_in_place(value, &rules.redaction, None).map_err(|e| {
 				err!(BadServerResponse("Event {event_id} could not be redacted: {e}"))
-			})
+			})?;
+
+			Ok(Verified::Signatures)
 		},
 		| Err(e) =>
 			Err!(BadServerResponse(debug_error!("Event {event_id} failed verification: {e:?}"))),
