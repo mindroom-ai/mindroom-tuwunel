@@ -30,9 +30,10 @@ immutability policy around them. UIAA password flows follow upstream's
 credential-matched rule (`0726625e6`). The upstream fixes the fork had
 backported from `main` and that `v1.9.3` does not contain are carried as
 individual cherry-picks (see below). The fork's sliding sync profiles fix
-(#60) is dropped as well: upstream's rewrite of the profiles extension
-(`005830a1b`) sends profile changes only for joined rooms, and #60's test
-passes on v1.9.3 without it.
+(#60) was dropped at that rebase because its test passes on v1.9.3 without
+it, but upstream's rewrite of the profiles extension (`005830a1b`) only checks
+that each user shares a joined room with the requester, so the fix is carried
+again (see "Sliding sync profile changes only for joined rooms").
 See the [v1.9.3 rebase record](docs/rebase-v1.9.3-2026-10-05.md).
 
 On upstream `main` (`3f5db6d3a`), the fork's thread summary fixes (#19-#21)
@@ -67,6 +68,19 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Remote profile lookups replace the cached profile within the local limits
+
+Looking up a remote user's profile fetches it from their server on every
+request. Each returned field was stored without the field-name grammar and
+64 KiB total size that local profiles are held to, and a field the server no
+longer returned was never removed, so the cached profile kept stale fields and
+grew with every new field name a server returned. The response now replaces the
+cached profile, as `!admin users refresh-profile` already did, and a response
+with a field name outside the MSC4133 grammar or over 64 KiB is refused without
+being stored. Upstream has the same bug. Files:
+`src/service/profile/{mod.rs,remote.rs}`; test in
+`src/service/profile/tests/remote/mod.rs`.
+
 ### Replacing a redacted latest reply searches a bounded range
 
 Redacting a thread's newest reply swaps the newest remaining reply into the
@@ -79,6 +93,41 @@ purged edits), and a root with no remaining reply among them drops the summary
 too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
+
+### Redacting a message redacts its edits
+
+A redaction pruned only its target, so the target's `m.replace` edits kept the
+new text in `m.new_content` and stayed in the search index. Any member could
+still read a deleted message's latest text by the edit's id, from the target's
+relations, in `/messages` or through `/search`. A redaction now also redacts
+the target's edits that the edit bundle counts (same sender and type), with the
+same redaction as their reason. Upstream redacts only the target too. Files:
+`src/service/rooms/{timeline/append.rs,pdu_metadata/bundling.rs}`; test in
+`src/main/tests/redaction_edits.rs`.
+
+### Sliding sync profile changes only for joined rooms
+
+The MSC4262 profiles extension of simplified sliding sync read the profile
+change log of every room in the window and every room the connection had seen,
+without checking the user's membership. A room the user has left or been
+removed from, which a room subscription keeps in the window, and rooms they are
+invited to or have knocked on kept sending their members' profile changes
+whenever the member also shared another room with the user. Rooms in the
+window now follow the required-state rule, as receipts and typing do, and a
+room known only to the connection counts while the user is joined. Upstream
+has the same bug. File: `src/api/client/sync/v5/extensions/profiles.rs`; test
+in `src/main/tests/sync_v5_profiles.rs`.
+
+### Sliding sync looks up delivered required state selectors in a set
+
+When a room's sliding sync configuration changes, each required state entry is
+checked against the selectors the room was last delivered with, so state the
+client had not asked for before is sent in full. Each check scanned the stored
+list, so the cost grew with the product of the current entries and the stored
+selectors, and a request with a million selectors kept a worker busy for
+minutes. The stored selectors are now collected into a hash set once per room.
+Upstream has the same bug. File: `src/api/client/sync/v5/rooms.rs`; test in
+`src/api/client/sync/v5/rooms/tests.rs`.
 
 ### Federated read receipts need a joined user and an event of the room
 
@@ -101,6 +150,17 @@ were accepted. A non-admin's member event in a banned room is now refused with
 `M_FORBIDDEN` unless it is a leave or a ban, as in Synapse; this includes a
 per-room profile update. Upstream has the same bug. Files:
 `src/api/client/state.rs`; test in `src/main/tests/state_member_banned_room.rs`.
+
+### `ban-room` makes local members leave the room
+
+`ban-room` bans the room before making its local members leave, and leaving a
+banned or disabled room only cleared the membership cache. The member events in
+room state stayed `join`, so remote servers still listed the evicted users, and
+their join still authorized the events they sent afterwards. Leaving such a
+room now sends the leave event when the server is in the room; only leaving
+through another server is still skipped. Upstream has the same bug. File:
+`src/service/membership/leave.rs`; test in
+`src/main/tests/ban_room_member_leave.rs`.
 
 ### A withdrawn knock does not move a former member's departure
 
@@ -296,9 +356,13 @@ would fetch another. It keeps each fetched event as canonical JSON without its
 parses it again only to authorize it; an event that is then still larger than
 the 65,535 byte PDU limit is a failed fetch. The fetcher rejects an event
 response larger than four times that limit before parsing it, which leaves room
-for the `unsigned` data a server serves with the event. Upstream has the same
-bug. Files: `src/service/rooms/event_handler/fetch_auth.rs`,
-`src/service/fetcher/validate.rs`.
+for the `unsigned` data a server serves with the event, and stops reading an
+event response once it passes that size instead of buffering it up to the
+federation response limit first. Upstream has the same bug. Files:
+`src/service/rooms/event_handler/fetch_auth.rs`,
+`src/service/fetcher/validate.rs`, `src/service/fetcher/transport.rs`,
+`src/service/federation/execute.rs`; test in
+`src/main/tests/federation_event_response_limit.rs`.
 
 ### `ip_range_denylist` covers IPv4-mapped IPv6 addresses
 
@@ -396,6 +460,17 @@ summaries come from local state. Upstream has the same bug. File:
 `src/service/rooms/spaces/federation.rs`; test in
 `src/service/rooms/spaces/tests.rs`.
 
+### Remote hierarchy answers must describe the requested room
+
+A remote server's `/hierarchy` answer for a room this server is not in was
+cached and served as that room's summary without checking the summary's
+`room_id`. An answer describing a different room, possibly one this server is
+in, then appeared in `/hierarchy` as that other room, with the name, topic,
+avatar and join rule the remote gave it, until the cache entry expired. Such
+answers are now ignored, as `/summary` already ignores them. Upstream has the
+same bug. File: `src/service/rooms/spaces/federation.rs`; test in
+`src/main/tests/federation_hierarchy_room.rs`.
+
 ### Sliding Sync caps the timeline limit
 
 Sliding Sync lists and room subscriptions passed their `timeline_limit` to the
@@ -404,6 +479,19 @@ into one response. The limit is now capped at 100 events, as legacy `/sync`
 caps a filter's timeline limit; a room with more new events comes back
 `limited` with a `prev_batch`. Upstream has the same bug. File:
 `src/api/client/sync/v5/rooms.rs`.
+
+### Sync caps the requested profile fields
+
+The MSC4262 `profiles.fields` list of a sliding sync request and the MSC4429
+`profile_fields.ids` of a legacy `/sync` filter had no length limit. Each
+requested field costs one read for every user the response carries: on an
+initial pass, every member of a room unless members are lazy-loaded. Sliding
+sync also compared each request's list with the connection's previous one name
+by name. Both now use only the first 64 names; sliding sync keeps only those on
+the connection, and legacy sync cuts stored and inline filters alike. Upstream
+has the same bug. Files: `src/service/{profile/mod.rs,sync/mod.rs}`,
+`src/api/client/sync/profiles.rs`; tests in `src/service/sync/tests.rs` and
+`src/main/tests/sync_v3_profiles.rs`.
 
 ### Sliding sync receipts and typing only for joined rooms
 
@@ -429,6 +517,18 @@ now reads the state as of their leave or ban, as the spec requires and as
 `src/api/client/{state.rs,membership/members.rs,room/initial_sync.rs}`; test
 in `src/main/tests/state_departed_member.rs`.
 
+### The room summary is not given to former members
+
+The room summary of an invite-only or restricted room admitted a former member
+under `shared` history visibility and answered with the room's current name,
+topic, avatar, alias, join rule and member count, so a user who had left or
+been kicked or banned kept seeing later changes. Such a room's summary now goes
+to a joined or invited user, or to anyone while the room is world-readable, as
+in Synapse; the restricted-room and guest checks are unchanged, and an invitee
+is now admitted under every history visibility. Upstream has the same bug.
+File: `src/api/client/room/summary.rs`; test in
+`src/main/tests/state_departed_member.rs`.
+
 ### UIAA keeps only small request bodies for pending sessions
 
 A UIAA request sent without `auth` keeps its JSON body in memory so the
@@ -445,7 +545,8 @@ A room's create event and backfilled events have no state snapshot, so
 `/context` around one of them returned the room's current state, even to a user
 who had never joined. That fallback now applies only to a requester who passes
 the `/state` check (`user_can_see_state_events`) or to the admin room-context
-endpoint; anyone else gets an empty `state`. Upstream has the same bug. Files:
+endpoint; anyone else gets an empty `state`. A former member gets the state
+from when they left, as `/state` serves them. Upstream has the same bug. Files:
 `src/api/client/context.rs`; test in
 `src/main/tests/context_snapshotless_state.rs`.
 
@@ -496,8 +597,11 @@ been removed from a room still got a thread's newest reply and the newest edit
 of an event they could read, even when those were sent after they left. A
 requester who is no longer in the room now gets an edit only when the room's
 history visibility lets them see it, and no thread summary when it hides the
-latest reply. Upstream has the same bug. File:
-`src/service/rooms/pdu_metadata/bundling.rs`; test in
+latest reply. `/rooms/{roomId}/initialSync` and `/notifications`, which served
+the stored event without this step, now apply it as well. Upstream has the same
+bug.
+Files: `src/service/rooms/pdu_metadata/bundling.rs`,
+`src/api/client/{room/initial_sync.rs,push/notifications.rs}`; test in
 `src/main/tests/bundled_relations_after_leave.rs`.
 
 ### A device's tokens rotate under its device lock
@@ -700,6 +804,8 @@ Behavior:
   `global.identity_provider.native_client_ids` while keeping the web Services ID
   valid; reuses the normal SSO mapping/registration/reactivation/loginToken
   path.
+- Refuses deactivated and locked accounts like the browser SSO callback: both
+  checks live in `complete_sso_session`, which both endpoints call.
 
 Note: the Apple `id_token` userinfo fallback that this fork originally carried
 was merged upstream, so it is no longer a fork delta.

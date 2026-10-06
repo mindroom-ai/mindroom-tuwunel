@@ -12,13 +12,17 @@ use tuwunel_core::{
 	Result,
 	utils::{
 		BoolExt, IterStream,
+		result::NotFound,
 		stream::{BroadbandExt, TryReadyExt},
 	},
 };
 use tuwunel_service::{Services, sync::Connection};
 
 use super::{
-	super::{range::Results, rooms::merged_room_details},
+	super::{
+		range::Results,
+		rooms::{membership_allows_required_state, merged_room_details},
+	},
 	SyncInfo, Window, selector,
 };
 use crate::client::sync::profiles::{Changes, Fields, fold_change, read_field, visible};
@@ -66,6 +70,11 @@ pub(super) async fn collect(
 		.dedup()
 		.filter(|_| conn.globalsince != 0)
 		.try_stream()
+		.try_filter_map(async |room_id| {
+			let followed = room_followed(services, sender_user, window, room_id).await?;
+
+			Ok(followed.then_some(room_id))
+		})
 		.try_fold(changes, async |changes, room_id| {
 			fold_room(changes, services, conn, room_id, requested).await
 		})
@@ -200,6 +209,31 @@ async fn base(
 		.is_empty()
 		.is_false()
 		.then_some((user_id, fields)))
+}
+
+/// Whether the syncing user follows the profile changes of the room's members.
+///
+/// A room in the window follows the required-state rule, so a room the user
+/// has left, been removed from, been invited to or knocked on contributes
+/// nothing. A room only the connection knows contributes while the user is
+/// joined.
+async fn room_followed(
+	services: &Services,
+	sender_user: &UserId,
+	window: &Window,
+	room_id: &RoomId,
+) -> Result<bool> {
+	if let Some(room) = window.get(room_id) {
+		return Ok(membership_allows_required_state(room.membership.as_ref()));
+	}
+
+	let joined = services
+		.state_cache
+		.get_joined_count(room_id, sender_user)
+		.await
+		.optional()?;
+
+	Ok(joined.is_some())
 }
 
 async fn fold_room(
