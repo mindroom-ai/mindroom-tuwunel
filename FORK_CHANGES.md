@@ -306,6 +306,28 @@ Behavior:
   re-using the device id can install a fresh identity. One-time-key and fallback
   cleanup use upstream's implementation, within the same per-device lock.
 
+## Temporary upstream backports
+
+These upstream `main` commits are cherry-picked with `git cherry-pick -x`, one
+fork commit each. Drop them at the next rebase onto an upstream release that
+contains them (`99c6c320a` and `f4f5a03f5` are already in `v1.9.2`).
+
+| Upstream commit | Change |
+| --- | --- |
+| `99c6c320a` | Refuse a device ID that names a cross-signing key |
+| `11e7fcf31`, `fa3eefe45` (#612) | Clean up the server user when `emergency_password` is removed; keep the Synapse admin user routes off the server user |
+| `0d0467f59` (#611), `eb655bc57` | Refuse deactivated accounts at JWT and token login and in the JWT stage of UIAA |
+| `f4f5a03f5` | `unwrap_or_else_async` returns the present value (needed by `18039076c`) |
+| `18039076c` | `/events` streams only the room events the requester may see |
+| `23ef4fdaf` | Judge event visibility by the event's own room; the single-event lookup refuses events from other rooms |
+| `e85f4dc30` | `/refresh` refuses locked accounts |
+| `45800bd79` | OIDC sign-in, device approval and token issuance refuse locked and deactivated accounts |
+
+Fork adaptations are recorded in each commit message. Upstream test harness
+files the fork lacks travel with the tests that use them
+(`src/main/tests/appservice/mod.rs`, `src/main/tests/fixture/mod.rs`, and
+`src/main/tests/device_key_removal.rs`).
+
 ## Operational Changes
 
 ### 6) `ci: fork release automation, container publishing, and GitHub checks`
