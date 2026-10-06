@@ -158,8 +158,9 @@ pub async fn handle_incoming_pdu<'a>(
 		return Ok(None);
 	}
 
-	// Skip old events. Backfilled events are skipped because remote servers set
-	// their timestamps, so the cutoff is our own join or the room's create.
+	// Skip old events. The cutoff ignores backfilled events, whose timestamps
+	// remote servers set, so it is the first event this server stored itself
+	// (the create, our join or our knock).
 	let first_ts_in_room = self
 		.services
 		.timeline

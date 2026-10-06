@@ -210,8 +210,9 @@ Backfilled events sort before the rest of the timeline, so after a backfill
 that first event carried a timestamp set by a remote server, and one dated in
 the future made the server silently skip new events in the room until that
 time passed. The cutoff now comes from the first event that was not
-backfilled, which is this server's join or the room's create, as before any
-backfill. Upstream has the same bug. Files:
+backfilled, which is the first event this server stored itself (the create,
+our join or our knock), the same cutoff it used before any backfill. Upstream
+has the same bug. Files:
 `src/service/rooms/{timeline/mod.rs,event_handler/handle_incoming_pdu.rs}`;
 test in `src/main/tests/incoming_after_future_backfill.rs`.
 
