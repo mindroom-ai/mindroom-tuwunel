@@ -46,7 +46,15 @@ where
 	T::PathBuilder: FedPath,
 {
 	let client = &self.services.client.federation;
-	self.execute_on(client, dest, request).await
+	let limit = self
+		.services
+		.server
+		.config
+		.network
+		.http
+		.max_response_size;
+	self.execute_on(client, dest, request, limit)
+		.await
 }
 
 /// Sends a bounded, backoff-aware client key lookup over federation.
@@ -78,8 +86,15 @@ where
 	let timeout_dur = Duration::from_secs(timeout_secs);
 
 	let client = &self.services.client.federation;
+	let limit = self
+		.services
+		.server
+		.config
+		.network
+		.http
+		.max_response_size;
 
-	match timeout(timeout_dur, self.execute_uncounted(client, dest, request)).await {
+	match timeout(timeout_dur, self.execute_uncounted(client, dest, request, limit)).await {
 		| Ok(result) => result,
 		| Err(_elapsed) => Err!("{dest} key lookup exceeded {}s", timeout_dur.as_secs()),
 	}
@@ -102,12 +117,21 @@ where
 	T::PathBuilder: FedPath,
 {
 	let client = &self.services.client.synapse;
-	self.execute_on(client, dest, request).await
+	let limit = self
+		.services
+		.server
+		.config
+		.network
+		.http
+		.max_response_size;
+	self.execute_on(client, dest, request, limit)
+		.await
 }
 
 /// Sends through a supplied client and records the peer outcome.
 ///
-/// The destination's resolved route picks the direct or SRV half of the client.
+/// A response body larger than `limit` bytes fails the request. The
+/// destination's resolved route picks the direct or SRV half of the client.
 /// A successful response clears every stored failure row for the destination.
 /// A request refused because federation is disabled or the server is forbidden
 /// records nothing; other errors are recorded only when classified as peer
@@ -118,6 +142,7 @@ pub async fn execute_on<T>(
 	client: &Federation,
 	dest: &ServerName,
 	request: T,
+	limit: usize,
 ) -> Result<T::IncomingResponse>
 where
 	T: OutgoingRequest + Send,
@@ -125,7 +150,7 @@ where
 	T::PathBuilder: FedPath,
 {
 	let result = self
-		.execute_uncounted(client, dest, request)
+		.execute_uncounted(client, dest, request, limit)
 		.await;
 
 	self.record_outcome(dest, result.as_ref().err())
@@ -195,6 +220,7 @@ pub(super) async fn execute_uncounted<T>(
 	client: &Federation,
 	dest: &ServerName,
 	request: T,
+	limit: usize,
 ) -> Result<T::IncomingResponse>
 where
 	T: OutgoingRequest + Send,
@@ -209,7 +235,7 @@ where
 		.await?;
 	let request = self.prepare(&actual, dest, request)?;
 
-	self.perform::<T>(&actual, dest, request, client)
+	self.perform::<T>(&actual, dest, request, client, limit)
 		.await
 }
 
@@ -237,8 +263,15 @@ where
 		.get_actual_dest_allow_self(dest)
 		.await?;
 	let request = self.prepare(&actual, dest, request)?;
+	let limit = self
+		.services
+		.server
+		.config
+		.network
+		.http
+		.max_response_size;
 
-	self.perform::<T>(&actual, dest, request, client)
+	self.perform::<T>(&actual, dest, request, client, limit)
 		.await
 }
 
@@ -257,6 +290,7 @@ async fn perform<T>(
 	dest: &ServerName,
 	request: Request,
 	client: &Federation,
+	limit: usize,
 ) -> Result<T::IncomingResponse>
 where
 	T: OutgoingRequest + Send,
@@ -267,13 +301,6 @@ where
 	let method = request.method().clone();
 
 	debug!(?method, ?url, "Sending request");
-	let limit = self
-		.services
-		.server
-		.config
-		.network
-		.http
-		.max_response_size;
 
 	match client.for_srv(actual.srv).execute(request).await {
 		| Ok(response) => handle_response::<T>(actual, dest, &method, &url, response, limit)
