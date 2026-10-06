@@ -35,6 +35,21 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Sliding sync receipts and typing only for joined rooms
+
+Simplified sliding sync sent other users' read receipts and typing for every
+room in the window: rooms the user has left or been removed from, which a room
+subscription keeps there, and rooms they are invited to or have knocked on.
+Typing now follows the required-state rule, so only joined rooms, and
+world-readable rooms peeked without a membership, carry it, as v3 `/sync`
+sends ephemeral events only for joined rooms. Receipts follow the same rule,
+except that a room the user left or was removed from keeps the receipts sent
+before their departure, as its timeline does; upstream delivers those on the
+departure sync. The user's own private read receipt and room account data are
+unchanged. Upstream has the same bug. Files:
+`src/api/client/sync/v5/{range.rs,rooms.rs,extensions/typing.rs}`; test in
+`src/main/tests/sync_v5_departed_ephemeral.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
