@@ -12,8 +12,7 @@ use std::{
 
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{
-	Err, Result, result::NotFound, ruma::events::GlobalAccountDataEventType,
-	utils::random_string,
+	Err, Result, result::NotFound, ruma::events::GlobalAccountDataEventType, utils::random_string,
 };
 use tuwunel_service::Services;
 
