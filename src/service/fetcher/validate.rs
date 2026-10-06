@@ -4,10 +4,7 @@
 
 use ruma::{CanonicalJsonObject, RoomVersionId};
 use serde::de::IgnoredAny;
-use tuwunel_core::{
-	Err, Result, err, implement,
-	matrix::{event::gen_event_id, pdu::MAX_PDU_BYTES},
-};
+use tuwunel_core::{Err, Result, err, implement, matrix::event::gen_event_id};
 
 use super::{Op, Opts};
 
@@ -19,12 +16,6 @@ use super::{Op, Opts};
 #[tracing::instrument(name = "validate", level = "trace", skip_all)]
 pub(super) async fn validate(&self, opts: &Opts, bytes: &[u8]) -> Result {
 	if opts.check_conforms {
-		if matches!(opts.op, Op::Event | Op::AuthEvent) && bytes.len() > MAX_PDU_BYTES {
-			return Err!(BadServerResponse(
-				"PDU is larger than maximum of {MAX_PDU_BYTES} bytes"
-			));
-		}
-
 		match opts.op {
 			| Op::Backfill => serde_json::from_slice(bytes)
 				.map(|pdus: Vec<IgnoredAny>| !pdus.is_empty())

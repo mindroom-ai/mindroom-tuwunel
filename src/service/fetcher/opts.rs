@@ -153,8 +153,7 @@ pub struct Opts {
 	/// Reject a response whose event does not hash to the requested id.
 	pub check_event_id: bool,
 
-	/// Reject a response that is not well-formed JSON, or an event response
-	/// larger than the PDU size limit.
+	/// Reject a response that is not well-formed JSON.
 	pub check_conforms: bool,
 
 	/// Reject a response that fails content-hash verification.
