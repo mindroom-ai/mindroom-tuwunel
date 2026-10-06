@@ -48,6 +48,15 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### Email password resets leave deactivated accounts deactivated
+
+Deactivation without erasure keeps the account's email binding, and a
+logged-out password reset through that email stored the new password without
+checking the account, which made a deactivated account usable again. The reset
+now refuses a deactivated account with `M_USER_DEACTIVATED`, as login does.
+Upstream has the same bug. Files: `src/api/client/account/change_password.rs`;
+test in `src/main/tests/email_password_reset/scenarios.rs`.
+
 ### Auth chain fetch walks are bounded
 
 Fetching the missing auth events of an incoming event walked the remote server's
