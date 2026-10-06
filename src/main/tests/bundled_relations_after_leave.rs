@@ -22,7 +22,9 @@ const MEMBER_TOKEN: &str = "bundled-relations-after-leave-member-access-token";
 ///
 /// The thread root itself stays visible to them, but its stored thread summary
 /// names a later reply and its newest edit came later too, so the summary is
-/// omitted and the original body is served. A current member still gets both.
+/// omitted and the original body is served. This holds for `/event`, the
+/// room's `/initialSync` and `/notifications`. A current member still gets
+/// both.
 #[test]
 fn bundled_relations_withhold_events_after_leave() -> Result {
 	boot("bundled-relations-after-leave", ["bundle_edit_relations=true"], exercise)
@@ -81,6 +83,30 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		"departed member keeps a thread summary: {member_view}"
 	);
 	assert_eq!(member_view["content"]["body"], "root", "departed member lost the root body");
+
+	let initial_sync = member
+		.get(&format!("rooms/{room_id}/initialSync"))
+		.await?;
+
+	let notifications = member.get("notifications").await?;
+	for (view, items, event) in [
+		(&initial_sync, "/messages/chunk", ""),
+		(&notifications, "/notifications", "/event"),
+	] {
+		let served_root = view
+			.pointer(items)
+			.and_then(Value::as_array)
+			.into_iter()
+			.flatten()
+			.filter_map(|item| item.pointer(event))
+			.any(|event| event["event_id"] == root.as_str());
+
+		assert!(served_root, "departed member lost the root: {view}");
+		assert!(
+			!view.to_string().contains("after-leave"),
+			"departed member reads events sent after leaving: {view}"
+		);
+	}
 
 	assert_eq!(
 		owner_view.pointer("/unsigned/m.relations/m.thread/latest_event/content/body"),
