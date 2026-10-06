@@ -1,5 +1,7 @@
 use futures::{Stream, StreamExt, TryFutureExt, pin_mut};
-use ruma::{UserId, events::ignored_user_list::IgnoredUserListEventContent};
+use ruma::{
+	EventId, OwnedEventId, UserId, events::ignored_user_list::IgnoredUserListEventContent,
+};
 use tuwunel_core::{
 	Result,
 	arrayvec::ArrayVec,
@@ -529,6 +531,30 @@ async fn newest_replacement(&self, sender_user: &UserId, parent: &Pdu) -> Option
 	}
 
 	Some(edit)
+}
+
+/// The ids of `parent`'s `m.replace` edits that the edit bundle counts, listed
+/// even when `parent` is redacted.
+#[implement(Service)]
+#[tracing::instrument(skip(self), level = "debug")]
+pub async fn replacement_ids(&self, parent: &EventId) -> Vec<OwnedEventId> {
+	let Ok(parent_id) = self.services.timeline.get_pdu_id(parent).await else {
+		return Vec::new();
+	};
+
+	let Ok(parent) = self
+		.services
+		.timeline
+		.get_pdu_from_id(&parent_id)
+		.await
+	else {
+		return Vec::new();
+	};
+
+	self.replacement_children(&parent, parent_id.into())
+		.map(|child| child.event_id().to_owned())
+		.collect()
+		.await
 }
 
 /// Stream `parent`'s valid `m.replace` children, newest `origin_server_ts`
