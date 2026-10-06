@@ -57,6 +57,9 @@ type EventTypeString = SmallString<[u8; 32]>;
 type TimelineMembers<'a> = SmallVec<[&'a str; 2]>;
 pub(super) type RoomDetails = (usize, HashSet<(StateEventType, StateKey)>);
 
+/// Most timeline events one room returns per response, as legacy sync allows.
+const TIMELINE_LIMIT_MAX: usize = 100;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum StateMode {
 	Full,
@@ -270,7 +273,9 @@ pub(super) fn merged_room_details(
 		.chain(conn.subscriptions.get(room_id))
 		.fold((0_usize, HashSet::new()), |(timeline_limit, mut required_state), config| {
 			required_state.extend(config.required_state.iter().cloned());
-			(timeline_limit.max(usize_from_ruma(config.timeline_limit)), required_state)
+			let limit = usize_from_ruma(config.timeline_limit).min(TIMELINE_LIMIT_MAX);
+
+			(timeline_limit.max(limit), required_state)
 		})
 }
 
@@ -629,15 +634,16 @@ mod tests {
 
 	use ruma::{
 		UInt,
-		api::client::sync::sync_events::v5::response::Room as ResponseRoom,
+		api::client::sync::sync_events::v5::{ListId, response::Room as ResponseRoom},
 		events::{StateEventType, room::member::MembershipState},
-		uint,
+		room_id, uint,
 	};
 	use tuwunel_core::matrix::pdu::PduCount;
 
 	use super::{
-		StateMode, membership_allows_required_state, room_config_hash, room_timeline_limited,
-		room_timeline_metadata, state_is_required, state_may_have_changed, state_mode,
+		Connection, ListIds, StateMode, TIMELINE_LIMIT_MAX, membership_allows_required_state,
+		merged_room_details, room_config_hash, room_timeline_limited, room_timeline_metadata,
+		state_is_required, state_may_have_changed, state_mode,
 	};
 
 	fn timeline(positions: &[u64]) -> Vec<(PduCount, ())> {
@@ -770,6 +776,29 @@ mod tests {
 		assert!(!room_timeline_limited(0, true));
 		assert!(room_timeline_limited(1, true));
 		assert!(!room_timeline_limited(1, false));
+	}
+
+	#[test]
+	fn timeline_limit_is_capped() {
+		let room_id = room_id!("!room:example.com");
+		let list = ListId::from("main");
+		let mut conn = Connection::default();
+
+		conn.lists
+			.entry(list.clone())
+			.or_default()
+			.room_details
+			.timeline_limit = UInt::MAX;
+
+		conn.subscriptions
+			.entry(room_id.to_owned())
+			.or_default()
+			.timeline_limit = UInt::MAX;
+
+		let lists: ListIds = once(list).collect();
+		let (timeline_limit, _) = merged_room_details(&conn, &lists, room_id);
+
+		assert_eq!(timeline_limit, TIMELINE_LIMIT_MAX);
 	}
 
 	#[test]
