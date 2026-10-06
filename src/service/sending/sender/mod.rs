@@ -116,11 +116,13 @@ pub const EDU_LIMIT: usize = 100;
 /// body limits peers enforce.
 pub const MAX_EDU_CONTENT_BYTES: usize = 65_536;
 
-/// Largest EDU one federation transaction carries.
+/// Most bytes of EDUs one federation transaction carries.
 ///
 /// A peer refuses a transaction over its request body limit, and the refused
-/// rows return in every later transaction to it, so a larger EDU is dropped.
-const MAX_EDU_BYTES: usize = 1_048_576;
+/// rows return in every later transaction to it, so EDUs past this are dropped.
+/// With `PDU_LIMIT` PDUs of at most 64 KiB the transaction stays under the
+/// 12.5 MiB Synapse accepts.
+const MAX_TRANSACTION_EDU_BYTES: usize = 8_388_608;
 
 #[implement(Service)]
 #[tracing::instrument(skip(self), level = "debug")]

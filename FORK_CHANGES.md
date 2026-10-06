@@ -95,14 +95,16 @@ a remote user whose EDU, with its event type and device ID, would be larger
 than that. A device ID a client chooses, which device list updates carry
 twice when device names are not federated, is refused with 400
 `M_INVALID_PARAM` over 512 bytes, the limit Synapse applies at login. A
-federation transaction also leaves out any single EDU over 1 MiB with a
-warning and acknowledges its row with the transaction, so an oversized EDU
-queued earlier no longer holds up its destination. Upstream has the same bug.
+federation transaction also carries its EDUs only while together they fit in
+8 MiB, leaves out the rest with a warning and acknowledges their rows with the
+transaction, so oversized EDUs, including ones queued earlier, no longer hold
+up the destination. Upstream has the same bug.
 Files:
 `src/api/client/{to_device.rs,dehydrated_device.rs,keys/upload_keys.rs,keys/upload_signing_keys.rs}`,
 `src/service/users/device.rs`,
 `src/service/sending/sender/{mod.rs,dispatch/federation.rs}`; tests in
-`src/main/tests/edu_content_size.rs` and `src/service/sending/sender/tests.rs`.
+`src/main/tests/edu_content_size.rs`, `src/service/sending/sender/tests.rs` and
+`src/service/sending/sender/dispatch/federation/tests.rs`.
 
 ### Federated read receipts need a joined user and an event of the room
 

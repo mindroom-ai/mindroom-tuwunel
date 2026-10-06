@@ -15,7 +15,8 @@ use tuwunel_core::{Err, Error, Result, config::Figment};
 
 use self::fixture::fixture;
 use super::{
-	MAX_EDU_BYTES, NewEvents, SendingFutures, TransactionStatus, TransactionStatuses, WakeQueue,
+	MAX_TRANSACTION_EDU_BYTES, NewEvents, SendingFutures, TransactionStatus, TransactionStatuses,
+	WakeQueue,
 	dispatch::{Completion, SendingResult},
 	select::Selection,
 };
@@ -300,7 +301,10 @@ async fn an_oversized_edu_is_left_out_of_its_transaction() -> Result {
 
 	let sending = &fixture.services.sending;
 	let dest = Destination::Federation("remote.example".try_into()?);
-	let edu = format!(r#"{{"edu_type":"m.presence","pad":"{}"}}"#, "x".repeat(MAX_EDU_BYTES));
+	let edu = format!(
+		r#"{{"edu_type":"m.presence","pad":"{}"}}"#,
+		"x".repeat(MAX_TRANSACTION_EDU_BYTES)
+	);
 	let item = enqueue(sending, &dest, SendingEvent::Edu(EduBuf::from_slice(edu.as_bytes())));
 	let Completion { result: Ok(_), .. } = sending.send_events(dest, vec![item], None).await
 	else {

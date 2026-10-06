@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::StreamExt;
 use ruma::{
-	MilliSecondsSinceUnixEpoch, OwnedServerName,
+	MilliSecondsSinceUnixEpoch, OwnedServerName, ServerName,
 	api::federation::transactions::{edu::Edu, send_transaction_message::v1::Request},
 	serde::Raw,
 };
@@ -12,13 +12,18 @@ use tuwunel_core::{
 };
 
 use super::SendingResult;
-use crate::sending::{Destination, EduBuf, SendingEvent, Service, sender::MAX_EDU_BYTES};
+use crate::sending::{
+	Destination, EduBuf, SendingEvent, Service, sender::MAX_TRANSACTION_EDU_BYTES,
+};
+
+#[cfg(test)]
+mod tests;
 
 /// Send a federation transaction, reporting whether one went out at all.
 ///
 /// Rows that all fail to load leave nothing to send; they still succeed, so
-/// their keys are acknowledged. An EDU over `MAX_EDU_BYTES` is left out the
-/// same way and acknowledged with the transaction.
+/// their keys are acknowledged. EDUs past `MAX_TRANSACTION_EDU_BYTES` are left
+/// out the same way and acknowledged with the transaction.
 #[implement(Service)]
 #[tracing::instrument(
 	name = "federation",
@@ -56,17 +61,11 @@ pub(super) async fn send_events_dest_federation(
 		.collect()
 		.await;
 
-	let edus: Vec<Raw<Edu>> = events
+	let edus = events
 		.iter()
-		.filter_map(|event| extract_variant!(event, SendingEvent::Edu))
-		.filter(|edu| {
-			let fits = edu.len() <= MAX_EDU_BYTES;
-			if !fits {
-				warn!(%server, len = edu.len(), "Dropping an EDU too large to send");
-			}
+		.filter_map(|event| extract_variant!(event, SendingEvent::Edu));
 
-			fits
-		})
+	let edus: Vec<Raw<Edu>> = edus_within_limit(&server, edus)
 		.map(EduBuf::as_slice)
 		.map(serde_json::from_slice)
 		.filter_map(Result::ok)
@@ -116,4 +115,23 @@ pub(super) async fn send_events_dest_federation(
 	};
 
 	(result, true)
+}
+
+/// The EDUs, in order, that fit together in `MAX_TRANSACTION_EDU_BYTES`; the
+/// others are dropped with a warning.
+fn edus_within_limit<'a>(
+	server: &'a ServerName,
+	edus: impl Iterator<Item = &'a EduBuf> + 'a,
+) -> impl Iterator<Item = &'a EduBuf> + 'a {
+	let mut total: usize = 0;
+	edus.filter(move |edu| {
+		let fits = total.saturating_add(edu.len()) <= MAX_TRANSACTION_EDU_BYTES;
+		if fits {
+			total = total.saturating_add(edu.len());
+		} else {
+			warn!(%server, len = edu.len(), "Dropping an EDU past the transaction size limit");
+		}
+
+		fits
+	})
 }
