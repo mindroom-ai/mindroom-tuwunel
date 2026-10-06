@@ -6,7 +6,7 @@ use std::{borrow::Cow, collections::BTreeMap, net::IpAddr, time::Duration};
 use axum::extract::State;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as b64};
-use futures::{FutureExt, TryFutureExt, future::try_join};
+use futures::{TryFutureExt, future::try_join};
 use reqwest::header::{CONTENT_TYPE, HeaderValue};
 use ruma::{
 	Mxc, OwnedMxcUri, OwnedUserId, ServerName, UserId,
@@ -24,10 +24,9 @@ use tuwunel_core::{
 	itertools::Itertools,
 	utils,
 	utils::{
-		OptionExt,
 		content_disposition::make_content_disposition,
 		hash::sha256,
-		result::{FlatOk, LogErr},
+		result::{FlatOk, LogErr, NotFound},
 		string::{EMPTY, truncate_deterministic},
 		timepoint_from_now, timepoint_has_passed,
 	},
@@ -38,8 +37,8 @@ use tuwunel_service::{
 	client::read_response_capped,
 	media::MXC_LENGTH,
 	oauth::{
-		CODE_VERIFIER_LENGTH, Provider, SESSION_ID_LENGTH, Session, TokenResponse, UserInfo,
-		unique_id_sub,
+		CODE_VERIFIER_LENGTH, GITHUB_LOGIN_ISSUER, Provider, SESSION_ID_LENGTH, Session,
+		TokenResponse, UserInfo, unique_id_iss_sub, unique_id_sub,
 	},
 	users::{PASSWORD_SENTINEL, Register},
 };
@@ -146,10 +145,9 @@ pub(crate) async fn sso_login_with_provider_route(
 ) -> Result<sso_login_with_provider::v3::Response> {
 	let idp_id = body.body.idp_id;
 	let redirect_url = body.body.redirect_url;
-	let login_token = body.body.login_token;
 	let action = body.body.action;
 
-	handle_sso_login(&services, &client, idp_id, redirect_url, login_token, action).await
+	handle_sso_login(&services, &client, idp_id, redirect_url, None, action).await
 }
 
 async fn handle_sso_login(
@@ -157,7 +155,7 @@ async fn handle_sso_login(
 	_client: &IpAddr,
 	idp_id: String,
 	redirect_url: String,
-	login_token: Option<String>,
+	user_id: Option<OwnedUserId>,
 	action: Option<SsoRedirectAction>,
 ) -> Result<sso_login_with_provider::v3::Response> {
 	let redirect_url: Url = redirect_url.parse().map_err(|e| {
@@ -263,12 +261,7 @@ async fn handle_sso_login(
 			.map(timepoint_from_now)
 			.transpose()?,
 
-		user_id: login_token
-			.as_deref()
-			.map_async(|token| services.users.find_from_login_token(token))
-			.map(FlatOk::flat_ok)
-			.await,
-
+		user_id,
 		..Default::default()
 	};
 
@@ -394,9 +387,28 @@ pub(crate) async fn sso_callback_route(
 		return handle_uiaa(&services, &user_id, cookie, redirect_url).await;
 	}
 
-	let next_idp_url = chain_next_idp_url(&services, &provider, &session, idp_id);
+	let redirect_url = session
+		.redirect_url
+		.ok_or_else(|| err!(Request(InvalidParam("Missing redirect URL in session data"))))?;
 
-	let location = finalize_login_redirect(&services, &session, next_idp_url, &user_id)?;
+	if let Some(next_idp_id) = chain_next_idp_id(&services, idp_id) {
+		let next = handle_sso_login(
+			&services,
+			&client,
+			next_idp_id,
+			redirect_url.into(),
+			Some(user_id),
+			None,
+		)
+		.await?;
+
+		return Ok(sso_callback::unstable::Response {
+			location: next.location,
+			cookie: next.cookie,
+		});
+	}
+
+	let location = finalize_login_redirect(&services, redirect_url, &user_id);
 
 	Ok(sso_callback::unstable::Response { location, cookie: Some(cookie) })
 }
@@ -455,12 +467,11 @@ fn apply_token_response(session: Session, token: TokenResponse) -> Result<Sessio
 	})
 }
 
-fn chain_next_idp_url(
-	services: &Services,
-	provider: &Provider,
-	session: &Session,
-	idp_id: &str,
-) -> Option<Url> {
+/// The provider authorized next in a multi-provider flow, if any.
+///
+/// The browser goes straight on to it carrying the user just authorized, so
+/// the association never travels as a bearer credential in a URL.
+fn chain_next_idp_id(services: &Services, idp_id: &str) -> Option<String> {
 	services
 		.config
 		.identity_provider
@@ -469,41 +480,24 @@ fn chain_next_idp_url(
 		.skip_while(|idp| idp.id() != idp_id)
 		.nth(1)
 		.map(IdentityProvider::id)
-		.and_then(|next_idp| {
-			provider.callback_url.clone().map(|mut url| {
-				let path = format!("/_matrix/client/v3/login/sso/redirect/{next_idp}");
-				url.set_path(&path);
-
-				if let Some(redirect_url) = session.redirect_url.as_ref() {
-					url.query_pairs_mut()
-						.append_pair("redirectUrl", redirect_url.as_str());
-				}
-
-				url
-			})
-		})
+		.map(ToOwned::to_owned)
 }
 
 fn finalize_login_redirect(
 	services: &Services,
-	session: &Session,
-	next_idp_url: Option<Url>,
+	mut redirect_url: Url,
 	user_id: &UserId,
-) -> Result<String> {
+) -> String {
 	let login_token = utils::random_string(TOKEN_LENGTH);
 	let _login_token_expires_in = services
 		.users
 		.create_login_token(user_id, &login_token);
 
-	let location = next_idp_url
-		.or_else(|| session.redirect_url.clone())
-		.ok_or_else(|| err!(Request(InvalidParam("Missing redirect URL in session data"))))?
+	redirect_url
 		.query_pairs_mut()
-		.append_pair("loginToken", &login_token)
-		.finish()
-		.to_string();
+		.append_pair("loginToken", &login_token);
 
-	Ok(location)
+	redirect_url.into()
 }
 
 /// Map an authenticated SSO/OIDC identity onto a local account and return the
@@ -521,8 +515,10 @@ async fn complete_sso_session(
 		.ok_or_else(|| err!(Request(InvalidParam("Missing SSO session id."))))?;
 
 	let unique_id = unique_id_sub((provider, &userinfo.sub))?;
+	let login_session = github_login_session(services, provider, &userinfo).await?;
 
 	let complete_identity = async |old_user_id: Option<OwnedUserId>| {
+		let old_user_id = old_user_id.or_else(|| login_session.as_ref()?.user_id.clone());
 		let session = Session {
 			user_info: Some(userinfo.clone()),
 			..session
@@ -576,6 +572,16 @@ async fn complete_sso_session(
 		services.oauth.sessions.delete(old_sess_id).await;
 	}
 
+	// Deleting the login-keyed session leaves its index, which then resolves to
+	// no session.
+	if let Some(login_sess_id) = login_session.and_then(|session| session.sess_id) {
+		services
+			.oauth
+			.sessions
+			.delete(&login_sess_id)
+			.await;
+	}
+
 	if services
 		.users
 		.maybe_reactivate_deactivated_sso(&user_id)
@@ -589,6 +595,46 @@ async fn complete_sso_session(
 	}
 
 	Ok((user_id, session))
+}
+
+/// Find the session an earlier release keyed on the presented GitHub `login`.
+///
+/// GitHub releases a `login` for anyone to register after a rename or account
+/// deletion, so the session is returned only when the avatar URL stored with
+/// it, which GitHub serves under the account `id`, names the presented `id`.
+async fn github_login_session(
+	services: &Services,
+	provider: &Provider,
+	userinfo: &UserInfo,
+) -> Result<Option<Session>> {
+	let Some(login) = userinfo
+		.login
+		.as_deref()
+		.filter(|_| provider.brand == "github")
+	else {
+		return Ok(None);
+	};
+
+	let session = services
+		.oauth
+		.sessions
+		.get_by_unique_id(&unique_id_iss_sub((GITHUB_LOGIN_ISSUER, login))?)
+		.await
+		.optional()?;
+
+	Ok(session.filter(|session| github_account_id(session) == Some(userinfo.sub.as_str())))
+}
+
+/// The GitHub account `id` in the avatar URL stored with a session.
+fn github_account_id(session: &Session) -> Option<&str> {
+	session
+		.user_info
+		.as_ref()?
+		.avatar_url
+		.as_deref()?
+		.strip_prefix("https://avatars.githubusercontent.com/u/")?
+		.split('?')
+		.next()
 }
 
 async fn handle_uiaa(
@@ -808,10 +854,9 @@ async fn decide_user_id(
 			.as_deref()
 			.map(str::to_lowercase)
 			.filter(|_| allowed("nickname")),
-		provider
-			.brand
-			.eq(&"github")
-			.then_some(userinfo.sub.as_str())
+		userinfo
+			.login
+			.as_deref()
 			.map(str::to_lowercase)
 			.filter(|_| allowed("login")),
 		userinfo
@@ -915,6 +960,25 @@ fn parse_user_id(server_name: &ServerName, username: &str) -> Result<OwnedUserId
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn github_account_id_reads_the_stored_avatar_url() {
+		let session = |avatar_url: &str| Session {
+			user_info: Some(UserInfo {
+				sub: "alice".to_owned(),
+				avatar_url: Some(avatar_url.to_owned()),
+				..Default::default()
+			}),
+			..Default::default()
+		};
+
+		let owner = session("https://avatars.githubusercontent.com/u/583231?v=4");
+		let unrelated = session("https://example.com/u/583231?v=4");
+
+		assert_eq!(github_account_id(&owner), Some("583231"), "GitHub avatar names the id");
+		assert_eq!(github_account_id(&unrelated), None, "other hosts name no GitHub id");
+		assert_eq!(github_account_id(&Session::default()), None, "no avatar names no id");
+	}
 
 	#[test]
 	fn grant_session_cookie_path_uses_the_callback_path() {
