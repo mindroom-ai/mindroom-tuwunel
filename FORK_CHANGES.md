@@ -108,9 +108,9 @@ Under `shared` history visibility a former member reads events up to their
 latest leave. Knocking again after leaving or being kicked dropped that leave,
 and withdrawing the knock recorded a new one, so the user then read everything
 sent since their removal; rejecting a later invite did the same. A former
-member now sees an event they were not joined for only if they joined at or
-after it, found by walking back from their current membership event to their
-last join. Upstream has the same bug. File:
+member now sees an event they were not joined for only up to the leave or ban
+that ended their last join, found by walking back from their current
+membership event to that join. Upstream has the same bug. File:
 `src/service/rooms/state_accessor/user_can.rs`; test in
 `src/main/tests/knock_withdrawal_history.rs`.
 
@@ -422,10 +422,13 @@ a former member under `shared` history visibility, but answered from the
 room's current state, so a user who had left or been kicked or banned kept
 seeing later renames, topics, power levels and new members. A former member
 now reads the state as of their leave or ban, as the spec requires and as
-`/initialSync` already did. Upstream has the same bug. Files:
+`/initialSync` already did. Knocking again, or withdrawing that knock, does not
+move this point: these routes and `/initialSync` serve the state after the
+leave or ban that ended the user's last join, found by the same walk that
+bounds their history. Upstream has the same bug. Files:
 `src/service/rooms/state_accessor/user_can.rs`,
-`src/api/client/{state.rs,membership/members.rs,room/initial_sync.rs}`; test
-in `src/main/tests/state_departed_member.rs`.
+`src/api/client/{state.rs,membership/members.rs,room/initial_sync.rs}`; tests
+in `src/main/tests/{state_departed_member.rs,knock_withdrawal_history.rs}`.
 
 ### UIAA keeps only small request bodies for pending sessions
 
