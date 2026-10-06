@@ -190,6 +190,18 @@ endpoint; anyone else gets an empty `state`. Upstream has the same bug. Files:
 `src/api/client/context.rs`; test in
 `src/main/tests/context_snapshotless_state.rs`.
 
+### SSO provider chaining does not read `loginToken` from the redirect URL
+
+The legacy `GET /_matrix/client/v3/login/sso/redirect/{idpId}` endpoint read a
+`loginToken` query parameter and linked the identity that signed in next to
+that token's account, ahead of the account the identity was already linked to.
+It served the multi-provider chain, whose callback sent the browser back
+through the endpoint with a fresh token, but nothing tied the token to the
+browser presenting it. The callback now starts the next provider's sign-in
+itself with the account it just signed in, and the endpoint ignores
+`loginToken`. Upstream has the same bug. File:
+`src/api/client/session/sso.rs`; test in `src/main/tests/sso_login_redirect.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
