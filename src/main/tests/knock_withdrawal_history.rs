@@ -18,8 +18,8 @@ const MEMBER_TOKEN: &str = "knock-withdrawal-history-member-access-token";
 /// A withdrawn knock does not move a former member's departure forward.
 ///
 /// Knocking replaces a kicked member's leave row, and withdrawing the knock
-/// writes a new one; the member still reads what it was joined for, but
-/// nothing sent after its kick.
+/// writes a new one; the member still reads what it was joined for and its
+/// own join, but nothing sent after its kick.
 #[test]
 fn withdrawn_knock_keeps_departure() -> Result {
 	let options: [&str; 0] = [];
@@ -82,8 +82,17 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.filter_map(Value::as_str)
 		.collect();
 
+	let own_join = messages["chunk"]
+		.as_array()
+		.into_iter()
+		.flatten()
+		.any(|event| {
+			event["state_key"] == member_id.as_str() && event["content"]["membership"] == "join"
+		});
+
 	assert!(bodies.contains(&"while-joined"), "member loses its joined history: {bodies:?}");
 	assert!(!bodies.contains(&"after-kick"), "member reads past its kick: {bodies:?}");
+	assert!(own_join, "member loses its own join: {messages}");
 
 	Ok(())
 }

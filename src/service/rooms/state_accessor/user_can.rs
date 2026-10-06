@@ -91,9 +91,9 @@ pub async fn user_can_redact(
 ///
 /// Missing event state is allowed, and missing or invalid history visibility
 /// defaults to `shared`. The `shared` decision also accounts for the user's
-/// membership intervals around the event. Under `joined` and `invited`, the
-/// user's own membership event is visible when the membership it sets
-/// qualifies, per the spec's before-or-after rule.
+/// membership intervals around the event. Under `shared`, `joined` and
+/// `invited`, the user's own membership event is visible when the membership it
+/// sets qualifies, per the spec's before-or-after rule.
 #[implement(super::Service)]
 #[tracing::instrument(skip_all, level = "trace")]
 pub async fn user_can_see_event<Pdu>(&self, user_id: &UserId, pdu: &Pdu) -> bool
@@ -125,10 +125,13 @@ where
 					.user_was_joined(shortstatehash, user_id)
 					.await,
 
-		// An unrecognized value is treated as shared.
+		// Allow the user's own join, or a user who shared the history; an
+		// unrecognized value is treated as shared.
 		| HistoryVisibility::Shared | _ =>
-			self.user_shared_history(shortstatehash, pdu.room_id(), pdu.event_id(), user_id)
-				.await,
+			matches!(pdu.membership_for(user_id), Some(MembershipState::Join))
+				|| self
+					.user_shared_history(shortstatehash, pdu.room_id(), pdu.event_id(), user_id)
+					.await,
 	}
 }
 
