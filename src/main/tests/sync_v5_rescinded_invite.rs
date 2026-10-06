@@ -195,8 +195,11 @@ async fn left_history(&self, History { joined, unreadable }: History) -> Result 
 		let room = &reply["rooms"]["leave"][room_id.as_str()];
 		let timeline = &room["timeline"]["events"];
 
+		// MindRoom fork: sync timelines follow history visibility, so nothing
+		// sent after the departure reaches the user, whether or not it joined
+		// and whether or not its departure can be read.
 		assert!(room.is_object(), "left room missing: {reply}");
-		assert_eq!(has_event(timeline, &message), !bounded, "history bound: {reply}");
+		assert!(!has_event(timeline, &message), "history bound: {reply}");
 		if bounded && position == &before {
 			assert_eq!(timeline.as_array().unwrap().last().unwrap()["event_id"], leave.as_str());
 		}
