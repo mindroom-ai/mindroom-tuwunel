@@ -145,6 +145,19 @@ endpoint; anyone else gets an empty `state`. Upstream has the same bug. Files:
 `src/api/client/context.rs`; test in
 `src/main/tests/context_snapshotless_state.rs`.
 
+### A device's tokens rotate under its device lock
+
+Refresh-token rotation read the token a device points at, removed it, and wrote
+the new one without a lock, so two concurrent refreshes of one token could each
+write a refresh token while the device kept pointing at only one. Logout and
+device removal delete only the token the device points at, so the other one
+stayed. A refresh already in flight could also issue tokens to a device removed
+meanwhile. `set_access_token` now takes the per-device lock that
+`remove_device` already holds and refuses a device that no longer exists, so
+concurrent refreshes rotate one after another. Upstream has the same bug. File:
+`src/service/users/device.rs`; test in
+`src/main/tests/refresh_removed_device.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
