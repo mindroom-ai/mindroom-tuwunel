@@ -51,11 +51,15 @@ pub(crate) async fn get_member_events_route(
 			&& not_membership.is_none_or(is_not_equal_to!(&content.membership))
 	};
 
+	let shortstatehash = services
+		.state_accessor
+		.user_visible_shortstatehash(body.sender_user(), &body.room_id)
+		.await?;
+
 	Ok(get_member_events::v3::Response {
 		chunk: services
 			.state_accessor
-			.room_state_full(&body.room_id)
-			.ready_filter_map(Result::ok)
+			.state_full(shortstatehash)
 			.ready_filter(|((ty, _), _)| *ty == StateEventType::RoomMember)
 			.map(at!(1))
 			.ready_filter(|pdu| {
