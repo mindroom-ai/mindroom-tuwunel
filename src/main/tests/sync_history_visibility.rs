@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 use tuwunel_core::{
 	Result, implement,
-	ruma::{RoomId, UserId},
+	ruma::{OwnedRoomId, RoomId, UserId},
 };
 use tuwunel_service::Services;
 
@@ -22,9 +22,11 @@ const INVITEE_TOKEN: &str = "sync-history-visibility-invitee-access-token";
 /// Sync timelines carry only events the user's history visibility admits.
 ///
 /// A member joining a `joined` room reads nothing sent before its join, in an
-/// incremental sync covering the join, an initial sync, or a sliding sync. An
-/// invitee rejecting an invite to a `shared` room sees its own leave but none
-/// of the room's messages.
+/// incremental sync covering the join, an initial sync, or a sliding sync. A
+/// member who leaves and rejoins while another device is offline does not see
+/// the topic change made meanwhile in the timeline, but gets it in the state.
+/// An invitee rejecting an invite to a `shared` room sees its own leave but
+/// none of the room's messages.
 #[test]
 fn sync_timelines_honour_history_visibility() -> Result {
 	boot("sync-history-visibility", ["client_sync_timeout_min=0"], exercise)
@@ -41,20 +43,12 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let invitee = Client { services, base, token: INVITEE_TOKEN };
 
 	member_reads_nothing_before_its_join(&owner, &member).await?;
+	rejoined_member_gets_the_state_changed_while_away(&owner, &member).await?;
 	rejected_invite_shows_only_its_leave(&owner, &invitee, &invitee_id).await
 }
 
 async fn member_reads_nothing_before_its_join(owner: &Client<'_>, member: &Client<'_>) -> Result {
-	let room_id = owner
-		.create_room(&json!({
-			"preset": "public_chat",
-			"initial_state": [{
-				"type": "m.room.history_visibility",
-				"state_key": "",
-				"content": { "history_visibility": "joined" },
-			}],
-		}))
-		.await?;
+	let room_id = owner.create_joined_room().await?;
 
 	let since = member.sync(None, &json!({})).await?;
 	let since = field(&since, "next_batch")?;
@@ -80,6 +74,46 @@ async fn member_reads_nothing_before_its_join(owner: &Client<'_>, member: &Clien
 	let room = format!("/rooms/{room_id}/timeline");
 
 	assert_eq!(bodies(&sliding, &room), ["after-join"], "sliding: {sliding}");
+
+	Ok(())
+}
+
+async fn rejoined_member_gets_the_state_changed_while_away(
+	owner: &Client<'_>,
+	member: &Client<'_>,
+) -> Result {
+	let room_id = owner.create_joined_room().await?;
+
+	member.act(&room_id, "join").await?;
+
+	let since = member.sync(None, &json!({})).await?;
+	let since = field(&since, "next_batch")?;
+
+	member.act(&room_id, "leave").await?;
+	owner
+		.put(
+			&format!("rooms/{room_id}/state/m.room.topic"),
+			&json!({ "topic": "while-away" }),
+		)
+		.await?;
+	member.act(&room_id, "join").await?;
+	owner.send_text(&room_id, "after-rejoin").await?;
+
+	let filter = json!({ "room": { "timeline": { "limit": 10 } } });
+	let sync = member.sync(Some(since), &filter).await?;
+	let room = format!("/rooms/join/{room_id}");
+
+	let state_topic = sync
+		.pointer(&format!("{room}/state/events"))
+		.and_then(Value::as_array)
+		.into_iter()
+		.flatten()
+		.any(|event| {
+			event["type"] == "m.room.topic" && event["content"]["topic"] == "while-away"
+		});
+
+	assert_eq!(bodies(&sync, &format!("{room}/timeline/events")), ["after-rejoin"], "{sync}");
+	assert!(state_topic, "topic change is missing from the state: {sync}");
 
 	Ok(())
 }
@@ -131,6 +165,20 @@ fn bodies<'a>(response: &'a Value, timeline: &str) -> Vec<&'a str> {
 		.collect()
 }
 
+/// Create a public room whose history is visible only to joined members.
+#[implement(Client, params = "<'_>")]
+async fn create_joined_room(&self) -> Result<OwnedRoomId> {
+	self.create_room(&json!({
+		"preset": "public_chat",
+		"initial_state": [{
+			"type": "m.room.history_visibility",
+			"state_key": "",
+			"content": { "history_visibility": "joined" },
+		}],
+	}))
+	.await
+}
+
 /// Run one legacy sync as this user with a filter and an optional `since`.
 #[implement(Client, params = "<'_>")]
 async fn sync(&self, since: Option<&str>, filter: &Value) -> Result<Value> {
@@ -178,13 +226,23 @@ async fn act(&self, room_id: &RoomId, action: &str) -> Result {
 /// Send a text message, using its body as the transaction id.
 #[implement(Client, params = "<'_>")]
 async fn send_text(&self, room_id: &RoomId, body: &str) -> Result {
+	self.put(
+		&format!("rooms/{room_id}/send/m.room.message/{body}"),
+		&json!({ "msgtype": "m.text", "body": body }),
+	)
+	.await
+}
+
+/// Put a JSON body to one endpoint path as this user.
+#[implement(Client, params = "<'_>")]
+async fn put(&self, path: &str, body: &Value) -> Result {
 	self.services
 		.client
 		.clients
 		.default
-		.put(self.url(&format!("rooms/{room_id}/send/m.room.message/{body}")))
+		.put(self.url(path))
 		.bearer_auth(self.token)
-		.json(&json!({ "msgtype": "m.text", "body": body }))
+		.json(body)
 		.send()
 		.await?
 		.error_for_status()?;

@@ -90,9 +90,12 @@ checking history visibility, so a user who joined a `joined` or `invited` room
 received events sent before their join or invite, and a room left by
 rejecting an invite to a `shared` room carried its recent messages. Timeline
 events now pass the per-event check `/messages` uses, except that the user's
-own leave is always kept. `limited` is still decided over the unfiltered
-window. Upstream has the same bug. Files: `src/api/client/sync/mod.rs`; test
-in `src/main/tests/sync_history_visibility.rs`.
+own leave is always kept. The `state` section only covers changes before the
+first timeline event, so the timeline starts after the last hidden state event
+(such as a topic change while the user was away), and is `limited` when that
+drops visible events. Upstream has the same bug. Files:
+`src/api/client/sync/mod.rs`; test in
+`src/main/tests/sync_history_visibility.rs`.
 
 ### GitHub sign-in uses the account id
 

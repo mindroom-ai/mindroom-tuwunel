@@ -29,7 +29,6 @@ pub(crate) use self::{
 	v3::{calculate_heroes, sync_events_route},
 	v5::sync_events_v5_route,
 };
-use crate::client::visibility_filter;
 
 #[derive(Clone, Copy)]
 enum TimelineErrors {
@@ -133,12 +132,37 @@ async fn load_timeline_with_errors(
 	let timeline_pdus: Vec<_> = timeline_pdus
 		.into_iter()
 		.stream()
-		.wide_filter_map(async |item| match item.1.membership_for(sender_user) {
-			| Some(MembershipState::Leave) => Some(item),
-			| _ => visibility_filter(services, item, sender_user).await,
+		.wide_then(async |item| {
+			let visible =
+				matches!(item.1.membership_for(sender_user), Some(MembershipState::Leave))
+					|| services
+						.state_accessor
+						.user_can_see_event(sender_user, &item.1)
+						.await;
+
+			(item, visible)
 		})
 		.collect()
 		.await;
+
+	// The state section only covers changes before the first timeline event, so
+	// the timeline starts after the last hidden state event, and any visible
+	// event this drops makes the timeline limited.
+	let start = timeline_pdus
+		.iter()
+		.rposition(|((_, pdu), visible)| !visible && pdu.state_key().is_some())
+		.map_or(0, |pos| pos.saturating_add(1));
+
+	limited |= timeline_pdus
+		.iter()
+		.take(start)
+		.any(|(_, visible)| *visible);
+
+	let timeline_pdus: Vec<_> = timeline_pdus
+		.into_iter()
+		.skip(start)
+		.filter_map(|(item, visible)| visible.then_some(item))
+		.collect();
 
 	// Collapse superseded m.replace events when enabled
 	let timeline_pdus = if services
