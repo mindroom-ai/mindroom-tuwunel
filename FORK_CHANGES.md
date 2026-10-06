@@ -2,8 +2,8 @@
 
 This document describes the current MindRoom fork behavior on top of upstream
 `tuwunel`. The fork is rebased directly onto upstream commits; see
-`docs/rebase-*.md` for the per-rebase log. As of the 2026-09-12 rebase the base
-is upstream `v1.9.1`. Earlier changes merged upstream and dropped from the
+`docs/rebase-*.md` for the per-rebase log. As of the 2026-10-05 rebase the base
+is upstream `v1.9.3`. Earlier changes merged upstream and dropped from the
 fork include the room-creation default power-level
 override and the SSO grant-cookie path hardening (2026-07-07 rebase), and the
 drained/zero one-time-key counts fix and public MatrixRTC transport discovery
@@ -19,6 +19,21 @@ handling and one-time-key cleanup also reuse upstream's implementations; the
 remaining fork policy is immutable device identities with atomic upload/removal.
 See the [v1.9.1 rebase record](docs/rebase-v1.9.1-2026-09-12.md).
 
+At v1.9.3, optional appservice user discovery
+(`show_appservice_users_in_user_directory`) is upstream with the same option
+name and default (PR #594, `b996bc597` and `ef274db22`), so the fork commit and
+its duplicate tests are dropped. Upstream now removes a device's identity-key
+row with the device (`1347197ee`) and refuses a device ID that names a
+cross-signing key (`99c6c320a`); the fork keeps only its per-device lock and
+immutability policy around them. UIAA password flows follow upstream's
+credential-matched rule (`0726625e6`). The upstream fixes the fork had
+backported from `main` and that `v1.9.3` does not contain are carried as
+individual cherry-picks (see below). The fork's sliding sync profiles fix
+(#60) is dropped as well: upstream's rewrite of the profiles extension
+(`005830a1b`) sends profile changes only for joined rooms, and #60's test
+passes on v1.9.3 without it.
+See the [v1.9.3 rebase record](docs/rebase-v1.9.3-2026-10-05.md).
+
 ## How To Inspect
 - Fork commits: `git log --reverse --oneline <upstream-base>..HEAD`
 - Files changed in the fork: `git diff --stat <upstream-base>..HEAD`
@@ -28,9 +43,13 @@ Keep the delta limited to fork behavior and required compatibility changes.
 Leave unrelated upstream tests and tooling unchanged; handle host-specific
 verification needs in the test environment instead of carrying extra patches.
 
-The v1.9.1 ownership layout uses eight commits: shared test infrastructure, five
-runtime features with their tests and compatibility changes, CI, and docs.
-See the [current ownership and rebase procedure](docs/rebase-v1.9.1-2026-09-12.md).
+The v1.9.3 history keeps the v1.9.1 ownership layout of eight commits (shared
+test infrastructure, five runtime features with their tests and compatibility
+changes, CI, and docs), followed by the squash-merged fork PRs #15 and #17-#24
+in their original order, one `git cherry-pick -x` commit per temporary
+upstream backport, the fork PRs main merged after those backports (#26-#59 and
+#61-#67, in merge order), and the rebase documentation.
+See the [current ownership and rebase procedure](docs/rebase-v1.9.3-2026-10-05.md).
 Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
@@ -600,22 +619,26 @@ Files:
 Behavior:
 - Upstream already ships the strict-CSP-safe SSO UIAA fallback itself (MSC2454:
   server-redirect flow, `m.login.sso/fallback/web` completion, bound-IdP
-  routing). This fork hardens how UIAA flows are advertised for SSO-origin
-  users: no `m.login.password` for passwordless SSO accounts (even with LDAP
-  enabled), `m.login.sso` only for SSO-origin accounts and only when the exact
-  IdP is unambiguous (the device's own IdP or the single configured provider),
-  JWT UIAA rejected for SSO-origin users and no longer advertised (its
-  fallback/web page is not implemented), and legacy SSO-origin account
-  metadata repaired on the fly.
+  routing). Since v1.9.3, `m.login.password` follows upstream's
+  credential-matched rule (`0726625e6`): it is offered when the account holds
+  a real password, or for an LDAP-origin account while LDAP is enabled, so
+  never to a passwordless SSO account. This fork hardens the rest of the
+  advertisement: `m.login.sso` only for SSO-origin accounts (never for a
+  password account, even on a device an identity provider issued) and only
+  when the exact IdP is unambiguous (the device's own IdP or the single
+  configured provider), JWT UIAA rejected for SSO-origin users and no longer
+  advertised (its fallback/web page is not implemented), and legacy SSO-origin
+  account metadata repaired on the fly before the flows are chosen.
 - Reactivates a deactivated local SSO account on re-login, but only when the
   account was self-deactivated (a persisted deactivation reason distinguishes
   self-service from administrative deactivation).
 - Upstream's Synapse admin deactivation endpoints (the v1 deactivate route and
   the v2 create-or-modify `deactivated` flag, new in v1.8.1) record
   `DeactivationReason::Admin`, so accounts they deactivate stay deactivated on
-  SSO re-login. Their v1.9.1 full-deactivation path remains upstream's: users
-  leave joined rooms, and the v1 route forwards its `erase` flag to the full
-  cleanup service. The fork adds the reason argument, not a shallow replacement
+  SSO re-login. Their full-deactivation path remains upstream's (split into
+  helpers with bounded concurrent room departures in v1.9.3, `c53d80d80`):
+  users leave joined rooms, and the v1 route forwards its `erase` flag to the
+  full cleanup service. The fork adds the reason argument, not a shallow replacement
   for upstream cleanup. Route tests verify room departure for both endpoints.
 
 Design note — why deactivation takes a reason (vs Synapse/upstream):
@@ -715,9 +738,32 @@ Behavior:
   successful, and all competing identities are rejected. Device removal uses
   the same mutex and a waiting upload re-checks that the device still exists,
   preventing an in-flight request from resurrecting deleted identity keys.
-- `remove_device` also deletes the uploaded identity keys so a later login
-  re-using the device id can install a fresh identity. One-time-key and fallback
-  cleanup use upstream's implementation, within the same per-device lock.
+- `remove_device` deletes the uploaded identity keys so a later login re-using
+  the device id can install a fresh identity. Since v1.9.3 that deletion is
+  upstream's (`1347197ee`); the fork runs it, and upstream's one-time-key and
+  fallback cleanup, within the same per-device lock. Upstream also refuses a
+  device ID that names a cross-signing key (`99c6c320a`).
+
+## Temporary upstream backports
+
+These upstream `main` commits are not in `v1.9.3`. Each is applied with
+`git cherry-pick -x`, so its message keeps the "cherry picked from" line and any
+fork adaptation. Drop them at the next rebase onto an upstream release that
+contains them. `99c6c320a` and `f4f5a03f5`, backported before this rebase, are
+in `v1.9.3` and are no longer carried.
+
+| Upstream commit | Change |
+| --- | --- |
+| `11e7fcf31`, `fa3eefe45` (#612) | Clean up the server user when `emergency_password` is removed; keep the Synapse admin user routes off the server user |
+| `0d0467f59` (#611), `eb655bc57` | Refuse deactivated accounts at JWT and token login and in the JWT stage of UIAA |
+| `18039076c` | `/events` streams only the room events the requester may see |
+| `23ef4fdaf` | Judge a user's own member event by the membership it sets; the single-event lookup refuses events from other rooms |
+| `e85f4dc30` | `/refresh` refuses locked accounts |
+| `45800bd79` | OIDC sign-in, device approval, and authorization-code and device-grant token issuance refuse locked and deactivated accounts; OIDC refresh refuses deactivated accounts only, as upstream |
+
+The upstream appservice registration helper the deactivation test uses
+(`src/main/tests/appservice/mod.rs`, from upstream `0f3d138a5`) travels with
+that test.
 
 ## Operational Changes
 
@@ -748,6 +794,22 @@ sweep command and its retry after a storage failure
 device-key immutability/cleanup/
 concurrency, and real gateway stream/invite notifications. Stream classification
 also has unit tests in `src/service/pusher/tests.rs`.
+
+The v1.9.3 rebase adds pins for its semantic overlaps:
+`uiaa_sso_policy.rs` (the advertised UIAA flows per account origin and
+credential, the legacy-origin repair, and the JWT refusal for SSO accounts),
+`sync_edit_compaction.rs` (legacy and sliding `/sync` compaction, initial and
+incremental, keeping a state event that claims a replacement), a
+`loginToken` exchange after SSO self-reactivation in
+`sso_callback_completion.rs`, since login now refuses deactivated accounts, and
+a race of identity uploads against device removals in
+`device_key_immutability.rs`, which takes the fork's per-device lock and then
+upstream's per-user device-list lock and must neither stall nor leave keys
+behind.
+
+Unit tests that load `Config` from a file also read `TUWUNEL_*` environment
+overrides. The development shell exports `TUWUNEL_DATABASE_PATH`; unset it when
+running the suite, or those tests share one database and fail.
 
 Database-path isolation, pagination bounds, quiet-room full-state sync, and
 stored-key corruption coverage use upstream's native tests under `src/main/tests/`.
@@ -789,6 +851,9 @@ native_client_ids = ["chat.mindroom.app"]
   let clients recover the surviving edit from history responses. They cannot
   restore purged revisions if the newest edit is later redacted.
 - Admin-deactivated SSO accounts stay deactivated on future login attempts.
+- An SSO-origin account that also holds a real password is offered both
+  `m.login.password` and `m.login.sso` in UIAA (upstream's rule since v1.9.3);
+  before v1.9.3 the fork offered such accounts SSO only.
 - Native Apple login requires the app bundle ID in `native_client_ids`.
 - A client that lost its crypto store but kept its access token receives 403
   `M_FORBIDDEN` on `/keys/upload` until it logs in again (device identity keys
