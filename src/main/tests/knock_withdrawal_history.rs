@@ -1,8 +1,14 @@
 #![cfg(test)]
 
 use serde_json::{Value, json};
-use tuwunel_core::{Result, implement, ruma::RoomId};
-use tuwunel_service::Services;
+use tuwunel_core::{
+	PduCount, Result, implement,
+	ruma::{
+		RoomId, UserId,
+		events::room::member::{MembershipState, RoomMemberEventContent},
+	},
+};
+use tuwunel_service::{Services, rooms::state_cache::MembershipUpdate};
 
 use self::{
 	client::{Client, register},
@@ -15,13 +21,15 @@ mod fixture;
 const OWNER_TOKEN: &str = "knock-withdrawal-history-owner-access-token";
 const MEMBER_TOKEN: &str = "knock-withdrawal-history-member-access-token";
 
-/// A withdrawn knock does not move a former member's departure forward.
+/// A former member's history ends at the leave that ended its join.
 ///
 /// Knocking replaces a kicked member's leave row, and withdrawing the knock
 /// writes a new one; the member still reads what it was joined for and its
-/// own join, but nothing sent after its kick.
+/// own join, but nothing sent after its kick. A leave row at a position with
+/// no event, as servers before v1.4.3 wrote, still bounds the history, so a
+/// member who left there keeps what was sent before its join.
 #[test]
-fn withdrawn_knock_keeps_departure() -> Result {
+fn departure_bounds_history() -> Result {
 	let options: [&str; 0] = [];
 
 	boot("knock-withdrawal-history", options, exercise)
@@ -35,6 +43,11 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let owner = Client { services, base, token: OWNER_TOKEN };
 	let member = Client { services, base, token: MEMBER_TOKEN };
 
+	withdrawn_knock(&owner, &member, &member_id).await?;
+	eventless_leave(&owner, &member, &member_id).await
+}
+
+async fn withdrawn_knock(owner: &Client<'_>, member: &Client<'_>, member_id: &UserId) -> Result {
 	let room_id = owner
 		.create_room(&json!({
 			"preset": "private_chat",
@@ -74,14 +87,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.get(&format!("rooms/{room_id}/messages"), &[("dir", "b")])
 		.await?;
 
-	let bodies: Vec<_> = messages["chunk"]
-		.as_array()
-		.into_iter()
-		.flatten()
-		.filter_map(|event| event.pointer("/content/body"))
-		.filter_map(Value::as_str)
-		.collect();
-
+	let bodies = bodies(&messages);
 	let own_join = messages["chunk"]
 		.as_array()
 		.into_iter()
@@ -95,6 +101,61 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	assert!(own_join, "member loses its own join: {messages}");
 
 	Ok(())
+}
+
+async fn eventless_leave(owner: &Client<'_>, member: &Client<'_>, member_id: &UserId) -> Result {
+	let room_id = owner
+		.create_room(&json!({ "preset": "private_chat" }))
+		.await?;
+
+	owner.send_text(&room_id, "before-join").await?;
+	owner
+		.post(&format!("rooms/{room_id}/invite"), &json!({ "user_id": member_id }))
+		.await?;
+
+	member
+		.post(&format!("rooms/{room_id}/join"), &json!({}))
+		.await?;
+
+	member
+		.post(&format!("rooms/{room_id}/leave"), &json!({}))
+		.await?;
+
+	// Record the leave again at a fresh position, as those servers did.
+	let services = owner.services;
+	services
+		.state_cache
+		.update_membership(MembershipUpdate {
+			room_id: &room_id,
+			user_id: member_id,
+			membership_event: RoomMemberEventContent::new(MembershipState::Leave),
+			sender: member_id,
+			last_state: None,
+			invite_via: None,
+			update_joined_count: true,
+			count: PduCount::Normal(*services.globals.next_count()),
+		})
+		.await?;
+
+	let messages = member
+		.get(&format!("rooms/{room_id}/messages"), &[("dir", "b")])
+		.await?;
+
+	let bodies = bodies(&messages);
+	assert!(bodies.contains(&"before-join"), "member loses its pre-join history: {bodies:?}");
+
+	Ok(())
+}
+
+/// The message bodies in one `/messages` reply.
+fn bodies(messages: &Value) -> Vec<&str> {
+	messages["chunk"]
+		.as_array()
+		.into_iter()
+		.flatten()
+		.filter_map(|event| event.pointer("/content/body"))
+		.filter_map(Value::as_str)
+		.collect()
 }
 
 /// Send a text message, using its body as the transaction id.

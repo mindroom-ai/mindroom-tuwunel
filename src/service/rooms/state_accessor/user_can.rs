@@ -208,11 +208,20 @@ async fn user_shared_history(
 	}
 
 	// A knock or an invite after the leave drops it, and leaving again records a
-	// later one, so only a leave that ended a join bounds the history.
+	// later one, so only a leave that ended a join bounds the history. The leave is
+	// read from the room state, as rows written before v1.4.3 have no event at
+	// their count.
+	let Ok(leave_id) = self
+		.room_state_get_id(room_id, &StateEventType::RoomMember, user_id.as_str())
+		.await
+	else {
+		return false;
+	};
+
 	let Ok(left_shortstatehash) = self
 		.services
-		.timeline
-		.get_shortstatehash(room_id, left_count)
+		.state
+		.pdu_shortstatehash(&leave_id)
 		.await
 	else {
 		return false;
