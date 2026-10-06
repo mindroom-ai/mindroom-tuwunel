@@ -698,6 +698,8 @@ Behavior:
   `global.identity_provider.native_client_ids` while keeping the web Services ID
   valid; reuses the normal SSO mapping/registration/reactivation/loginToken
   path.
+- Refuses deactivated and locked accounts like the browser SSO callback: both
+  checks live in `complete_sso_session`, which both endpoints call.
 
 Note: the Apple `id_token` userinfo fallback that this fork originally carried
 was merged upstream, so it is no longer a fork delta.
