@@ -1,8 +1,11 @@
 #![cfg(test)]
 
-use reqwest::Method;
+use reqwest::{Method, Response, StatusCode};
 use serde_json::{Value, json};
-use tuwunel_core::{Result, implement, ruma::UserId};
+use tuwunel_core::{
+	Result, implement,
+	ruma::{RoomId, UserId},
+};
 use tuwunel_service::Services;
 
 use self::{
@@ -23,7 +26,9 @@ const NEWCOMER_TOKEN: &str = "state-departed-member-newcomer-access-token";
 /// The kicked member's `/state` and `/members` still show the room as it was
 /// at the kick, while the owner reads the current state. An `at` token on
 /// `/members` reads that token's snapshot, except that a former member reads
-/// no later than their departure.
+/// no later than their departure. The room summary, which shows the current
+/// state, is refused to the kicked member but given to the owner and to the
+/// invited newcomer.
 #[test]
 fn departed_member_reads_state_at_departure() -> Result {
 	let options: [&str; 0] = [];
@@ -39,6 +44,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 	let owner = Client { services, base, token: OWNER_TOKEN };
 	let member = Client { services, base, token: MEMBER_TOKEN };
+	let newcomer = Client { services, base, token: NEWCOMER_TOKEN };
 
 	let room_id = owner
 		.create_room(&json!({ "preset": "private_chat", "name": "before" }))
@@ -67,6 +73,10 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	owner
 		.send(Method::POST, &format!("rooms/{room_id}/invite"), &newcomer_target)
 		.await?;
+
+	let member_summary = member.summary(&room_id).await?;
+	let owner_summary: Value = owner.summary(&room_id).await?.json().await?;
+	let newcomer_summary: Value = newcomer.summary(&room_id).await?.json().await?;
 
 	let member_name = member.get(&name_path).await?;
 	let owner_name = owner.get(&name_path).await?;
@@ -129,6 +139,20 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		"the owner's current members lack the invite: {owner_now}"
 	);
 
+	assert_eq!(
+		member_summary.status(),
+		StatusCode::FORBIDDEN,
+		"kicked member reads the current summary"
+	);
+	assert_eq!(
+		owner_summary["name"], "after",
+		"owner's summary lacks the new name: {owner_summary}"
+	);
+	assert_eq!(
+		newcomer_summary["membership"], "invite",
+		"invited newcomer is refused the summary: {newcomer_summary}"
+	);
+
 	assert_eq!(member_name["name"], "before", "kicked member reads the new name");
 	assert_eq!(names, ["before"], "kicked member's state has the new name: {state}");
 	assert_eq!(membership(&member_id), Some("leave"), "members lack the kick: {members}");
@@ -164,6 +188,22 @@ async fn get(&self, path: &str) -> Result<Value> {
 		.await?
 		.error_for_status()?
 		.json()
+		.await?;
+
+	Ok(response)
+}
+
+/// Request a room's summary as this user and keep the raw reply.
+#[implement(Client, params = "<'_>")]
+async fn summary(&self, room_id: &RoomId) -> Result<Response> {
+	let response = self
+		.services
+		.client
+		.clients
+		.default
+		.get(format!("{}/_matrix/client/v1/room_summary/{room_id}", self.base))
+		.bearer_auth(self.token)
+		.send()
 		.await?;
 
 	Ok(response)
