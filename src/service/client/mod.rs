@@ -153,17 +153,19 @@ fn make_clients(services: &Services) -> Result<Clients> {
 		}};
 	}
 
+	// A redirect target is not checked against `ip_range_denylist` like the
+	// resolved destination is, so federation requests follow no redirects.
 	let federation = make_federation(services, |cb| {
 		cb.read_timeout(Duration::from_secs(services.config.federation_timeout))
 			.pool_max_idle_per_host(services.config.federation_idle_per_host.into())
 			.pool_idle_timeout(Duration::from_secs(services.config.federation_idle_timeout))
-			.redirect(Policy::limited(3))
+			.redirect(Policy::none())
 	})?;
 
 	let synapse = make_federation(services, |cb| {
 		cb.read_timeout(Duration::from_secs(305))
 			.pool_max_idle_per_host(0)
-			.redirect(Policy::limited(3))
+			.redirect(Policy::none())
 	})?;
 
 	let sender = make_federation(services, |cb| {
@@ -171,7 +173,7 @@ fn make_clients(services: &Services) -> Result<Clients> {
 			.timeout(Duration::from_secs(services.config.sender_timeout))
 			.pool_max_idle_per_host(1)
 			.pool_idle_timeout(Duration::from_secs(services.config.sender_idle_timeout))
-			.redirect(Policy::limited(2))
+			.redirect(Policy::none())
 	})?;
 
 	Ok(Clients {

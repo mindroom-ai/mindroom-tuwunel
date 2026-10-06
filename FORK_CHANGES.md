@@ -48,6 +48,18 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### Federation requests follow no redirects
+
+The federation clients followed a peer's redirects, and a redirect target was
+never checked against `ip_range_denylist`, so a peer could send a request on to
+any address the server can reach, including over plain HTTP. A legacy media
+fetch then stored that address's answer as the peer's media and returned it to
+the requesting client. Federation requests now follow no redirects, and legacy
+media requests to peers no longer set `allow_redirect`, so the peer serves the
+media itself. Upstream has the same bug. Files: `src/service/client/mod.rs`,
+`src/service/media/remote.rs`, `src/api/client/media_legacy.rs`; test in
+`src/main/tests/federation_redirect.rs`.
+
 ### Per-user room lists stop at the user ID
 
 `rooms_joined`, `rooms_invited`, `rooms_knocked` and `rooms_left` scanned their
