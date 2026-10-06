@@ -73,6 +73,16 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### `/context` keeps current state from requesters who may not read it
+
+A room's create event and backfilled events have no state snapshot, so
+`/context` around one of them returned the room's current state, even to a user
+who had never joined. That fallback now applies only to a requester who passes
+the `/state` check (`user_can_see_state_events`) or to the admin room-context
+endpoint; anyone else gets an empty `state`. Upstream has the same bug. Files:
+`src/api/client/context.rs`; test in
+`src/main/tests/context_snapshotless_state.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
