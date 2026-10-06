@@ -354,6 +354,18 @@ itself with the account it just signed in, and the endpoint ignores
 `loginToken`. Upstream has the same bug. File:
 `src/api/client/session/sso.rs`; test in `src/main/tests/sso_login_redirect.rs`.
 
+### SSO username fallback skips accounts linked to another identity
+
+When every username a new identity claims at an untrusted provider is taken,
+it falls back to a localpart derived from its issuer and subject. An existing
+`sso`-origin account at that localpart was handed to it even when another
+identity already signed in to that account, linking both identities to it. The
+fallback now skips an account that has a linked identity, so the sign-in fails
+with `M_USER_IN_USE`. An account with no linked identity, such as one whose
+links an admin removed, is still reused at its fallback. Upstream has the same
+bug. File: `src/api/client/session/sso.rs`; test in
+`src/main/tests/sso_fallback_account.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
