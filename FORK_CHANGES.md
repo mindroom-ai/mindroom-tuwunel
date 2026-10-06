@@ -83,6 +83,125 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### GitHub sign-in uses the account id
+
+GitHub's user API has no `sub`, so a `login` alias made the username the
+identity, and GitHub frees a username after a rename or account deletion.
+Whoever registered it next signed in to the account linked to the previous
+owner, and through the fork's self-reactivation also revived it if it had been
+self-deactivated. GitHub identities are now keyed on the numeric account `id`,
+hashed under their own issuer string, and the `login` only picks a new
+account's localpart. An association stored under a `login` moves to the `id` at
+the next sign-in only when the avatar URL stored with it names that `id`;
+otherwise the sign-in is treated as a new user, and
+`docs/authentication/providers.md` describes how to re-link the account.
+Upstream has the same bug. Files: `src/service/oauth/{mod.rs,user_info.rs}`,
+`src/api/client/session/sso.rs`.
+
+### Sliding sync withholds the timeline of knocked rooms
+
+Sliding sync lists include rooms the user has knocked on, but only invited rooms
+had their timeline withheld, so a knocker received the room's newest events as
+a member would. The timeline now follows the same membership check as the
+required state, which already excluded invitees and knockers. Upstream has the
+same bug. Files: `src/api/client/sync/v5/rooms.rs`; test in
+`src/main/tests/sync_v5_knock_timeline.rs`.
+
+### Knock state leaves local memberships alone
+
+A knock on a room this server is not in installs the answering server's
+`knock_room_state` as the room's state, unchecked, and forcing that state
+replayed each `m.room.member` event in it into the membership cache, so it
+could mark other local users as joined, invited, or no longer invited. Member
+events are now left out of knock state; the knocking user's own membership
+still comes from the knock event this server builds. Upstream has the same
+bug. Files: `src/service/membership/knock.rs`; test in
+`src/service/membership/knock/tests.rs`.
+
+### A pending knock does not open a room over federation
+
+The federation room access check (`/state`, `/state_ids`, `/event`,
+`/event_auth`, `/backfill`, `/get_missing_events`, `/timestamp_to_event`)
+admitted every server while any user, local or remote, had a pending knock in
+the room. A server with no joined member could then read the room's state and,
+with shared history visibility, its timeline. A pending knock no longer counts:
+the requesting server needs a joined member unless the room is world-readable.
+Upstream has the same bug. Files: `src/api/server/{utils.rs,event.rs}`; test in
+`src/main/tests/federation_knock_access.rs`.
+
+### Leaving without a membership records no departure
+
+When room state held no member event for the user, or a `leave` or `ban` one,
+`/leave` still wrote a leave row at a fresh stream position. A user who had
+never joined then got the room in `/sync` as a left room, with its recent
+timeline and current state, and a kicked or banned user's departure moved
+forward past the events their removal hides. The leave row is now written only
+when it clears a cached join, invite or knock. Upstream has the same bug.
+Files: `src/service/membership/leave.rs`; test in
+`src/main/tests/leave_without_membership.rs`.
+
+### Federated key queries keep only the answering server's users
+
+A remote server's `/user/keys/query` answer was taken as a whole, so entries
+naming users of other servers, local users included, had their master key
+stored as that user's and replaced the local keys in the client's response.
+Entries whose user does not belong to the answering server are now dropped, as
+the device list and signing key update EDUs already do. Upstream has the same
+bug. File: `src/api/client/keys/get_keys.rs`.
+
+### Sliding Sync caps the timeline limit
+
+Sliding Sync lists and room subscriptions passed their `timeline_limit` to the
+timeline loader without a ceiling, so a large value read a room's whole history
+into one response. The limit is now capped at 100 events, as legacy `/sync`
+caps a filter's timeline limit; a room with more new events comes back
+`limited` with a `prev_batch`. Upstream has the same bug. File:
+`src/api/client/sync/v5/rooms.rs`.
+
+### Sliding sync receipts and typing only for joined rooms
+
+Simplified sliding sync sent other users' read receipts and typing for every
+room in the window: rooms the user has left or been removed from, which a room
+subscription keeps there, and rooms they are invited to or have knocked on.
+Both now follow the required-state rule, so only joined rooms, and
+world-readable rooms peeked without a membership, carry them, as v3 `/sync`
+sends ephemeral events only for joined rooms. The user's own private read
+receipt and room account data are unchanged. Upstream has the same bug. Files:
+`src/api/client/sync/v5/{range.rs,rooms.rs,extensions/typing.rs}`; test in
+`src/main/tests/sync_v5_departed_ephemeral.rs`.
+
+### UIAA keeps only small request bodies for pending sessions
+
+A UIAA request sent without `auth` keeps its JSON body in memory so the
+follow-up request can omit fields, and nothing removed a body again, not even
+when its session finished. The bodies now live in an LRU of 1024 sessions,
+bodies over 4 KiB of serialized JSON are not kept (the client resends the full
+request, as after a restart), and a finished session releases its body.
+Upstream has the same bug. Files: `src/service/uiaa/mod.rs`; test in
+`src/service/uiaa/tests.rs`.
+
+### `/context` keeps current state from requesters who may not read it
+
+A room's create event and backfilled events have no state snapshot, so
+`/context` around one of them returned the room's current state, even to a user
+who had never joined. That fallback now applies only to a requester who passes
+the `/state` check (`user_can_see_state_events`) or to the admin room-context
+endpoint; anyone else gets an empty `state`. Upstream has the same bug. Files:
+`src/api/client/context.rs`; test in
+`src/main/tests/context_snapshotless_state.rs`.
+
+### SSO provider chaining does not read `loginToken` from the redirect URL
+
+The legacy `GET /_matrix/client/v3/login/sso/redirect/{idpId}` endpoint read a
+`loginToken` query parameter and linked the identity that signed in next to
+that token's account, ahead of the account the identity was already linked to.
+It served the multi-provider chain, whose callback sent the browser back
+through the endpoint with a fresh token, but nothing tied the token to the
+browser presenting it. The callback now starts the next provider's sign-in
+itself with the account it just signed in, and the endpoint ignores
+`loginToken`. Upstream has the same bug. File:
+`src/api/client/session/sso.rs`; test in `src/main/tests/sso_login_redirect.rs`.
+
 ### Legacy SSO login asks before an unlisted `redirectUrl`
 
 The legacy SSO callback sent the fresh login token to whatever `redirectUrl`
@@ -378,6 +497,9 @@ Database-path isolation, pagination bounds, quiet-room full-state sync, and
 stored-key corruption coverage use upstream's native tests under `src/main/tests/`.
 Only the corruption fixture's normal replacement/retry expectations are adapted
 to the fork's immutable-device policy; all corrupt-byte cases remain intact.
+Upstream's `auto_accept_invites.rs` reads the accepted room's `m.direct` once
+after the join, racing the write that follows it; the fork polls for that write
+first.
 
 ## Runtime Configuration
 
