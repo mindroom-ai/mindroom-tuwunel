@@ -67,6 +67,19 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Remote profile lookups replace the cached profile within the local limits
+
+Looking up a remote user's profile fetches it from their server on every
+request. Each returned field was stored without the field-name grammar and
+64 KiB total size that local profiles are held to, and a field the server no
+longer returned was never removed, so the cached profile kept stale fields and
+grew with every new field name a server returned. The response now replaces the
+cached profile, as `!admin users refresh-profile` already did, and a response
+with a field name outside the MSC4133 grammar or over 64 KiB is refused without
+being stored. Upstream has the same bug. Files:
+`src/service/profile/{mod.rs,remote.rs}`; test in
+`src/service/profile/tests/remote/mod.rs`.
+
 ### Replacing a redacted latest reply searches a bounded range
 
 Redacting a thread's newest reply swaps the newest remaining reply into the
@@ -79,6 +92,17 @@ purged edits), and a root with no remaining reply among them drops the summary
 too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
+
+### Sliding sync looks up delivered required state selectors in a set
+
+When a room's sliding sync configuration changes, each required state entry is
+checked against the selectors the room was last delivered with, so state the
+client had not asked for before is sent in full. Each check scanned the stored
+list, so the cost grew with the product of the current entries and the stored
+selectors, and a request with a million selectors kept a worker busy for
+minutes. The stored selectors are now collected into a hash set once per room.
+Upstream has the same bug. File: `src/api/client/sync/v5/rooms.rs`; test in
+`src/api/client/sync/v5/rooms/tests.rs`.
 
 ### Federated read receipts need a joined user and an event of the room
 
@@ -305,9 +329,13 @@ would fetch another. It keeps each fetched event as canonical JSON without its
 parses it again only to authorize it; an event that is then still larger than
 the 65,535 byte PDU limit is a failed fetch. The fetcher rejects an event
 response larger than four times that limit before parsing it, which leaves room
-for the `unsigned` data a server serves with the event. Upstream has the same
-bug. Files: `src/service/rooms/event_handler/fetch_auth.rs`,
-`src/service/fetcher/validate.rs`.
+for the `unsigned` data a server serves with the event, and stops reading an
+event response once it passes that size instead of buffering it up to the
+federation response limit first. Upstream has the same bug. Files:
+`src/service/rooms/event_handler/fetch_auth.rs`,
+`src/service/fetcher/validate.rs`, `src/service/fetcher/transport.rs`,
+`src/service/federation/execute.rs`; test in
+`src/main/tests/federation_event_response_limit.rs`.
 
 ### `ip_range_denylist` covers IPv4-mapped IPv6 addresses
 
@@ -413,6 +441,19 @@ into one response. The limit is now capped at 100 events, as legacy `/sync`
 caps a filter's timeline limit; a room with more new events comes back
 `limited` with a `prev_batch`. Upstream has the same bug. File:
 `src/api/client/sync/v5/rooms.rs`.
+
+### Sync caps the requested profile fields
+
+The MSC4262 `profiles.fields` list of a sliding sync request and the MSC4429
+`profile_fields.ids` of a legacy `/sync` filter had no length limit. Each
+requested field costs one read for every user the response carries: on an
+initial pass, every member of a room unless members are lazy-loaded. Sliding
+sync also compared each request's list with the connection's previous one name
+by name. Both now use only the first 64 names; sliding sync keeps only those on
+the connection, and legacy sync cuts stored and inline filters alike. Upstream
+has the same bug. Files: `src/service/{profile/mod.rs,sync/mod.rs}`,
+`src/api/client/sync/profiles.rs`; tests in `src/service/sync/tests.rs` and
+`src/main/tests/sync_v3_profiles.rs`.
 
 ### Sliding sync receipts and typing only for joined rooms
 

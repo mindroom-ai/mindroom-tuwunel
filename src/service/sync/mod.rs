@@ -24,6 +24,8 @@ use tuwunel_core::{
 };
 use tuwunel_database::{Cbor, Deserialized, Map};
 
+use crate::profile::MAX_SYNC_FIELDS;
+
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	connections: Connections,
@@ -525,18 +527,26 @@ fn update_cache_to_device(request: &ToDevice, cached: &mut ToDevice) {
 
 /// Merges the profiles extension settings into the connection.
 ///
-/// Returns whether the request widened the field filter, which is read before
-/// the merge overwrites the filter it compares against.
+/// Only the first [`MAX_SYNC_FIELDS`] requested fields are kept. Returns
+/// whether the request widened the field filter, which is read before the merge
+/// overwrites the filter it compares against.
 #[implement(Connection)]
 fn update_cache_profiles(request: &Profiles, cached: &mut Profiles) -> bool {
 	some_or_sticky(request.enabled.as_ref(), &mut cached.enabled);
 	some_or_sticky(request.rooms.as_ref(), &mut cached.rooms);
 	some_or_sticky(request.lists.as_ref(), &mut cached.lists);
 
-	// Compare against the cached filter before the merge below overwrites it.
-	let widened = fields_widened(request.fields.as_deref(), cached.fields.as_deref());
+	let fields = request
+		.fields
+		.as_deref()
+		.map(|fields| &fields[..fields.len().min(MAX_SYNC_FIELDS)]);
 
-	some_or_sticky(request.fields.as_ref(), &mut cached.fields);
+	// Compare against the cached filter before the merge below overwrites it.
+	let widened = fields_widened(fields, cached.fields.as_deref());
+
+	if let Some(fields) = fields {
+		cached.fields = Some(fields.to_vec());
+	}
 
 	widened
 }
