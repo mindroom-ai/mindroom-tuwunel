@@ -92,6 +92,27 @@ now refuses a deactivated account with `M_USER_DEACTIVATED`, as login does.
 Upstream has the same bug. Files: `src/api/client/account/change_password.rs`;
 test in `src/main/tests/email_password_reset/scenarios.rs`.
 
+### Auth chain fetch walks are bounded
+
+Fetching the missing auth events of an incoming event walked the remote server's
+auth chain one event at a time and kept every fetched event in memory until the
+walk ended, with no limit on the number of events and only the federation
+response limit (256 MiB by default) on each one. A walk now gives up and drops
+what it fetched once it holds `max_fetch_prev_events` events (default 1024) and
+would fetch another. It keeps each fetched event without its `unsigned` field,
+which the outlier path removes before its own size check, and treats an event
+that is then still larger than the 65,535 byte PDU limit as a failed fetch.
+Upstream has the same bug. File: `src/service/rooms/event_handler/fetch_auth.rs`.
+
+### `ip_range_denylist` covers IPv4-mapped IPv6 addresses
+
+An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) was matched against the denylist
+as an IPv6 address, so the IPv4 ranges never matched it, while a connection to
+it reaches the embedded IPv4 host. The URL, redirect, DNS answer and peer
+address checks now match such an address as its IPv4 address, so
+`[::ffff:10.0.0.1]` is refused like `10.0.0.1`. Upstream has the same bug.
+File: `src/service/client/mod.rs`; test in `src/service/client/tests.rs`.
+
 ### GitHub sign-in uses the account id
 
 GitHub's user API has no `sub`, so a `login` alias made the username the
@@ -199,6 +220,18 @@ endpoint; anyone else gets an empty `state`. Upstream has the same bug. Files:
 `src/api/client/context.rs`; test in
 `src/main/tests/context_snapshotless_state.rs`.
 
+### SSO provider chaining does not read `loginToken` from the redirect URL
+
+The legacy `GET /_matrix/client/v3/login/sso/redirect/{idpId}` endpoint read a
+`loginToken` query parameter and linked the identity that signed in next to
+that token's account, ahead of the account the identity was already linked to.
+It served the multi-provider chain, whose callback sent the browser back
+through the endpoint with a fresh token, but nothing tied the token to the
+browser presenting it. The callback now starts the next provider's sign-in
+itself with the account it just signed in, and the endpoint ignores
+`loginToken`. Upstream has the same bug. File:
+`src/api/client/session/sso.rs`; test in `src/main/tests/sso_login_redirect.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
@@ -220,6 +253,7 @@ Files:
 
 Behavior:
 - Adds `/sync` timeline compaction for superseded non-state `m.replace` events.
+  Redactions are never compacted, even when their content claims a relation.
 - Adds a background purge worker that deletes old superseded edit events from
   storage and indexes, retaining the newest eligible edit per (room, target,
   sender). Candidates and originals must be non-state events with matching
@@ -483,6 +517,9 @@ Database-path isolation, pagination bounds, quiet-room full-state sync, and
 stored-key corruption coverage use upstream's native tests under `src/main/tests/`.
 Only the corruption fixture's normal replacement/retry expectations are adapted
 to the fork's immutable-device policy; all corrupt-byte cases remain intact.
+Upstream's `auto_accept_invites.rs` reads the accepted room's `m.direct` once
+after the join, racing the write that follows it; the fork polls for that write
+first.
 
 ## Runtime Configuration
 
