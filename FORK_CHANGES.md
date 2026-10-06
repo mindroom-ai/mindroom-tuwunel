@@ -256,10 +256,14 @@ auth chain one event at a time and kept every fetched event in memory until the
 walk ended, with no limit on the number of events and only the federation
 response limit (256 MiB by default) on each one. A walk now gives up and drops
 what it fetched once it holds `max_fetch_prev_events` events (default 1024) and
-would fetch another. It keeps each fetched event without its `unsigned` field,
-which the outlier path removes before its own size check, and treats an event
-that is then still larger than the 65,535 byte PDU limit as a failed fetch.
-Upstream has the same bug. File: `src/service/rooms/event_handler/fetch_auth.rs`.
+would fetch another. It keeps each fetched event as canonical JSON without its
+`unsigned` field, which the outlier path removes before its own size check, and
+parses it again only to authorize it; an event that is then still larger than
+the 65,535 byte PDU limit is a failed fetch. The fetcher rejects an event
+response larger than four times that limit before parsing it, which leaves room
+for the `unsigned` data a server serves with the event. Upstream has the same
+bug. Files: `src/service/rooms/event_handler/fetch_auth.rs`,
+`src/service/fetcher/validate.rs`.
 
 ### `ip_range_denylist` covers IPv4-mapped IPv6 addresses
 
