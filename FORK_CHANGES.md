@@ -447,6 +447,17 @@ summaries come from local state. Upstream has the same bug. File:
 `src/service/rooms/spaces/federation.rs`; test in
 `src/service/rooms/spaces/tests.rs`.
 
+### Remote hierarchy answers must describe the requested room
+
+A remote server's `/hierarchy` answer for a room this server is not in was
+cached and served as that room's summary without checking the summary's
+`room_id`. An answer describing a different room, possibly one this server is
+in, then appeared in `/hierarchy` as that other room, with the name, topic,
+avatar and join rule the remote gave it, until the cache entry expired. Such
+answers are now ignored, as `/summary` already ignores them. Upstream has the
+same bug. File: `src/service/rooms/spaces/federation.rs`; test in
+`src/main/tests/federation_hierarchy_room.rs`.
+
 ### Sliding Sync caps the timeline limit
 
 Sliding Sync lists and room subscriptions passed their `timeline_limit` to the
