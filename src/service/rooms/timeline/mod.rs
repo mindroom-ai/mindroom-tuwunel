@@ -222,6 +222,20 @@ pub async fn first_pdu_in_room(&self, room_id: &RoomId) -> Result<PduEvent> {
 	self.first_item_in_room(room_id).await.map(at!(1))
 }
 
+/// Returns the earliest PDU in the room's normal timeline, skipping backfilled
+/// events.
+#[implement(Service)]
+#[tracing::instrument(skip(self), level = "debug")]
+pub async fn first_normal_pdu_in_room(&self, room_id: &RoomId) -> Result<PduEvent> {
+	let pdus = self.pdus(None, room_id, Some(PduCount::Normal(0)));
+
+	pin_mut!(pdus);
+	pdus.try_next()
+		.await?
+		.map(at!(1))
+		.ok_or_else(|| err!(Request(NotFound("No PDU found in room"))))
+}
+
 /// Returns the latest accepted PDU in a room.
 ///
 /// Presentation removes sender-only transaction metadata because no requesting
