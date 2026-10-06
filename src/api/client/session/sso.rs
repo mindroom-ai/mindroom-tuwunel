@@ -27,6 +27,7 @@ use tuwunel_core::{
 		content_disposition::make_content_disposition,
 		hash::sha256,
 		result::{FlatOk, LogErr, NotFound},
+		stream::ReadyExt,
 		string::{EMPTY, truncate_deterministic},
 		timepoint_from_now, timepoint_has_passed,
 	},
@@ -928,6 +929,19 @@ async fn try_user_id(
 
 		if !unique_id {
 			debug_warn!(?username, "Username exists.");
+			return None;
+		}
+
+		// The identity choosing a username has no account yet, so an account linked to
+		// an identity belongs to another one.
+		if services
+			.oauth
+			.sessions
+			.get_sess_id_by_user(&user_id)
+			.ready_any(|sess_id| sess_id.is_ok())
+			.await
+		{
+			debug_warn!(?username, "Existing username is linked to another identity.");
 			return None;
 		}
 	} else if unique_id && !provider.unique_id_fallbacks {
