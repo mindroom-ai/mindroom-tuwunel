@@ -83,6 +83,18 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Auth chain fetch walks are bounded
+
+Fetching the missing auth events of an incoming event walked the remote server's
+auth chain one event at a time and kept every fetched event in memory until the
+walk ended, with no limit on the number of events and only the federation
+response limit (256 MiB by default) on each one. A walk now gives up and drops
+what it fetched once it holds `max_fetch_prev_events` events (default 1024) and
+would fetch another. It keeps each fetched event without its `unsigned` field,
+which the outlier path removes before its own size check, and treats an event
+that is then still larger than the 65,535 byte PDU limit as a failed fetch.
+Upstream has the same bug. File: `src/service/rooms/event_handler/fetch_auth.rs`.
+
 ### `ip_range_denylist` covers IPv4-mapped IPv6 addresses
 
 An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) was matched against the denylist
