@@ -2,8 +2,9 @@
 
 This document describes the current MindRoom fork behavior on top of upstream
 `tuwunel`. The fork is rebased directly onto upstream commits; see
-`docs/rebase-*.md` for the per-rebase log. As of the 2026-10-05 rebase the base
-is upstream `v1.9.3`. Earlier changes merged upstream and dropped from the
+`docs/rebase-*.md` for the per-rebase log. As of the 2026-10-06 rebase the base
+is upstream `main` at `3f5db6d3a`, 134 commits past the `v1.9.3` release (the
+workspace version is still 1.9.3). Earlier changes merged upstream and dropped from the
 fork include the room-creation default power-level
 override and the SSO grant-cookie path hardening (2026-07-07 rebase), and the
 drained/zero one-time-key counts fix and public MatrixRTC transport discovery
@@ -34,6 +35,18 @@ individual cherry-picks (see below). The fork's sliding sync profiles fix
 passes on v1.9.3 without it.
 See the [v1.9.3 rebase record](docs/rebase-v1.9.3-2026-10-05.md).
 
+On upstream `main` (`3f5db6d3a`), the fork's thread summary fixes (#19-#21)
+are upstream: PRs #617-#619 (`c9307347a`, `787099ab5`, `e6735fdf3`) and their
+rework into a single `rebuild_thread_summaries` startup pass (`b0c52a081`),
+which replaces the fork's `recount_thread_replies` and
+`scrub_redacted_thread_latest` passes and runs once on a fork database. Only
+the bound on the search for a redacted latest reply's replacement (#24) stays
+in the fork, on upstream's rewritten helpers. All eight temporary backports are
+in `main` and are no longer carried. Account deactivation now holds upstream's
+admin-room lock and refuses the last admin (`3fe9ef681`, `5420f2e56`); the fork
+records its deactivation reason under that lock.
+See the [upstream main rebase record](docs/rebase-upstream-main-2026-10-06.md).
+
 ## How To Inspect
 - Fork commits: `git log --reverse --oneline <upstream-base>..HEAD`
 - Files changed in the fork: `git diff --stat <upstream-base>..HEAD`
@@ -43,13 +56,13 @@ Keep the delta limited to fork behavior and required compatibility changes.
 Leave unrelated upstream tests and tooling unchanged; handle host-specific
 verification needs in the test environment instead of carrying extra patches.
 
-The v1.9.3 history keeps the v1.9.1 ownership layout of eight commits (shared
-test infrastructure, five runtime features with their tests and compatibility
-changes, CI, and docs), followed by the squash-merged fork PRs #15 and #17-#24
-in their original order, one `git cherry-pick -x` commit per temporary
-upstream backport, the fork PRs main merged after those backports (#26-#59 and
-#61-#67, in merge order), and the rebase documentation.
-See the [current ownership and rebase procedure](docs/rebase-v1.9.3-2026-10-05.md).
+The history keeps the v1.9.1 ownership layout of eight commits (shared test
+infrastructure, five runtime features with their tests and compatibility
+changes, CI, and docs), followed by the squash-merged fork PRs #15, #17, #18
+and #22-#24 in their original order, the fork PRs #26-#59 and #61-#67 in merge
+order, the v1.9.3 rebase record, and this rebase's documentation. No upstream
+backports are carried.
+See the [current ownership and rebase procedure](docs/rebase-upstream-main-2026-10-06.md).
 Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
@@ -636,7 +649,9 @@ Behavior:
   the v2 create-or-modify `deactivated` flag, new in v1.8.1) record
   `DeactivationReason::Admin`, so accounts they deactivate stay deactivated on
   SSO re-login. Their full-deactivation path remains upstream's (split into
-  helpers with bounded concurrent room departures in v1.9.3, `c53d80d80`):
+  helpers with bounded concurrent room departures in v1.9.3, `c53d80d80`, and
+  on upstream main refusing the last admin under the admin-room lock,
+  `3fe9ef681` and `5420f2e56`, with the reason recorded under that lock):
   users leave joined rooms, and the v1 route forwards its `erase` flag to the
   full cleanup service. The fork adds the reason argument, not a shallow replacement
   for upstream cleanup. Route tests verify room departure for both endpoints.
@@ -743,27 +758,10 @@ Behavior:
   upstream's (`1347197ee`); the fork runs it, and upstream's one-time-key and
   fallback cleanup, within the same per-device lock. Upstream also refuses a
   device ID that names a cross-signing key (`99c6c320a`).
-
-## Temporary upstream backports
-
-These upstream `main` commits are not in `v1.9.3`. Each is applied with
-`git cherry-pick -x`, so its message keeps the "cherry picked from" line and any
-fork adaptation. Drop them at the next rebase onto an upstream release that
-contains them. `99c6c320a` and `f4f5a03f5`, backported before this rebase, are
-in `v1.9.3` and are no longer carried.
-
-| Upstream commit | Change |
-| --- | --- |
-| `11e7fcf31`, `fa3eefe45` (#612) | Clean up the server user when `emergency_password` is removed; keep the Synapse admin user routes off the server user |
-| `0d0467f59` (#611), `eb655bc57` | Refuse deactivated accounts at JWT and token login and in the JWT stage of UIAA |
-| `18039076c` | `/events` streams only the room events the requester may see |
-| `23ef4fdaf` | Judge a user's own member event by the membership it sets; the single-event lookup refuses events from other rooms |
-| `e85f4dc30` | `/refresh` refuses locked accounts |
-| `45800bd79` | OIDC sign-in, device approval, and authorization-code and device-grant token issuance refuse locked and deactivated accounts; OIDC refresh refuses deactivated accounts only, as upstream |
-
-The upstream appservice registration helper the deactivation test uses
-(`src/main/tests/appservice/mod.rs`, from upstream `0f3d138a5`) travels with
-that test.
+- Upstream main serializes one-time-key claims per device with its own
+  `claiming_one_time_keys` lock (`25dbbb5a3`). No path takes both locks: claims
+  take only upstream's, and device removal clears one-time keys under only the
+  fork's.
 
 ## Operational Changes
 
@@ -777,8 +775,12 @@ Behavior:
 - Computes `v<base_version>-mindroom.<n>` tags on `main`, creates/reuses the
   matching GitHub Release, publishes Linux `x86_64`/`aarch64` binaries, and
   dispatches container publication. Runs the fork's own GitHub-hosted checks.
-- Pins CI rustfmt to `nightly-2026-08-05`, matching the locked Fenix formatter.
-  Keep the two CI formatter commands aligned when updating that lock input.
+- Pins CI rustfmt to `nightly-2026-10-04`, which passes upstream main
+  `3f5db6d3a` unchanged; nightly-2026-09-26 reports one upstream file, and
+  upstream CI floats `nightly`. The locked Fenix formatter in `flake.lock`
+  (nightly-2026-08-05) reports nine upstream files, so the development shell's
+  `cargo fmt` must not be used to reformat. Keep the two CI formatter commands
+  aligned.
 - Runs tests with `TMPDIR` set to the CI runner's temporary directory. This
   environment setting remains in the CI owner after dropping the full-state
   sync fix now supplied by upstream.
