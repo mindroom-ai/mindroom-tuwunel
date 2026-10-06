@@ -83,6 +83,39 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Left rooms carry state only for users who joined
+
+A user who withdrew a knock or rejected an invite has the room among their left
+rooms, and legacy `/sync` sent its whole state at the leave: every member,
+power levels, topic and any custom state, although the user was never in the
+room. A left room's state now goes only to a user who once joined it, or when
+the room is world-readable; anyone else gets only their own membership.
+Upstream has the same bug. Files: `src/api/client/sync/v3.rs`; test in
+`src/main/tests/sync_left_room_state.rs`.
+
+### Sliding sync profile changes only for joined rooms
+
+The MSC4262 profiles extension of simplified sliding sync read the profile
+change log of every room in the window and every room the connection had
+seen: rooms the user has left or been removed from, which the connection
+keeps, and rooms they are invited to or have knocked on. Their members'
+profile changes kept arriving after the user left. Rooms in the window now
+follow the required-state rule, as receipts and typing do, and a room known
+only to the connection counts while the user is joined. Upstream main fixes
+this in its rewrite of the extension (`005830a1b`); drop this change when
+rebasing onto it. Files: `src/api/client/sync/v5/extensions/profiles.rs`; test
+in `src/main/tests/sync_v5_departed_profiles.rs`.
+
+### Federated key claims keep only the answering server's users
+
+A remote server's `/user/keys/claim` answer was taken as a whole, so entries
+naming users of other servers, local users included, replaced those users'
+one-time keys in the client's `/keys/claim` response; a local user's key had
+already been taken from storage and was lost. Entries whose user does not
+belong to the answering server are now dropped, as federated key queries
+already do. Upstream has the same bug. File:
+`src/api/client/keys/claim_keys.rs`.
+
 ### Sync timelines follow history visibility
 
 Legacy `/sync` and sliding sync returned a room's newest events without
