@@ -15,7 +15,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{Services, profile::ProfileChange, sync::Connection};
 
-use super::{SyncInfo, Window};
+use super::{super::rooms::membership_allows_required_state, SyncInfo, Window};
 
 type Fields = BTreeSet<ProfileFieldName>;
 
@@ -57,6 +57,11 @@ pub(super) async fn collect(
 		.merge(conn.rooms.keys())
 		.dedup()
 		.stream()
+		.filter_map(async |room_id| {
+			room_visible(services, sender_user, window, room_id)
+				.await
+				.then_some(room_id)
+		})
 		.fold(changes, |changes, room_id| {
 			fold_room(changes, services, conn, room_id, requested)
 		})
@@ -70,6 +75,28 @@ pub(super) async fn collect(
 		.await;
 
 	Ok(Profiles { users })
+}
+
+/// Whether the syncing user may follow the profiles of the room's members.
+///
+/// A room in the window follows the required-state rule, so a room the user
+/// has left, been removed from, been invited to or knocked on contributes
+/// nothing. A room only the connection knows has no membership at hand, so it
+/// contributes while the user is joined.
+async fn room_visible(
+	services: &Services,
+	sender_user: &UserId,
+	window: &Window,
+	room_id: &RoomId,
+) -> bool {
+	match window.get(room_id) {
+		| Some(room) => membership_allows_required_state(room.membership.as_ref()),
+		| None =>
+			services
+				.state_cache
+				.is_joined(sender_user, room_id)
+				.await,
+	}
 }
 
 /// Folds the changes one room's members made into the running set.
