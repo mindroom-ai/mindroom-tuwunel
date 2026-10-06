@@ -521,7 +521,8 @@ A room's create event and backfilled events have no state snapshot, so
 `/context` around one of them returned the room's current state, even to a user
 who had never joined. That fallback now applies only to a requester who passes
 the `/state` check (`user_can_see_state_events`) or to the admin room-context
-endpoint; anyone else gets an empty `state`. Upstream has the same bug. Files:
+endpoint; anyone else gets an empty `state`. A former member gets the state
+from when they left, as `/state` serves them. Upstream has the same bug. Files:
 `src/api/client/context.rs`; test in
 `src/main/tests/context_snapshotless_state.rs`.
 
