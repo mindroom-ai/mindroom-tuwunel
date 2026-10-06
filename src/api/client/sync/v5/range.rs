@@ -180,7 +180,7 @@ async fn collect_room(
 		.map(Option::transpose)
 		.map_err(Failure::from);
 
-	let public_receipts = public_receipts(sync_info, conn, room_id, room.roomsince, ignored)
+	let public_receipts = public_receipts(sync_info, conn, window_room, room.roomsince, ignored)
 		.map_err(|error| Failure::new(Domain::PublicReceipt, error));
 
 	let private_receipts = private_receipts(sync_info, conn, room_id, room.roomsince)
@@ -208,16 +208,23 @@ async fn collect_room(
 async fn public_receipts(
 	SyncInfo { services, sender_user, .. }: SyncInfo<'_>,
 	conn: &Connection,
-	room_id: &RoomId,
+	WindowRoom { room_id, membership, .. }: &WindowRoom,
 	roomsince: u64,
 	ignored: &OnceCell<Option<IgnoredUserListEvent>>,
 ) -> Result<impl Iterator<Item = Raw<AnySyncEphemeralRoomEvent>>> {
-	let mut receipts: Vec<(OwnedUserId, Raw<AnySyncEphemeralRoomEvent>)> = services
-		.read_receipt
-		.readreceipts_since_fallible(room_id, roomsince, Some(conn.next_batch))
-		.map_ok(|(user_id, _ts, event)| (user_id.to_owned(), event))
-		.try_collect()
-		.await?;
+	// Other users' receipts, like the required state, are only for a joined (or
+	// peeking) user.
+	let mut receipts: Vec<(OwnedUserId, Raw<AnySyncEphemeralRoomEvent>)> =
+		if membership_allows_required_state(membership.as_ref()) {
+			services
+				.read_receipt
+				.readreceipts_since_fallible(room_id, roomsince, Some(conn.next_batch))
+				.map_ok(|(user_id, _ts, event)| (user_id.to_owned(), event))
+				.try_collect()
+				.await?
+		} else {
+			Vec::new()
+		};
 
 	if !receipts.is_empty() {
 		let ignored = ignored

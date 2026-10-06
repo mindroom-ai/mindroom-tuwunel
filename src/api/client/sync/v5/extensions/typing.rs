@@ -13,7 +13,9 @@ use tuwunel_core::{
 	utils::{IterStream, stream::BroadbandExt},
 };
 
-use super::{Connection, SyncInfo, Window, selector};
+use super::{
+	super::rooms::membership_allows_required_state, Connection, SyncInfo, Window, selector,
+};
 
 type CollectedRooms = SmallVec<[(OwnedRoomId, CollectedRoom); 1]>;
 
@@ -75,7 +77,13 @@ pub(super) async fn collect(
 		.as_deref()
 		.map(<[_]>::iter);
 
+	// Typing, like the required state, is only for a joined (or peeking) user.
 	selector(conn, window, implicit, explicit)
+		.filter(|room_id| {
+			window
+				.get(*room_id)
+				.is_some_and(|room| membership_allows_required_state(room.membership.as_ref()))
+		})
 		.stream()
 		.broad_filter_map(async |room_id| {
 			let roomsince = conn
