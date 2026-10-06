@@ -377,6 +377,19 @@ itself with the account it just signed in, and the endpoint ignores
 `loginToken`. Upstream has the same bug. File:
 `src/api/client/session/sso.rs`; test in `src/main/tests/sso_login_redirect.rs`.
 
+### A device's tokens rotate under its device lock
+
+Refresh-token rotation read the token a device points at, removed it, and wrote
+the new one without a lock, so two concurrent refreshes of one token could each
+write a refresh token while the device kept pointing at only one. Logout and
+device removal delete only the token the device points at, so the other one
+stayed. A refresh already in flight could also issue tokens to a device removed
+meanwhile. `set_access_token` now takes the per-device lock that
+`remove_device` already holds and refuses a device that no longer exists, so
+concurrent refreshes rotate one after another. Upstream has the same bug. File:
+`src/service/users/device.rs`; test in
+`src/main/tests/refresh_removed_device.rs`.
+
 ### SSO username fallback skips accounts linked to another identity
 
 When every username a new identity claims at an untrusted provider is taken,
