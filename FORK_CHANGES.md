@@ -48,6 +48,16 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### Appservice account data stays within its user namespace
+
+The account-data endpoints (`GET`, `PUT` and MSC3391 `DELETE`, global and per
+room) let any appservice request act on the path `userId`, so an appservice
+could read, change or delete the account data of users outside its
+registration. An appservice may now act only on its own sender and the users in
+its `users` namespace, as the profile endpoints already require. Upstream has
+the same bug. Files: `src/api/client/account_data/mod.rs`; test in
+`src/api/client/account_data/tests.rs`.
+
 ### send_join response events are checked before they are stored
 
 Joining a room over federation stored every event of the `send_join` response
