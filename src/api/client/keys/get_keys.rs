@@ -296,7 +296,8 @@ where
 	let Outcome { origin, elapsed, result } = outcome;
 	let result = match result {
 		| Err(fault) => Err(fault),
-		| Ok(response) => {
+		| Ok(mut response) => {
+			retain_origin_users(&origin, &mut response);
 			let keys =
 				process_federation_response(services, sender_user, allowed_signatures, response)
 					.await;
@@ -306,6 +307,22 @@ where
 	};
 
 	Outcome { origin, elapsed, result }
+}
+
+/// Drops the keys of users who do not belong to the server that answered.
+///
+/// A server is only authoritative for its own users; any other entry, local
+/// users included, would otherwise be stored or served as that user's keys.
+fn retain_origin_users(origin: &ServerName, response: &mut FederationResponse) {
+	response
+		.device_keys
+		.retain(|user, _| user.server_name() == origin);
+	response
+		.master_keys
+		.retain(|user, _| user.server_name() == origin);
+	response
+		.self_signing_keys
+		.retain(|user, _| user.server_name() == origin);
 }
 
 async fn process_federation_response<F>(
@@ -431,5 +448,45 @@ fn into_response(self) -> get_keys::v3::Response {
 		master_keys: self.master_keys,
 		self_signing_keys: self.self_signing_keys,
 		user_signing_keys: self.user_signing_keys,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use ruma::{device_id, server_name, user_id};
+	use serde_json::json;
+
+	use super::*;
+
+	fn key<T>() -> Raw<T> {
+		Raw::from_json(to_raw_value(&json!({})).expect("key should serialize"))
+	}
+
+	fn user_ids<V>(map: &BTreeMap<OwnedUserId, V>) -> Vec<&UserId> {
+		map.keys().map(AsRef::as_ref).collect()
+	}
+
+	#[test]
+	fn drops_keys_of_users_on_other_servers() {
+		let origin = server_name!("remote.example");
+		let remote = user_id!("@bob:remote.example");
+		let users = [remote, user_id!("@alice:local.example"), user_id!("@carol:third.example")];
+
+		let mut response = FederationResponse {
+			device_keys: users
+				.map(|user| {
+					let devices = BTreeMap::from([(device_id!("DEVICE").to_owned(), key())]);
+					(user.to_owned(), devices)
+				})
+				.into(),
+			master_keys: users.map(|user| (user.to_owned(), key())).into(),
+			self_signing_keys: users.map(|user| (user.to_owned(), key())).into(),
+		};
+
+		retain_origin_users(origin, &mut response);
+
+		assert_eq!(user_ids(&response.device_keys), [remote]);
+		assert_eq!(user_ids(&response.master_keys), [remote]);
+		assert_eq!(user_ids(&response.self_signing_keys), [remote]);
 	}
 }
