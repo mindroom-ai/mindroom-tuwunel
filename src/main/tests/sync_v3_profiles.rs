@@ -11,7 +11,7 @@ use tuwunel_core::{
 	ruma::{UserId, profile::ProfileFieldName},
 	utils::BoolExt,
 };
-use tuwunel_service::Services;
+use tuwunel_service::{Services, profile::MAX_SYNC_FIELDS};
 
 use self::client::{Client, field, register, wait_until_ready};
 
@@ -114,6 +114,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 	filtered_bases(&owner, &owner_id, &peer_id, room_id.as_str()).await?;
 	filtered_subjects(&owner, &peer_id, room_id.as_str()).await?;
+	capped_fields(&owner, &peer_id).await?;
 
 	let unfiltered = owner.sync(None, None).await?;
 
@@ -263,6 +264,24 @@ async fn filtered_subjects(owner: &Client<'_>, peer_id: &UserId, room_id: &str) 
 
 		assert!(update(&response, peer_id).is_null(), "supplied since refilled a peer base");
 	}
+
+	Ok(())
+}
+
+/// A filter naming more fields than sync reads is cut to its first names.
+#[tracing::instrument(level = "trace", skip_all)]
+async fn capped_fields(owner: &Client<'_>, peer_id: &UserId) -> Result {
+	let ids: Vec<_> = (0..=MAX_SYNC_FIELDS)
+		.map(|i| format!("org.example.absent{i}"))
+		.collect();
+
+	let filter = json!({ PROFILE_FIELDS: { "ids": ids } }).to_string();
+	let response = owner.sync_json(Some(&filter), None).await?;
+	let fields = update(&response, peer_id)
+		.as_object()
+		.map(serde_json::Map::len);
+
+	assert_eq!(fields, Some(MAX_SYNC_FIELDS));
 
 	Ok(())
 }
