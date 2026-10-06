@@ -136,6 +136,8 @@ fn make_clients(services: &Services) -> Result<Clients> {
 			.pool_max_idle_per_host(0)
 			.redirect(Policy::limited(4))),
 
+		// A redirect target is not checked against `ip_range_denylist` like the
+		// resolved destination is, so federation requests follow no redirects.
 		federation: with!(cb => cb
 			.dns_resolver(Arc::clone(&services.resolver.resolver.hooked))
 			.read_timeout(Duration::from_secs(services.config.federation_timeout))
@@ -143,13 +145,13 @@ fn make_clients(services: &Services) -> Result<Clients> {
 			.pool_idle_timeout(Duration::from_secs(
 				services.config.federation_idle_timeout,
 			))
-			.redirect(Policy::limited(3))),
+			.redirect(Policy::none())),
 
 		synapse: with!(cb => cb
 			.dns_resolver(Arc::clone(&services.resolver.resolver.hooked))
 			.read_timeout(Duration::from_secs(305))
 			.pool_max_idle_per_host(0)
-			.redirect(Policy::limited(3))),
+			.redirect(Policy::none())),
 
 		sender: with!(cb => cb
 			.dns_resolver(Arc::clone(&services.resolver.resolver.hooked))
@@ -159,7 +161,7 @@ fn make_clients(services: &Services) -> Result<Clients> {
 			.pool_idle_timeout(Duration::from_secs(
 				services.config.sender_idle_timeout,
 			))
-			.redirect(Policy::limited(2))),
+			.redirect(Policy::none())),
 
 		appservice: with!(cb => cb
 			.dns_resolver(appservice_resolver(services))
@@ -395,9 +397,14 @@ pub fn valid_cidr_range_url(&self, url: &Url) -> bool {
 #[must_use]
 pub fn proxied(&self, url: &Url) -> bool { self.proxy.intercepts(url) }
 
+/// Converts an address for a CIDR denylist check.
+///
+/// An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) connects to its embedded
+/// IPv4 address, so it is converted to that address and matched against the
+/// IPv4 ranges.
 #[must_use]
 pub(crate) fn ipaddress_from_std(ip: IpAddr) -> IPAddress {
-	match ip {
+	match ip.to_canonical() {
 		| IpAddr::V4(v4) =>
 			ipv4_from_u32(u32::from(v4), 32).expect("/32 is always a valid prefix"),
 		// ipv6::from_int would skip the regex parser but pulls in num-bigint.
