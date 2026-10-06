@@ -83,6 +83,19 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### send_join response events are checked before they are stored
+
+Joining a room over federation stored every event of the `send_join` response
+as an outlier, replacing any copy this server already had. An event whose
+content no longer matched its content hash was stored as received instead of
+redacted, its `unsigned` data was kept, and `auth_chain` events were not checked
+to belong to the joined room. Such events are now redacted, `unsigned` is
+dropped, `auth_chain` events go through the same room and format checks as
+`state` events, and an event this server already has keeps its stored copy.
+Upstream has the same bug. Files: `src/service/server_keys/verify.rs`,
+`src/service/membership/join.rs`; test in
+`src/service/membership/join/tests.rs`.
+
 ### GitHub sign-in uses the account id
 
 GitHub's user API has no `sub`, so a `login` alias made the username the
