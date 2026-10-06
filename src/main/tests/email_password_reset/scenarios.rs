@@ -12,7 +12,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	users::{PASSWORD_SENTINEL, Register},
+	users::{DeactivationReason, PASSWORD_SENTINEL, Register},
 };
 
 use super::{
@@ -52,6 +52,9 @@ const B_TOKEN: &str = "email-reset-user-b-device-token-0001";
 const C_EMAIL: &str = "reset-non-password@example.org";
 const C_FAILED_PASSWORD: &str = "email-reset-c-failed-password";
 const C_REPLAY_PASSWORD: &str = "email-reset-c-replay-password";
+const D_EMAIL: &str = "reset-deactivated@example.org";
+const D_PASSWORD: &str = "email-reset-d-password";
+const D_NEW_PASSWORD: &str = "email-reset-d-new-password";
 const CLIENT_SECRET: &str = "email-reset-client-secret";
 pub(super) const JWT_SECRET: &str = "email-reset-jwt-secret";
 
@@ -277,6 +280,8 @@ pub(super) async fn second_phase(
 	reject_unbound_reset(phase).await?;
 
 	failed_password_write(&services, &client, &base, substitution, &state.masked).await?;
+
+	reject_deactivated_reset(&services, &client, &base, substitution).await?;
 
 	verify_device_modes(phase).await?;
 
@@ -544,6 +549,73 @@ async fn failed_password_write(
 	assert_eq!(&response, masked, "failed-write proof replay exposed a different failure");
 	assert_eq!(services.users.password_hash(&user).await?, password_hash);
 	assert_eq!(services.users.origin(&user).await?, "jwt");
+
+	Ok(())
+}
+
+async fn reject_deactivated_reset(
+	services: &Services,
+	client: &Client,
+	base: &str,
+	substitution: Substitution<'_>,
+) -> Result {
+	const CLIENT_SECRET: &str = "email-reset-deactivated-secret";
+
+	let user = UserId::parse_with_server_name(
+		"email-reset-deactivated",
+		services.globals.server_name(),
+	)?;
+
+	services
+		.users
+		.full_register(Register {
+			user_id: Some(&user),
+			password: Some(D_PASSWORD),
+			..Default::default()
+		})
+		.await?;
+
+	let now = MilliSecondsSinceUnixEpoch::now();
+
+	services
+		.threepid
+		.put_binding(&user, D_EMAIL, Medium::Email, now, now)
+		.await;
+
+	services
+		.users
+		.deactivate_account(&user, DeactivationReason::Admin)
+		.await?;
+
+	let pending = services
+		.threepid
+		.create_or_reuse_pending(CLIENT_SECRET, Medium::Email, D_EMAIL, 1, Duration::from_mins(5))
+		.await?;
+
+	let token = pending
+		.freshly_minted_token
+		.as_deref()
+		.ok_or_else(|| err!("deactivated password-reset proof did not mint a token"))?;
+
+	confirm_email(client, base, &pending.sid, CLIENT_SECRET, token).await?;
+
+	let reset = Reset {
+		sid: &pending.sid,
+		client_secret: CLIENT_SECRET,
+		new_password: D_NEW_PASSWORD,
+		logout_devices: Some(true),
+		substitution,
+	};
+
+	let response = reset_password(client, base, reset).await?;
+	let body = serde_json::from_str::<Value>(&response.1)?;
+
+	assert_eq!(response.0, 403, "deactivated account reset succeeded: {}", response.1);
+	assert_eq!(body.get("errcode").and_then(Value::as_str), Some("M_USER_DEACTIVATED"));
+	assert!(
+		services.users.is_deactivated(&user).await?,
+		"password reset reactivated a deactivated account"
+	);
 
 	Ok(())
 }

@@ -20,3 +20,14 @@ fn url_cidr_check_handles_ipv4_ipv6_and_domains() {
 	assert!(valid_cidr_range_url(&denylist, &allowed));
 	assert!(valid_cidr_range_url(&denylist, &domain));
 }
+
+#[test]
+fn url_cidr_check_matches_ipv4_mapped_ipv6_against_ipv4_ranges() {
+	let denylist = [IPAddress::parse("10.0.0.0/8").expect("test denylist range parses")];
+
+	let denied = Url::parse("http://[::ffff:10.1.2.3]/").expect("test URL parses");
+	let allowed = Url::parse("http://[::ffff:8.8.8.8]/").expect("test URL parses");
+
+	assert!(!valid_cidr_range_url(&denylist, &denied));
+	assert!(valid_cidr_range_url(&denylist, &allowed));
+}
