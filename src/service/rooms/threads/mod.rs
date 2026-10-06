@@ -380,8 +380,14 @@ impl Service {
 		let replies = self
 			.services
 			.pdu_metadata
-			.get_relations(shortroomid, count, None, Direction::Backward, None)
-			.take(MAX_LATEST_REPLY_SCAN)
+			.get_relations_limited(
+				shortroomid,
+				count,
+				None,
+				Direction::Backward,
+				None,
+				MAX_LATEST_REPLY_SCAN,
+			)
 			.ready_filter(|(_, pdu)| {
 				pdu.event_id != redacted && thread_root(pdu.get_content_as_value()).is_some()
 			});

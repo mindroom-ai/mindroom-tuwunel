@@ -263,9 +263,13 @@ async fn replacing_the_latest_reply_searches_only_the_newest_relations() -> Resu
 	room.append(1, &root, text()).await?;
 	room.append(2, &old, thread(&root)).await?;
 
+	// Relation rows whose event does not load here, as purged edits and
+	// relations from other rooms leave them, still count.
 	for count in 3..scan + 3 {
-		room.append(count, &id(&format!("edit-{count}")), edit(&root))
-			.await?;
+		fixture
+			.services
+			.pdu_metadata
+			.add_relation(PduCount::Normal(count), PduCount::Normal(1));
 	}
 
 	room.append(scan + 3, &newest, thread(&root))
