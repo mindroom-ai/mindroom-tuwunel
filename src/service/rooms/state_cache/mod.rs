@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod tests;
 mod update;
 mod via;
 
@@ -485,9 +487,10 @@ pub fn rooms_joined<'a>(
 	&'a self,
 	user_id: &'a UserId,
 ) -> impl Stream<Item = &RoomId> + Send + 'a {
+	let prefix = (user_id, Interfix);
 	self.db
 		.userroomid_joinedcount
-		.keys_raw_prefix(user_id)
+		.keys_prefix(&prefix)
 		.ignore_err()
 		.map(|(_, room_id): (Ignore, &RoomId)| room_id)
 }
@@ -499,9 +502,10 @@ pub fn rooms_invited<'a>(
 	&'a self,
 	user_id: &'a UserId,
 ) -> impl Stream<Item = &RoomId> + Send + 'a {
+	let prefix = (user_id, Interfix);
 	self.db
 		.userroomid_invitestate
-		.keys_raw_prefix(user_id)
+		.keys_prefix(&prefix)
 		.ignore_err()
 		.map(|(_, room_id): (Ignore, &RoomId)| room_id)
 }
@@ -513,9 +517,10 @@ pub fn rooms_knocked<'a>(
 	&'a self,
 	user_id: &'a UserId,
 ) -> impl Stream<Item = &RoomId> + Send + 'a {
+	let prefix = (user_id, Interfix);
 	self.db
 		.userroomid_knockedstate
-		.keys_raw_prefix(user_id)
+		.keys_prefix(&prefix)
 		.ignore_err()
 		.map(|(_, room_id): (Ignore, &RoomId)| room_id)
 }
@@ -524,9 +529,10 @@ pub fn rooms_knocked<'a>(
 #[implement(Service)]
 #[tracing::instrument(skip(self), level = "debug")]
 pub fn rooms_left<'a>(&'a self, user_id: &'a UserId) -> impl Stream<Item = &RoomId> + Send + 'a {
+	let prefix = (user_id, Interfix);
 	self.db
 		.userroomid_leftstate
-		.keys_raw_prefix(user_id)
+		.keys_prefix(&prefix)
 		.ignore_err()
 		.map(|(_, room_id): (Ignore, &RoomId)| room_id)
 }
