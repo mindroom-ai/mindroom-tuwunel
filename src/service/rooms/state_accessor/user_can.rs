@@ -20,12 +20,13 @@ use tuwunel_core::{
 	Err, Result, err, implement,
 	utils::{BoolExt, FutureBoolExt, OptionExt, future::TryExtExt, result::NotFound},
 };
-use tuwunel_matrix::{Event, PduCount, StateKey, pdu::PduBuilder};
+use tuwunel_matrix::{Event, Pdu, PduCount, StateKey, pdu::PduBuilder};
 
 use crate::rooms::{short::ShortStateHash, state::RoomMutexGuard};
 
 /// How many of a former member's membership events are walked back to find
-/// their last join; past that they keep only the events they were joined for.
+/// their last join; past that they keep only the events they were joined for,
+/// and reading the room state fails.
 const MEMBERSHIP_STEPS: usize = 16;
 
 /// Reports whether a user may redact an event in a room.
@@ -164,8 +165,8 @@ where
 /// Whether a user may see an event under `shared` history visibility.
 ///
 /// A current member sees the whole room, which the first check answers without
-/// touching room state. A former member keeps events up to their latest leave
-/// that were sent before their last join, and lookup failures deny access.
+/// touching room state. A former member keeps events up to the leave or ban
+/// that ended their last join, and lookup failures deny access.
 #[implement(super::Service)]
 async fn user_shared_history(
 	&self,
@@ -207,46 +208,71 @@ async fn user_shared_history(
 	}
 
 	// A knock or an invite since the user's last join drops their leave count,
-	// and the next leave records a later one, so walk back from their current
-	// member event to their last join; the event is shared with them if they
-	// joined at or after it.
-	let Ok(mut member) = self
+	// and the next leave records a later one, so the event is shared with them
+	// only up to the leave or ban that ended that join.
+	let Ok(member) = self
 		.room_state_get(room_id, &StateEventType::RoomMember, user_id.as_str())
 		.await
 	else {
 		return false;
 	};
 
-	for _ in 0..MEMBERSHIP_STEPS {
-		if member.membership_for(user_id) == Some(MembershipState::Join) {
-			return self
-				.services
-				.timeline
-				.get_pdu_count(member.event_id())
-				.await
-				.is_ok_and(|join_count| join_count >= event_count);
-		}
+	let Ok(Some(departure)) = self.last_departure(user_id, member).await else {
+		return false;
+	};
 
-		let Ok(before) = self
+	self.services
+		.timeline
+		.get_pdu_count(departure.event_id())
+		.await
+		.is_ok_and(|departure_count| event_count <= departure_count)
+}
+
+/// The member event that ended a user's last join, or `None` if they never
+/// joined.
+///
+/// The walk starts at `member`, the user's member event in the current state,
+/// and steps to their member event in the state before it until it reaches a
+/// join; the event after that join is the departure, which a later knock,
+/// withdrawn knock, rejected invite, ban or unban does not move. A leave or ban
+/// with no recorded state snapshot, as a state reset or a backfill can leave,
+/// ends the walk as the departure, the bound upstream applies to every former
+/// member. Any other event without a snapshot, a failed lookup, or a join more
+/// than `MEMBERSHIP_STEPS` events back, is an error.
+#[implement(super::Service)]
+async fn last_departure(&self, user_id: &UserId, member: Pdu) -> Result<Option<Pdu>> {
+	let mut departure = member;
+	for _ in 0..MEMBERSHIP_STEPS {
+		let Some(before) = self
 			.services
 			.state
-			.pdu_shortstatehash(member.event_id())
+			.pdu_shortstatehash(departure.event_id())
 			.await
+			.optional()?
 		else {
-			return false;
+			return match departure.membership_for(user_id) {
+				| Some(MembershipState::Leave | MembershipState::Ban) => Ok(Some(departure)),
+				| _ =>
+					Err!(Request(NotFound("No state is recorded before a membership change."))),
+			};
 		};
 
-		let Ok(previous) = self
+		let Some(previous) = self
 			.state_get(before, &StateEventType::RoomMember, user_id.as_str())
 			.await
+			.optional()?
 		else {
-			return false;
+			return Ok(None);
 		};
 
-		member = previous;
+		if previous.membership_for(user_id) == Some(MembershipState::Join) {
+			return Ok(Some(departure));
+		}
+
+		departure = previous;
 	}
 
-	false
+	Err!(Request(Forbidden("Too many membership changes since the last join.")))
 }
 
 /// Reports whether a user may read the room's state events.
@@ -387,10 +413,14 @@ pub async fn departure_count(
 		.await
 }
 
-/// Returns the timeline count of the user's leave or ban in current state.
+/// Returns the timeline count of the leave or ban that ended the user's last
+/// join, found by walking back from their leave or ban in current state.
 ///
-/// There is none when the member event is absent or sets any other
-/// membership, or when the event has no timeline count.
+/// A knock withdrawn or an invite rejected since that join records a later
+/// leave, which does not move the departure. There is none when the member
+/// event is absent or sets any other membership, when the walk finds no join,
+/// or when the departure has no timeline count. A walk that fails, or passes
+/// `MEMBERSHIP_STEPS` membership events, is an error.
 #[implement(super::Service)]
 #[tracing::instrument(skip(self), level = "debug")]
 async fn departure_event_count(
@@ -412,9 +442,13 @@ async fn departure_event_count(
 		return Ok(None);
 	}
 
+	let Some(departure) = self.last_departure(user_id, member).await? else {
+		return Ok(None);
+	};
+
 	self.services
 		.timeline
-		.get_pdu_count(member.event_id())
+		.get_pdu_count(departure.event_id())
 		.await
 		.optional()
 }
