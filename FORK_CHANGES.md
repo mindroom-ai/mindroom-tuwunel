@@ -48,6 +48,16 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### Failed appservice requests leave the `hs_token` out of the log
+
+An appservice request also sends the `hs_token` as the legacy `access_token`
+query parameter, and when it could not be sent (connection refused, timeout)
+the logged `reqwest` error printed the full request URL with that token. The
+error now drops its URL before it is logged or returned, as federation requests
+already do; the log line still names the appservice and its registered URL.
+Upstream has the same bug. Files: `src/service/appservice/{request.rs,ping.rs}`;
+test in `src/main/tests/appservice_request_error.rs`.
+
 ### Federation requests follow no redirects
 
 The federation clients followed a peer's redirects, and a redirect target was
