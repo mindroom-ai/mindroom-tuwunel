@@ -489,8 +489,9 @@
 
 # reloadable: yes
 #
-# This limits how many prior events one recovery traversal visits. Raising
-# it increases recovery work; it is not a count of network requests.
+# This limits how many prior events one recovery traversal visits, and how
+# many events one auth chain walk fetches. Raising it increases recovery
+# work; it is not a count of network requests.
 #
 #max_fetch_prev_events = 1024
 
