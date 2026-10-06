@@ -29,7 +29,7 @@ fn appservice_account_data_access_is_limited_to_its_namespace() {
 	let sender = user_id!("@bridge_bot:example.com");
 	let owner = |user_id| assert_account_data_owner(sender, user_id, Some(&appservice), "");
 
-	assert!(owner(sender).is_ok());
-	assert!(owner(user_id!("@bridged_alice:example.com")).is_ok());
+	owner(sender).expect("the appservice sender is in its namespace");
+	owner(user_id!("@bridged_alice:example.com")).expect("a namespaced user is in its namespace");
 	assert!(owner(user_id!("@alice:example.com")).is_err());
 }
