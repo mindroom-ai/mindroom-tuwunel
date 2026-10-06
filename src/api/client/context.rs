@@ -359,8 +359,9 @@ where
 /// Loads the room state at an event.
 ///
 /// The create event and backfilled events have no snapshot of their own, so
-/// the room's current state stands in for them, but only for a requester who
-/// may read it; anyone else receives no state.
+/// the room state the requester may read stands in for them: the current
+/// state, or for a former member the state from when they left. Anyone who
+/// may not read the room state receives none.
 async fn load_state_ids(
 	services: &Services,
 	room_id: &RoomId,
@@ -370,22 +371,25 @@ async fn load_state_ids(
 ) -> Result<Vec<(ShortStateKey, OwnedEventId)>> {
 	let shortstatehash = match services.state.pdu_shortstatehash(state_at).await {
 		| Ok(shortstatehash) => shortstatehash,
+		| Err(_) if bypass_visibility => services
+			.state
+			.get_room_shortstatehash(room_id)
+			.await
+			.map_err(|e| err!(Database("State not found: {e}")))?,
 		| Err(_) => {
-			let visible = bypass_visibility
-				|| services
-					.state_accessor
-					.user_can_see_state_events(sender_user, room_id)
-					.await;
+			let visible = services
+				.state_accessor
+				.user_can_see_state_events(sender_user, room_id)
+				.await;
 
 			if !visible {
 				return Ok(Vec::new());
 			}
 
 			services
-				.state
-				.get_room_shortstatehash(room_id)
-				.await
-				.map_err(|e| err!(Database("State not found: {e}")))?
+				.state_accessor
+				.user_visible_shortstatehash(sender_user, room_id, None)
+				.await?
 		},
 	};
 

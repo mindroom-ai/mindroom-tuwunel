@@ -18,7 +18,7 @@ use ruma::{
 };
 use tuwunel_core::{
 	Err, Result, implement,
-	matrix::{Event, PduCount, StateKey},
+	matrix::{Event, Pdu, PduCount, StateKey},
 	pdu::PduBuilder,
 	utils::{FutureBoolExt, result::NotFound},
 };
@@ -26,7 +26,8 @@ use tuwunel_core::{
 use crate::rooms::{short::ShortStateHash, state::RoomMutexGuard};
 
 /// How many of a former member's membership events are walked back to find
-/// their last join; past that they keep only the events they were joined for.
+/// their last join; past that they keep only the events they were joined for,
+/// and reading the room state fails.
 const MEMBERSHIP_STEPS: usize = 16;
 
 /// Reports whether a user may redact an event in a room.
@@ -174,8 +175,8 @@ async fn history_visibility_at(
 /// Whether a user may see an event under `shared` history visibility.
 ///
 /// A current member sees the whole room, which the first check answers without
-/// touching room state. A former member keeps events up to their latest leave
-/// that were sent before their last join, and lookup failures deny access.
+/// touching room state. A former member keeps events up to the leave or ban
+/// that ended their last join, and lookup failures deny access.
 #[implement(super::Service)]
 async fn user_shared_history(
 	&self,
@@ -217,46 +218,60 @@ async fn user_shared_history(
 	}
 
 	// A knock or an invite since the user's last join drops their leave count,
-	// and the next leave records a later one, so walk back from their current
-	// member event to their last join; the event is shared with them if they
-	// joined at or after it.
-	let Ok(mut member) = self
+	// and the next leave records a later one, so the event is shared with them
+	// only up to the leave or ban that ended that join.
+	let Ok(member) = self
 		.room_state_get(room_id, &StateEventType::RoomMember, user_id.as_str())
 		.await
 	else {
 		return false;
 	};
 
-	for _ in 0..MEMBERSHIP_STEPS {
-		if member.membership_for(user_id) == Some(MembershipState::Join) {
-			return self
-				.services
-				.timeline
-				.get_pdu_count(member.event_id())
-				.await
-				.is_ok_and(|join_count| join_count >= event_count);
-		}
+	let Ok(Some(departure)) = self.last_departure(user_id, member).await else {
+		return false;
+	};
 
-		let Ok(before) = self
+	self.services
+		.timeline
+		.get_pdu_count(departure.event_id())
+		.await
+		.is_ok_and(|departure_count| event_count <= departure_count)
+}
+
+/// The member event that ended a user's last join, or `None` if they never
+/// joined.
+///
+/// The walk starts at `member`, the user's member event in the current state,
+/// and steps to their member event in the state before it until it reaches a
+/// join; the event after that join is the departure, which a later knock,
+/// withdrawn knock, rejected invite, ban or unban does not move. A failed
+/// lookup, or a join more than `MEMBERSHIP_STEPS` events back, is an error.
+#[implement(super::Service)]
+async fn last_departure(&self, user_id: &UserId, member: Pdu) -> Result<Option<Pdu>> {
+	let mut departure = member;
+	for _ in 0..MEMBERSHIP_STEPS {
+		let before = self
 			.services
 			.state
-			.pdu_shortstatehash(member.event_id())
-			.await
-		else {
-			return false;
-		};
+			.pdu_shortstatehash(departure.event_id())
+			.await?;
 
-		let Ok(previous) = self
+		let Some(previous) = self
 			.state_get(before, &StateEventType::RoomMember, user_id.as_str())
 			.await
+			.optional()?
 		else {
-			return false;
+			return Ok(None);
 		};
 
-		member = previous;
+		if previous.membership_for(user_id) == Some(MembershipState::Join) {
+			return Ok(Some(departure));
+		}
+
+		departure = previous;
 	}
 
-	false
+	Err!(Request(Forbidden("Too many membership changes since the last join.")))
 }
 
 /// Reports whether a user may read the room's current state events.
@@ -340,26 +355,53 @@ pub async fn user_visible_shortstatehash(
 		return Ok(requested);
 	}
 
+	let Some((departure, departed)) = self
+		.user_departure(user_id, room_id, current)
+		.await?
+	else {
+		return Ok(requested);
+	};
+
+	Ok(at
+		.filter(|at| *at < departure)
+		.map_or(departed, |_| requested))
+}
+
+/// The timeline count of the leave or ban that ended a former member's last
+/// join, and the room state after it.
+///
+/// Only a user whose membership in `current` is a leave, a ban or a knock has
+/// one; anyone else, and a user who never joined, gets `None`.
+#[implement(super::Service)]
+pub async fn user_departure(
+	&self,
+	user_id: &UserId,
+	room_id: &RoomId,
+	current: ShortStateHash,
+) -> Result<Option<(PduCount, ShortStateHash)>> {
 	let Some(member) = self
 		.state_get(current, &StateEventType::RoomMember, user_id.as_str())
 		.await
 		.optional()?
 	else {
-		return Ok(requested);
+		return Ok(None);
 	};
 
 	let content: RoomMemberEventContent = member.get_content()?;
-	if !matches!(content.membership, MembershipState::Leave | MembershipState::Ban) {
-		return Ok(requested);
+	if !matches!(
+		content.membership,
+		MembershipState::Leave | MembershipState::Ban | MembershipState::Knock
+	) {
+		return Ok(None);
 	}
 
-	let (departure, departed) = self
-		.departure_shortstatehash(room_id, member.event_id(), current)
-		.await?;
+	let Some(departure) = self.last_departure(user_id, member).await? else {
+		return Ok(None);
+	};
 
-	Ok(at
-		.filter(|at| *at < departure)
-		.map_or(departed, |_| requested))
+	self.departure_shortstatehash(room_id, departure.event_id(), current)
+		.await
+		.map(Some)
 }
 
 /// The timeline count of a member's leave or ban, and the room state after it.
@@ -367,7 +409,7 @@ pub async fn user_visible_shortstatehash(
 /// After the room's newest timeline event that state is `current`; after any
 /// other it is the state the next timeline event was sent in.
 #[implement(super::Service)]
-pub async fn departure_shortstatehash(
+async fn departure_shortstatehash(
 	&self,
 	room_id: &RoomId,
 	departure: &EventId,

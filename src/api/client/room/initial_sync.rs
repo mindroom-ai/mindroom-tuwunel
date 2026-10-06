@@ -1,8 +1,5 @@
 use axum::extract::State;
-use futures::{
-	FutureExt, TryFutureExt, TryStreamExt,
-	future::{ok, try_join4},
-};
+use futures::{FutureExt, TryFutureExt, TryStreamExt, future::try_join4};
 use ruma::{
 	api::client::room::initial_sync::v3::{PaginationChunk, Request, Response},
 	events::{
@@ -67,23 +64,11 @@ pub(crate) async fn room_initial_sync_route(
 		.map(|content: RoomMemberEventContent| content.membership);
 
 	let next_batch = services.globals.current_count();
-	let departure = membership
-		.as_ref()
-		.filter(|membership| matches!(membership, MembershipState::Leave | MembershipState::Ban))
-		.zip(member.as_ref())
-		.map(|(membership, pdu)| {
-			let membership = Some(membership.to_owned());
-			services
-				.state_accessor
-				.departure_shortstatehash(room_id, pdu.event_id(), current_shortstatehash)
-				.map_ok(move |(count, shortstatehash)| (count, shortstatehash, membership))
-				.left_future()
-		});
-
-	let current_snapshot = ok((PduCount::Normal(next_batch), current_shortstatehash, membership));
-	let (timeline_end, shortstatehash, membership) = departure
-		.unwrap_or_else(|| current_snapshot.right_future())
-		.await?;
+	let (timeline_end, shortstatehash) = services
+		.state_accessor
+		.user_departure(sender_user, room_id, current_shortstatehash)
+		.await?
+		.unwrap_or((PduCount::Normal(next_batch), current_shortstatehash));
 
 	let visibility = services.directory.visibility(room_id).map(Ok);
 	let limit = body.limit.unwrap_or(LIMIT_MAX).min(LIMIT_MAX);
@@ -99,6 +84,14 @@ pub(crate) async fn room_initial_sync_route(
 		.wide_and_then(|item| visibility_filter(&services, item, sender_user).map(Ok))
 		.ready_try_filter_map(Ok)
 		.try_take(limit)
+		.wide_and_then(async |(count, pdu)| {
+			let pdu = services
+				.pdu_metadata
+				.bundle_aggregations(sender_user, pdu)
+				.await;
+
+			Ok((count, pdu))
+		})
 		.try_collect()
 		.map_ok(|mut vec: Vec<_>| {
 			vec.reverse();
