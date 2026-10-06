@@ -279,6 +279,16 @@ address checks now match such an address as its IPv4 address, so
 `[::ffff:10.0.0.1]` is refused like `10.0.0.1`. Upstream has the same bug.
 File: `src/service/client/mod.rs`; test in `src/service/client/tests.rs`.
 
+### Default `ip_range_denylist` covers the unspecified addresses
+
+On Linux a connection to `0.0.0.0` or `::` reaches the local host, but the
+default denylist covered the local host only as `127.0.0.0/8` and `::1/128`, so
+a pusher or media URL using the unspecified address was not refused like one
+using `127.0.0.1`. The default now also lists `0.0.0.0/8` and `::/128`; Synapse
+always refuses `0.0.0.0` and `::`. Upstream has the same default. Files:
+`src/core/config/mod.rs`, `tuwunel-example.toml`; test in
+`src/core/config/tests.rs`.
+
 ### GitHub sign-in uses the account id
 
 GitHub's user API has no `sub`, so a `login` alias made the username the
