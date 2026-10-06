@@ -400,7 +400,7 @@ async fn resolve_state_at_incoming_event(
 	trace!("Resolving state at event");
 
 	let state_at_incoming_event = if incoming_pdu.prev_events().count() == 1 {
-		self.state_at_incoming_degree_one(incoming_pdu)
+		self.state_at_incoming_degree_one(incoming_pdu, room_id)
 			.await?
 	} else {
 		self.state_at_incoming_resolved(incoming_pdu, room_id, room_version)

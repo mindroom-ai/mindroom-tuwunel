@@ -7,7 +7,7 @@ use futures::{
 use ruma::{EventId, OwnedEventId, RoomId, RoomVersionId};
 use tuwunel_core::{
 	Error, Result, debug, debug_warn, err, implement,
-	matrix::Event,
+	matrix::{Event, pdu::check_room_id},
 	ref_at, trace,
 	utils::{
 		option::OptionExt,
@@ -32,6 +32,7 @@ enum ForkError {
 pub(super) async fn state_at_incoming_degree_one<Pdu>(
 	&self,
 	incoming_pdu: &Pdu,
+	room_id: &RoomId,
 ) -> Result<Option<HashMap<u64, OwnedEventId>>>
 where
 	Pdu: Event,
@@ -84,6 +85,8 @@ where
 		.map(Ok);
 
 	let (prev_event, state) = try_join(prev_event, state).await?;
+	check_room_id(&prev_event, room_id)?;
+
 	let Some(mut state) = state else {
 		return Ok(None);
 	};
@@ -162,6 +165,10 @@ where
 	else {
 		return Ok(None);
 	};
+
+	extremity_sstatehashes
+		.values()
+		.try_for_each(|prev_event| check_room_id(prev_event, room_id))?;
 
 	trace!("Calculating fork states...");
 	let forks = extremity_sstatehashes
