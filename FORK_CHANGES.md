@@ -398,6 +398,19 @@ itself with the account it just signed in, and the endpoint ignores
 `loginToken`. Upstream has the same bug. File:
 `src/api/client/session/sso.rs`; test in `src/main/tests/sso_login_redirect.rs`.
 
+### Legacy SSO login asks before an unlisted `redirectUrl`
+
+The legacy SSO callback sent the fresh login token to whatever `redirectUrl`
+the sign-in link named. A target that is not on the `well_known.client`
+origin, not waived as an OIDC client's redirect would be
+(`oidc_require_client_approval`, `oidc_registration_allowed_redirect_hosts`)
+and not listed in the legacy-SSO-only `sso_trusted_redirect_hosts` (web client
+hosts and native app schemes) now gets the token only from a Continue link on
+a page naming it, and such a `javascript:` target or one with userinfo is
+refused. Upstream has the same bug. Files: `src/api/client/session/sso.rs`,
+`src/api/oidc/complete.rs`, `src/api/router.rs`, `src/core/config/mod.rs`;
+test in `src/main/tests/sso_login_redirect.rs`.
+
 ### Backfilled events do not set the old-event cutoff
 
 A live federated event dated before the room's first stored event is skipped

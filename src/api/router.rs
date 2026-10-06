@@ -82,7 +82,11 @@ fn register_client_auth_routes(router: Router<State>) -> Router<State> {
 		.ruma_route(&client::refresh_token_route)
 		.ruma_route(&client::sso_login_route)
 		.ruma_route(&client::sso_login_with_provider_route)
-		.ruma_route(&client::sso_callback_route)
+		// The callback can answer with a confirmation page rather than a redirect.
+		.route(
+			"/_matrix/client/unstable/login/sso/callback/{idp_id}",
+			get(client::sso_callback_route),
+		)
 		.ruma_route(&client::sso_fallback_route)
 		.ruma_route(&client::whoami_route)
 		.ruma_route(&client::logout_route)
