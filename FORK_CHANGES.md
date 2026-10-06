@@ -48,6 +48,15 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### Sliding sync withholds the timeline of knocked rooms
+
+Sliding sync lists include rooms the user has knocked on, but only invited rooms
+had their timeline withheld, so a knocker received the room's newest events as
+a member would. The timeline now follows the same membership check as the
+required state, which already excluded invitees and knockers. Upstream has the
+same bug. Files: `src/api/client/sync/v5/rooms.rs`; test in
+`src/main/tests/sync_v5_knock_timeline.rs`.
+
 ### Knock state leaves local memberships alone
 
 A knock on a room this server is not in installs the answering server's
