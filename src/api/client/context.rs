@@ -1,6 +1,6 @@
 use axum::extract::State;
 use futures::{
-	FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt,
+	FutureExt, Stream, StreamExt, TryFutureExt,
 	future::{OptionFuture, join, join3, try_join},
 };
 use ruma::{
@@ -183,8 +183,9 @@ pub(crate) async fn event_context(
 		.map(ref_at!(1))
 		.map_or_else(|| event_id, |pdu| pdu.event_id.as_ref());
 
-	let (lazy_loading_witnessed, state_ids) =
-		join(lazy_loading_witnessed, load_state_ids(services, room_id, state_at)).await;
+	let state_ids = load_state_ids(services, room_id, state_at, sender_user, bypass_visibility);
+
+	let (lazy_loading_witnessed, state_ids) = join(lazy_loading_witnessed, state_ids).await;
 
 	let state = build_state_response(
 		services,
@@ -355,26 +356,47 @@ where
 		.await
 }
 
+/// Loads the room state at an event.
+///
+/// The create event and backfilled events have no snapshot of their own, so
+/// the room's current state stands in for them, but only for a requester who
+/// may read it; anyone else receives no state.
 async fn load_state_ids(
 	services: &Services,
 	room_id: &RoomId,
 	state_at: &EventId,
+	sender_user: &UserId,
+	bypass_visibility: bool,
 ) -> Result<Vec<(ShortStateKey, OwnedEventId)>> {
-	services
-		.state
-		.pdu_shortstatehash(state_at)
-		.or_else(|_| services.state.get_room_shortstatehash(room_id))
-		.map_ok(|shortstatehash| {
+	let shortstatehash = match services.state.pdu_shortstatehash(state_at).await {
+		| Ok(shortstatehash) => shortstatehash,
+		| Err(_) => {
+			let visible = bypass_visibility
+				|| services
+					.state_accessor
+					.user_can_see_state_events(sender_user, room_id)
+					.await;
+
+			if !visible {
+				return Ok(Vec::new());
+			}
+
 			services
-				.state_accessor
-				.state_full_ids(shortstatehash)
-				.map(Ok)
-		})
-		.map_err(|e| err!(Database("State not found: {e}")))
-		.try_flatten_stream()
-		.try_collect()
+				.state
+				.get_room_shortstatehash(room_id)
+				.await
+				.map_err(|e| err!(Database("State not found: {e}")))?
+		},
+	};
+
+	let state_ids = services
+		.state_accessor
+		.state_full_ids(shortstatehash)
+		.collect()
 		.boxed()
-		.await
+		.await;
+
+	Ok(state_ids)
 }
 
 async fn build_state_response(
