@@ -88,13 +88,14 @@ size limit and sent to other servers unchanged in `m.device_list_update` and
 as an EDU as large as the client made it. A peer refuses a transaction over its
 request body limit, and the refused transaction's rows are sent again with
 every later transaction to that peer, so one oversized EDU stopped outbound
-federation to it. Device keys, each cross-signing key, and each to-device
-message for a remote user are now refused with 413 `M_TOO_LARGE` over 64 KiB,
-the limit Synapse applies to to-device messages. A federation transaction also
-leaves out any single EDU over 1 MiB with a warning and acknowledges its row
-with the transaction, so an oversized EDU queued earlier no longer holds up its
-destination. Upstream has the same bug. Files:
-`src/api/client/{to_device.rs,keys/upload_keys.rs,keys/upload_signing_keys.rs}`,
+federation to it. Device keys, including those of a dehydrated device, each
+cross-signing key, and each to-device message for a remote user are now refused
+with 413 `M_TOO_LARGE` over 64 KiB, the limit Synapse applies to to-device
+messages. A federation transaction also leaves out any single EDU over 1 MiB
+with a warning and acknowledges its row with the transaction, so an oversized
+EDU queued earlier no longer holds up its destination. Upstream has the same
+bug. Files:
+`src/api/client/{to_device.rs,dehydrated_device.rs,keys/upload_keys.rs,keys/upload_signing_keys.rs}`,
 `src/service/sending/sender/{mod.rs,dispatch/federation.rs}`; tests in
 `src/main/tests/edu_content_size.rs` and `src/service/sending/sender/tests.rs`.
 

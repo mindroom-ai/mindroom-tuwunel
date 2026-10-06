@@ -19,8 +19,9 @@ const TOKEN: &str = "edu-content-size-test-access-token";
 
 /// Keys and remote to-device messages too large to send in an EDU are refused.
 ///
-/// Device keys, a cross-signing key and a to-device message for a remote user,
-/// each padded past `MAX_EDU_CONTENT_BYTES`, are answered with 413.
+/// Device keys, a cross-signing key, a to-device message for a remote user and
+/// the device keys of a dehydrated device, each padded past
+/// `MAX_EDU_CONTENT_BYTES`, are answered with 413.
 #[test]
 fn payloads_too_large_for_an_edu_are_refused() -> Result {
 	let options: [&str; 0] = [];
@@ -48,6 +49,12 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		"pad": pad,
 	}});
 
+	let dehydrated_device = json!({
+		"device_id": "DEHYDRATED",
+		"device_data": { "algorithm": "m.dehydration.v1.olm" },
+		"device_keys": device_keys["device_keys"],
+	});
+
 	let master_key = json!({ "master_key": {
 		"user_id": user_id,
 		"usage": ["master"],
@@ -62,17 +69,26 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{path}");
 	}
 
-	let response = services
-		.client
-		.clients
-		.default
-		.put(client.url("sendToDevice/m.test/edu-content-size"))
-		.bearer_auth(TOKEN)
-		.json(&json!({ "messages": { "@peer:remote.example": { "PEER": { "pad": pad } } } }))
-		.send()
-		.await?;
+	let to_device = json!({ "messages": { "@peer:remote.example": { "PEER": { "pad": pad } } } });
+	let dehydrated_device_url =
+		format!("{base}/_matrix/client/unstable/org.matrix.msc3814.v1/dehydrated_device");
 
-	assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+	for (url, body) in [
+		(client.url("sendToDevice/m.test/edu-content-size"), to_device),
+		(dehydrated_device_url, dehydrated_device),
+	] {
+		let response = services
+			.client
+			.clients
+			.default
+			.put(&url)
+			.bearer_auth(TOKEN)
+			.json(&body)
+			.send()
+			.await?;
+
+		assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{url}");
+	}
 
 	Ok(())
 }
