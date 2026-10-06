@@ -67,6 +67,17 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Redacting a message redacts its edits
+
+A redaction pruned only its target, so the target's `m.replace` edits kept the
+new text in `m.new_content` and stayed in the search index. Any member could
+still read a deleted message's latest text by the edit's id, from the target's
+relations, in `/messages` or through `/search`. A redaction now also redacts
+the target's edits that the edit bundle counts (same sender and type), with the
+same redaction as their reason. Upstream redacts only the target too. Files:
+`src/service/rooms/{timeline/append.rs,pdu_metadata/bundling.rs}`; test in
+`src/main/tests/redaction_edits.rs`.
+
 ### Sliding sync looks up delivered required state selectors in a set
 
 When a room's sliding sync configuration changes, each required state entry is
