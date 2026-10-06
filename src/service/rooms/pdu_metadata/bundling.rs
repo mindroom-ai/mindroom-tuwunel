@@ -31,9 +31,10 @@ type Seek = ArrayVec<u8, KEY_LEN>;
 /// folded in as the full replacement event, and the bundled thread
 /// `latest_event` carries its own newest edit (MSC3856). MSC3267: when
 /// `bundle_reference_relations` is enabled, the `m.reference` children are
-/// folded in as a `{ chunk: [{ event_id }] }` summary. The thread presence gate
-/// keeps the common no-bundle case to a substring scan; the edit and reference
-/// folds are skipped unless enabled.
+/// folded in as a `{ chunk: [{ event_id }] }` summary. A requester who is not
+/// in the room gets no thread summary or edit they may not see. The thread
+/// presence gate keeps the common no-bundle case to a substring scan; the edit
+/// and reference folds are skipped unless enabled.
 #[implement(Service)]
 #[tracing::instrument(skip_all, level = "trace")]
 pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> Pdu {
@@ -69,6 +70,9 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 				.log_err();
 
 			if thread_result_or_drop(&mut pdu, participation).is_some() {
+				self.drop_unseen_thread(sender_user, &mut pdu)
+					.await;
+
 				self.erase_thread_latest(sender_user, &mut pdu)
 					.await;
 
@@ -94,6 +98,9 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 			.services
 			.state_accessor
 			.erased_for(sender_user, &replacement)
+			.await
+		&& self
+			.child_visible(sender_user, &replacement)
 			.await
 		&& replacement
 			.remove_transaction_id_unless_sender(Some(sender_user))
@@ -121,6 +128,65 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 	}
 
 	pdu
+}
+
+/// The stored thread summary names the newest reply whoever may see it. A
+/// requester who is not in the room, such as a user who left or was removed,
+/// gets no summary when the room's history visibility hides that reply from
+/// them, so a reply sent after they left is withheld. A member skips the event
+/// load.
+#[implement(Service)]
+#[tracing::instrument(skip_all, level = "trace")]
+async fn drop_unseen_thread(&self, sender_user: &UserId, pdu: &mut Pdu) {
+	if self
+		.services
+		.state_cache
+		.is_joined(sender_user, pdu.room_id())
+		.await
+	{
+		return;
+	}
+
+	let identity = pdu.thread_latest_event().log_err();
+
+	let Some((event_id, _)) = thread_result_or_drop(pdu, identity).flatten() else {
+		return;
+	};
+
+	let latest = self.services.timeline.get_pdu(&event_id).await;
+	let Some(latest) = thread_result_or_drop(pdu, latest) else {
+		return;
+	};
+
+	if !self
+		.services
+		.state_accessor
+		.user_can_see_event(sender_user, &latest)
+		.await
+	{
+		drop_thread_bundle(pdu);
+	}
+}
+
+/// Whether `sender_user` may see a bundled child event. A current member sees
+/// every bundled child as before; anyone else, such as a user who left or was
+/// removed, sees only children the room's history visibility allows, so
+/// replies and edits sent after they left are withheld.
+#[implement(Service)]
+async fn child_visible(&self, sender_user: &UserId, child: &Pdu) -> bool {
+	if self
+		.services
+		.state_cache
+		.is_joined(sender_user, child.room_id())
+		.await
+	{
+		return true;
+	}
+
+	self.services
+		.state_accessor
+		.user_can_see_event(sender_user, child)
+		.await
 }
 
 /// MSC4025: the stored thread bundle carries a full `latest_event` of any
@@ -211,6 +277,13 @@ async fn bundle_thread_latest_edit(&self, sender_user: &UserId, pdu: &mut Pdu) {
 		.services
 		.state_accessor
 		.erased_for(sender_user, &replacement_event)
+		.await
+	{
+		return;
+	}
+
+	if !self
+		.child_visible(sender_user, &replacement_event)
 		.await
 	{
 		return;
