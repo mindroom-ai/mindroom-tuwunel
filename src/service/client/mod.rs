@@ -134,7 +134,7 @@ fn make_clients(services: &Services) -> Result<Clients> {
 			.read_timeout(Duration::from_secs(services.config.well_known_timeout))
 			.timeout(Duration::from_secs(services.config.well_known_timeout))
 			.pool_max_idle_per_host(0)
-			.redirect(Policy::limited(4))),
+			.redirect(https_redirect(services, 4))),
 
 		// A redirect target is not checked against `ip_range_denylist` like the
 		// resolved destination is, so federation requests follow no redirects.
@@ -227,6 +227,22 @@ fn guarded_redirect(services: &Services, max: usize) -> Policy {
 			attempt.error("redirect destination is not allowed")
 		} else {
 			limited.redirect(attempt)
+		}
+	})
+}
+
+/// Follows a redirect only to an HTTPS URL that `guarded_redirect` allows.
+///
+/// Server discovery starts over HTTPS; a hop to plain HTTP would continue the
+/// lookup without TLS at an address the peer chose.
+fn https_redirect(services: &Services, max: usize) -> Policy {
+	let guarded = guarded_redirect(services, max);
+
+	Policy::custom(move |attempt| {
+		if attempt.url().scheme() == "https" {
+			guarded.redirect(attempt)
+		} else {
+			attempt.error("redirect destination is not https")
 		}
 	})
 }
