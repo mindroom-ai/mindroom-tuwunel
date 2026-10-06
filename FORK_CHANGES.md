@@ -48,6 +48,17 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### A pending knock does not open a room over federation
+
+The federation room access check (`/state`, `/state_ids`, `/event`,
+`/event_auth`, `/backfill`, `/get_missing_events`, `/timestamp_to_event`)
+admitted every server while any user, local or remote, had a pending knock in
+the room. A server with no joined member could then read the room's state and,
+with shared history visibility, its timeline. A pending knock no longer counts:
+the requesting server needs a joined member unless the room is world-readable.
+Upstream has the same bug. Files: `src/api/server/{utils.rs,event.rs}`; test in
+`src/main/tests/federation_knock_access.rs`.
+
 ### Leaving without a membership records no departure
 
 When room state held no member event for the user, or a `leave` or `ban` one,
