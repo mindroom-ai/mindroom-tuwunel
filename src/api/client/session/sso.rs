@@ -377,6 +377,8 @@ pub(crate) async fn sso_callback_route(
 	let (user_id, session) =
 		complete_sso_session(&services, &provider, session, userinfo).await?;
 
+	services.users.locked_check(&user_id).await?;
+
 	let cookie = Cookie::build((GRANT_SESSION_COOKIE, EMPTY))
 		.path(grant_session_cookie_path(provider.callback_url.as_ref()))
 		.removal()

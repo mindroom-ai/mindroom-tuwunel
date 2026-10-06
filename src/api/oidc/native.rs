@@ -21,7 +21,7 @@ use super::{
 	account::{
 		ACCOUNT_HEAD, account_error_response, account_html_response, account_redirect_response,
 	},
-	url_encode,
+	require_account_usable, url_encode,
 };
 use crate::ClientIp;
 
@@ -237,6 +237,8 @@ async fn verify_credentials(
 	}
 
 	hash::verify_password(password, &hash).map_err(|_| invalid())?;
+
+	require_account_usable(services, &user_id).await?;
 
 	Ok(user_id)
 }

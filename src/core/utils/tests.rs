@@ -1,4 +1,5 @@
 use std::{
+	future::Ready,
 	panic::{AssertUnwindSafe, catch_unwind},
 	sync::{
 		Arc,
@@ -8,11 +9,13 @@ use std::{
 	time::Duration,
 };
 
+use futures::future::{OptionFuture, ready};
+
 use crate::{
 	Error, Result,
 	utils::{
-		self, MutexMap, math::usize_from_f64, time::pretty, two_phase_counter::Counter,
-		url::hostname_matches_domain,
+		self, MutexMap, future::OptionFutureExt, math::usize_from_f64, time::pretty,
+		two_phase_counter::Counter, url::hostname_matches_domain,
 	},
 };
 
@@ -446,4 +449,15 @@ fn hostname_domain_matching_is_case_insensitive_and_label_bounded() {
 			"hostname {hostname}, domain {domain}",
 		);
 	}
+}
+
+#[tokio::test]
+async fn option_future_unwrap_or_else_async() {
+	let present: OptionFuture<_> = Some(ready(1)).into();
+
+	assert_eq!(present.unwrap_or_else_async(|| ready(2)).await, 1);
+
+	let absent: OptionFuture<_> = None::<Ready<i32>>.into();
+
+	assert_eq!(absent.unwrap_or_else_async(|| ready(2)).await, 2);
 }
