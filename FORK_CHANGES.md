@@ -83,6 +83,16 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### UIAA keeps only small request bodies for pending sessions
+
+A UIAA request sent without `auth` keeps its JSON body in memory so the
+follow-up request can omit fields, and nothing removed a body again, not even
+when its session finished. The bodies now live in an LRU of 1024 sessions,
+bodies over 4 KiB of serialized JSON are not kept (the client resends the full
+request, as after a restart), and a finished session releases its body.
+Upstream has the same bug. Files: `src/service/uiaa/mod.rs`; test in
+`src/service/uiaa/tests.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
