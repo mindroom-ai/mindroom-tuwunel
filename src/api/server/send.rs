@@ -22,7 +22,7 @@ use ruma::{
 			send_transaction_message,
 		},
 	},
-	events::receipt::{ReceiptEvent, ReceiptEventContent, ReceiptType},
+	events::receipt::{ReceiptEvent, ReceiptEventContent, ReceiptThread, ReceiptType},
 	int,
 	serde::Raw,
 	to_device::DeviceIdOrAllDevices,
@@ -51,7 +51,7 @@ use tuwunel_service::{
 	users::DeviceListChange,
 };
 
-use crate::{ClientIp, Ruma};
+use crate::{ClientIp, Ruma, client::room_event_pdu_id};
 
 type ResolvedMap = BTreeMap<OwnedEventId, Result>;
 type RoomsPdus = SmallVec<[RoomPdus; 1]>;
@@ -545,22 +545,49 @@ async fn handle_edu_receipt_room_user(
 
 	if !services
 		.state_cache
-		.server_in_room(origin, room_id)
+		.is_joined(user_id, room_id)
 		.await
 	{
 		debug_warn!(
 			%user_id, %room_id, %origin,
-			"received read receipt EDU from server who does not have a member in the room",
+			"received read receipt EDU for user not in room"
 		);
 		return;
 	}
 
 	let data = &user_updates.data;
+	let thread_in_room = match &data.thread {
+		| ReceiptThread::Unthreaded | ReceiptThread::Main => true,
+		| ReceiptThread::Thread(root) => room_event_pdu_id(services, room_id, root)
+			.await
+			.is_ok(),
+		| _ => false,
+	};
+
+	if !thread_in_room {
+		debug_warn!(
+			%user_id, %room_id, %origin, thread = ?data.thread,
+			"received read receipt EDU for thread not in room"
+		);
+		return;
+	}
+
 	user_updates
 		.event_ids
 		.into_iter()
 		.stream()
 		.for_each_concurrent(automatic_width(), async |event_id| {
+			if room_event_pdu_id(services, room_id, &event_id)
+				.await
+				.is_err()
+			{
+				debug_warn!(
+					%user_id, %room_id, %event_id, %origin,
+					"received read receipt EDU for event not in room"
+				);
+				return;
+			}
+
 			let user_data = [(user_id.to_owned(), data.clone())];
 			let receipts = [(ReceiptType::Read, BTreeMap::from(user_data))];
 			let content = [(event_id.clone(), BTreeMap::from(receipts))];
