@@ -35,6 +35,20 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Sync timelines follow history visibility
+
+Legacy `/sync` and sliding sync returned a room's newest events without
+checking history visibility, so a user who joined a `joined` or `invited` room
+received events sent before their join or invite, and a room left by
+rejecting an invite to a `shared` room carried its recent messages. Timeline
+events now pass the per-event check `/messages` uses, except that the user's
+own leave or ban is always kept. The `state` section only covers changes
+before the first timeline event, so the timeline starts after the last hidden
+state event (such as a topic change while the user was away), and is `limited`
+when that drops visible events. Upstream has the same bug. Files:
+`src/api/client/sync/mod.rs`; test in
+`src/main/tests/sync_history_visibility.rs`.
+
 ### send_join response events are checked before they are stored
 
 Joining a room over federation stored every event of the `send_join` response

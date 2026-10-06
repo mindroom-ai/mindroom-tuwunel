@@ -11,13 +11,18 @@ use ruma::{
 	events::{
 		AnyStrippedStateEvent,
 		TimelineEventType::{RoomCreate, RoomMember},
+		room::member::MembershipState,
 	},
 	serde::Raw,
 };
 use tuwunel_core::{
 	Error, PduCount, Result, debug_warn, is_equal_to,
 	matrix::{Event, pdu::PduEvent},
-	utils::{ReadyExt, result::LogErr, stream::BroadbandExt},
+	utils::{
+		IterStream, ReadyExt,
+		result::LogErr,
+		stream::{BroadbandExt, WidebandExt},
+	},
 };
 use tuwunel_service::{Services, users::InviteFilter};
 
@@ -123,6 +128,45 @@ async fn load_timeline_with_errors(
 	}
 
 	timeline_pdus.reverse();
+
+	// Drop the events the user's history visibility hides, as /messages does.
+	// The user's own leave or ban stays, so a room departed from an invite
+	// still shows the departure.
+	let timeline_pdus: Vec<_> = timeline_pdus
+		.into_iter()
+		.stream()
+		.wide_then(async |item| {
+			let visible = matches!(
+				item.1.membership_for(sender_user),
+				Some(MembershipState::Leave | MembershipState::Ban)
+			) || services
+				.state_accessor
+				.user_can_see_event(sender_user, &item.1)
+				.await;
+
+			(item, visible)
+		})
+		.collect()
+		.await;
+
+	// The state section only covers changes before the first timeline event, so
+	// the timeline starts after the last hidden state event, and any visible
+	// event this drops makes the timeline limited.
+	let start = timeline_pdus
+		.iter()
+		.rposition(|((_, pdu), visible)| !visible && pdu.state_key().is_some())
+		.map_or(0, |pos| pos.saturating_add(1));
+
+	limited |= timeline_pdus
+		.iter()
+		.take(start)
+		.any(|(_, visible)| *visible);
+
+	let timeline_pdus: Vec<_> = timeline_pdus
+		.into_iter()
+		.skip(start)
+		.filter_map(|(item, visible)| visible.then_some(item))
+		.collect();
 
 	// Collapse superseded m.replace events when enabled
 	let timeline_pdus = if services
