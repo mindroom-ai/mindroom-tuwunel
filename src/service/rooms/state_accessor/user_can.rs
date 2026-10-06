@@ -4,6 +4,7 @@
 //! membership metadata. Invite and tombstone checks use the normal event-build
 //! pipeline as non-persisting authorization probes.
 
+use futures::future::try_join;
 use ruma::{
 	EventId, RoomId, UserId,
 	events::{
@@ -19,7 +20,7 @@ use tuwunel_core::{
 	Err, Result, implement,
 	matrix::{Event, PduCount, StateKey},
 	pdu::PduBuilder,
-	utils::FutureBoolExt,
+	utils::{FutureBoolExt, result::NotFound},
 };
 
 use crate::rooms::{short::ShortStateHash, state::RoomMutexGuard};
@@ -251,6 +252,92 @@ pub async fn user_can_see_state_events(&self, user_id: &UserId, room_id: &RoomId
 
 		| _ => false,
 	}
+}
+
+/// The room state a user admitted by `user_can_see_state_events` reads.
+///
+/// That is the snapshot after `at` when a token is given, and the current
+/// state otherwise. A former member reads no later than the state from when
+/// they left, as the spec requires; a token before their departure still reads
+/// its own snapshot.
+#[implement(super::Service)]
+pub async fn user_visible_shortstatehash(
+	&self,
+	user_id: &UserId,
+	room_id: &RoomId,
+	at: Option<PduCount>,
+) -> Result<ShortStateHash> {
+	let current = self
+		.services
+		.state
+		.get_room_shortstatehash(room_id)
+		.await?;
+
+	let requested = match at {
+		| None => current,
+		| Some(at) =>
+			self.services
+				.timeline
+				.shortstatehash_after(room_id, at)
+				.await?,
+	};
+
+	if self
+		.services
+		.state_cache
+		.is_joined(user_id, room_id)
+		.await
+	{
+		return Ok(requested);
+	}
+
+	let Some(member) = self
+		.state_get(current, &StateEventType::RoomMember, user_id.as_str())
+		.await
+		.optional()?
+	else {
+		return Ok(requested);
+	};
+
+	let content: RoomMemberEventContent = member.get_content()?;
+	if !matches!(content.membership, MembershipState::Leave | MembershipState::Ban) {
+		return Ok(requested);
+	}
+
+	let (departure, departed) = self
+		.departure_shortstatehash(room_id, member.event_id(), current)
+		.await?;
+
+	Ok(at
+		.filter(|at| *at < departure)
+		.map_or(departed, |_| requested))
+}
+
+/// The timeline count of a member's leave or ban, and the room state after it.
+///
+/// After the room's newest timeline event that state is `current`; after any
+/// other it is the state the next timeline event was sent in.
+#[implement(super::Service)]
+pub async fn departure_shortstatehash(
+	&self,
+	room_id: &RoomId,
+	departure: &EventId,
+	current: ShortStateHash,
+) -> Result<(PduCount, ShortStateHash)> {
+	let timeline = &self.services.timeline;
+	let count = timeline.get_pdu_count(departure);
+	let latest = timeline.last_timeline_count(None, room_id, None);
+	let (count, latest) = try_join(count, latest).await?;
+
+	let shortstatehash = if count == latest {
+		current
+	} else {
+		timeline
+			.next_shortstatehash(room_id, count)
+			.await?
+	};
+
+	Ok((count, shortstatehash))
 }
 
 /// Reports whether a user may discover or inspect a room.
