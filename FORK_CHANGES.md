@@ -321,7 +321,7 @@ contains them (`99c6c320a` and `f4f5a03f5` are already in `v1.9.2`).
 | `18039076c` | `/events` streams only the room events the requester may see |
 | `23ef4fdaf` | Judge event visibility by the event's own room; the single-event lookup refuses events from other rooms |
 | `e85f4dc30` | `/refresh` refuses locked accounts |
-| `45800bd79` | OIDC sign-in, device approval and token issuance refuse locked and deactivated accounts |
+| `45800bd79` | OIDC sign-in, device approval, and authorization-code and device-grant token issuance refuse locked and deactivated accounts; OIDC refresh refuses deactivated accounts only, as upstream |
 
 Fork adaptations are recorded in each commit message. Upstream test harness
 files the fork lacks travel with the tests that use them
