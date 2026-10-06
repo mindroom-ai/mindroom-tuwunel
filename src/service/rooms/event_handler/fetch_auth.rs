@@ -1,5 +1,6 @@
 use std::{
 	collections::{HashSet, VecDeque},
+	sync::atomic::{AtomicUsize, Ordering},
 	time::Duration,
 };
 
@@ -52,9 +53,14 @@ pub(super) async fn fetch_auth<'a, Events>(
 where
 	Events: Iterator<Item = &'a EventId> + Clone + Send,
 {
+	// Every walk keeps the events it fetched until all walks have ended, so they
+	// share one fetch budget.
+	let fetches = AtomicUsize::new(0);
 	let events_with_auth_events: Vec<_> = events
 		.stream()
-		.broad_then(|event_id| self.fetch_auth_chain(origin, room_id, event_id, room_version))
+		.broad_then(|event_id| {
+			self.fetch_auth_chain(origin, room_id, event_id, room_version, &fetches)
+		})
 		.collect()
 		.boxed() // size firewall
 		.await;
@@ -139,6 +145,7 @@ async fn fetch_auth_chain(
 	room_id: &RoomId,
 	event_id: &EventId,
 	room_version: &RoomVersionId,
+	fetches: &AtomicUsize,
 ) -> (OwnedEventId, Option<PduEvent>, Vec<(OwnedEventId, Vec<u8>)>) {
 	// a. Look in the main timeline (pduid_pdu tree)
 	// b. Look at outlier pdu tree
@@ -183,7 +190,7 @@ async fn fetch_auth_chain(
 			break;
 		}
 
-		if events_in_reverse_order.len() >= usize::from(limit) {
+		if fetches.fetch_add(1, Ordering::Relaxed) >= usize::from(limit) {
 			debug_warn!(?limit, "Max auth chain fetch limit reached for {event_id}");
 			return (event_id.to_owned(), None, Vec::new());
 		}
