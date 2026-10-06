@@ -497,6 +497,9 @@ async fn collect_required_state(
 	encrypted: bool,
 ) -> Vec<Raw<AnySyncStateEvent>> {
 	let StateSelection { mode: state_mode, previous, changed } = selection;
+	// Every state entry below is looked up in here, so index the selectors once.
+	let previous: Option<HashSet<_>> =
+		previous.map(|previous| previous.iter().copied().collect());
 	let lazy = required_state
 		.iter()
 		.any(is_equal_to!(&(StateEventType::RoomMember, "$LAZY".into())));
@@ -597,6 +600,7 @@ async fn collect_required_state(
 			};
 
 			let state_mode = previous
+				.as_ref()
 				.filter(|previous| {
 					!state_was_requested(previous, &event_type, state_key.as_str(), sender_user)
 				})
@@ -659,7 +663,7 @@ async fn collect_required_state(
 }
 
 fn state_was_requested(
-	previous: &[u64],
+	previous: &HashSet<u64>,
 	event_type: &StateEventType,
 	state_key: &str,
 	sender_user: &UserId,

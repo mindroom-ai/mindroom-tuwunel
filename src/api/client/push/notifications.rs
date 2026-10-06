@@ -88,6 +88,11 @@ pub(crate) async fn get_notifications_route(
 				.map(MilliSecondsSinceUnixEpoch)
 				.ok()?;
 
+			let event = services
+				.pdu_metadata
+				.bundle_aggregations(sender_user, event)
+				.await;
+
 			let notification = Notification {
 				room_id: event.room_id().into(),
 				event: event.into_format(),

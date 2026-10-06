@@ -142,7 +142,8 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	read_failures(&owner, &peer_id, room.as_str()).await?;
 	membership_failures(&owner, &owner_id, &peer_id, room.as_str()).await?;
 	cleared_fields(&owner, &peer_id, room.as_str()).await?;
-	departed_profile(&owner, &peer, &peer_id, room.as_str()).await
+	departed_profile(&owner, &peer, &peer_id, room.as_str()).await?;
+	departed_requester(&owner, &peer, &owner_id, room.as_str()).await
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
@@ -391,6 +392,44 @@ async fn departed_profile(
 
 		assert!(update(&response, peer_id).is_null(), "a departed peer leaked its profile");
 	}
+
+	Ok(())
+}
+
+/// A room the syncing user has left carries no profile changes, even of a
+/// member they still share another room with.
+#[tracing::instrument(level = "trace", skip_all)]
+async fn departed_requester(
+	owner: &Client<'_>,
+	peer: &Client<'_>,
+	owner_id: &UserId,
+	room: &str,
+) -> Result {
+	let shared = owner
+		.create_room(&json!({ "preset": "public_chat" }))
+		.await?;
+
+	peer.post(&format!("rooms/{shared}/join"), &json!({}))
+		.await?;
+
+	let opening = peer
+		.sync_profiles("requester", room, None)
+		.await?;
+
+	let pos = field(&opening, "pos")?;
+
+	assert_eq!(opening["rooms"][room]["membership"], "leave");
+
+	set_status(owner.services, owner_id, "after the departure").await?;
+
+	let response = peer
+		.sync_profiles("requester", room, Some(pos))
+		.await?;
+
+	assert!(
+		update(&response, owner_id).is_null(),
+		"a departed room leaked a member's profile"
+	);
 
 	Ok(())
 }

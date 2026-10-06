@@ -318,9 +318,14 @@ where
 		});
 	};
 
-	let user_can_see_state_events = services
+	// The summary shows the room as it is now, so a member, an invitee or
+	// anyone if world-readable sees it, but a former member no longer does.
+	let user_can_preview = services
 		.state_accessor
-		.user_can_see_state_events(sender_user, room_id);
+		.user_can_peek(sender_user, room_id)
+		.or(services
+			.state_cache
+			.is_invited(sender_user, room_id));
 
 	let guest_admitted = guest_can_join
 		.then_async(|| {
@@ -336,7 +341,7 @@ where
 		.is_joined_any(sender_user, allowed_room_ids);
 
 	// The allowed-room scan trails; either cheap check can admit first.
-	let can_see = user_can_see_state_events
+	let can_see = user_can_preview
 		.is_false()
 		.and2(guest_admitted.is_false(), user_in_allowed_restricted_room.is_false())
 		.is_false();

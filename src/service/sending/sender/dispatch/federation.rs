@@ -82,10 +82,11 @@ pub(super) async fn send_events_dest_federation(
 		edus,
 	};
 
+	let limit = self.server.config.max_response_size;
 	let result = self
 		.services
 		.federation
-		.execute_on(&self.services.client.sender, &server, request)
+		.execute_on(&self.services.client.sender, &server, request, limit)
 		.await;
 
 	result
