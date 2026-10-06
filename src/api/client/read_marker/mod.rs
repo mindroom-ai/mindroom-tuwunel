@@ -21,16 +21,7 @@ async fn set_private_marker(
 	event: &EventId,
 	thread: &ReceiptThread,
 ) -> Result<bool> {
-	let (pdu_id, shortroomid) =
-		try_join(services.timeline.get_pdu_id(event), services.short.get_shortroomid(room_id))
-			.await
-			.map_err(|_| err!(Request(NotFound("Event not found."))))?;
-
-	let pdu_id = PduId::from(pdu_id);
-
-	if pdu_id.shortroomid != shortroomid {
-		return Err!(Request(NotFound("Event not found.")));
-	}
+	let pdu_id = room_event_pdu_id(services, room_id, event).await?;
 
 	let PduCount::Normal(count) = pdu_id.count else {
 		debug!(%user_id, %room_id, %event, "Skipping private read marker at a backfilled event");
@@ -50,6 +41,50 @@ async fn set_private_marker(
 		.await;
 
 	Ok(advanced)
+}
+
+/// Checks that `user_id` may publish a read receipt for `event` in `room_id`.
+///
+/// The user must be joined to the room and the event must be one of its
+/// timeline events.
+async fn check_public_receipt(
+	services: &Services,
+	room_id: &RoomId,
+	user_id: &UserId,
+	event: &EventId,
+) -> Result {
+	if !services
+		.state_cache
+		.is_joined(user_id, room_id)
+		.await
+	{
+		return Err!(Request(Forbidden("You are not in this room.")));
+	}
+
+	room_event_pdu_id(services, room_id, event)
+		.await
+		.map(|_| ())
+}
+
+/// Resolves `event` to its PDU id, failing unless it is a timeline event of
+/// `room_id`.
+async fn room_event_pdu_id(
+	services: &Services,
+	room_id: &RoomId,
+	event: &EventId,
+) -> Result<PduId> {
+	let (pdu_id, shortroomid) =
+		try_join(services.timeline.get_pdu_id(event), services.short.get_shortroomid(room_id))
+			.await
+			.map_err(|_| err!(Request(NotFound("Event not found."))))?;
+
+	let pdu_id = PduId::from(pdu_id);
+
+	if pdu_id.shortroomid != shortroomid {
+		return Err!(Request(NotFound("Event not found.")));
+	}
+
+	Ok(pdu_id)
 }
 
 /// Clears the receipt's notification counts and refreshes the push badge.

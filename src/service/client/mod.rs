@@ -395,9 +395,14 @@ pub fn valid_cidr_range_url(&self, url: &Url) -> bool {
 #[must_use]
 pub fn proxied(&self, url: &Url) -> bool { self.proxy.intercepts(url) }
 
+/// Converts an address for a CIDR denylist check.
+///
+/// An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) connects to its embedded
+/// IPv4 address, so it is converted to that address and matched against the
+/// IPv4 ranges.
 #[must_use]
 pub(crate) fn ipaddress_from_std(ip: IpAddr) -> IPAddress {
-	match ip {
+	match ip.to_canonical() {
 		| IpAddr::V4(v4) =>
 			ipv4_from_u32(u32::from(v4), 32).expect("/32 is always a valid prefix"),
 		// ipv6::from_int would skip the regex parser but pulls in num-bigint.
