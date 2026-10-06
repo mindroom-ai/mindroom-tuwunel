@@ -35,6 +35,18 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Auth chain fetch walks are bounded
+
+Fetching the missing auth events of an incoming event walked the remote server's
+auth chain one event at a time and kept every fetched event in memory until the
+walk ended, with no limit on the number of events and only the federation
+response limit (256 MiB by default) on each one. A walk now gives up and drops
+what it fetched once it holds `max_fetch_prev_events` events (default 1024) and
+would fetch another. It keeps each fetched event without its `unsigned` field,
+which the outlier path removes before its own size check, and treats an event
+that is then still larger than the 65,535 byte PDU limit as a failed fetch.
+Upstream has the same bug. File: `src/service/rooms/event_handler/fetch_auth.rs`.
+
 ### GitHub sign-in uses the account id
 
 GitHub's user API has no `sub`, so a `login` alias made the username the
