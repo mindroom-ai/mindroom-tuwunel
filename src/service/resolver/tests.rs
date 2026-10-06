@@ -9,13 +9,18 @@ use std::{
 use ipaddress::IPAddress;
 use minicbor_serde::{from_slice, to_vec};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
-use tuwunel_core::config::proxy::ProxyHosts;
+use ruma::{api::federation::discovery::get_server_version, server_name};
+use tuwunel_core::{
+	Result,
+	config::{Figment, proxy::ProxyHosts},
+};
 
 use super::{
 	cache::{CachedDest, CachedOverride, IpAddrs},
 	dns::{Resolver, Validating},
 	fed::{FedDest, add_port_to_hostname, get_ip_with_port},
 };
+use crate::test_utils::fixture;
 
 const SRV_TARGET: &str = "target.example";
 
@@ -240,4 +245,43 @@ async fn validating_resolver_still_denies_a_destination_host() {
 
 	assert_eq!(error.kind(), PermissionDenied);
 	assert_eq!(error.to_string(), "All resolved addresses are denied by ip_range_denylist");
+}
+
+/// IPv6 literal destinations are checked against `ip_range_denylist` like IPv4
+/// ones, whether the server name is the literal or delegates to it.
+#[tokio::test]
+async fn ipv6_literal_destinations_follow_the_denylist() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let public = server_name!("[2001:4860:4860::8888]:8448");
+	services
+		.resolver
+		.resolve_actual_dest(public, false)
+		.await?;
+
+	let delegated = server_name!("delegated.example");
+	services
+		.resolver
+		.cache
+		.set_destination(delegated, &CachedDest {
+			dest: FedDest::Literal("[::1]:8448".parse().expect("test address parses")),
+			host: "[::1]:8448".into(),
+			expire: CachedDest::default_expire(),
+			srv: false,
+		});
+
+	for dest in [server_name!("[::1]:8448"), server_name!("[::ffff:127.0.0.1]:8448"), delegated] {
+		let error = services
+			.federation
+			.execute(dest, get_server_version::v1::Request::new())
+			.await
+			.expect_err("a denied address was not refused");
+
+		assert_eq!(error.to_string(), "Not allowed to send requests to this IP", "{dest}");
+	}
+
+	Ok(())
 }
