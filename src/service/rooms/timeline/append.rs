@@ -456,6 +456,24 @@ async fn append_pdu_effects(
 					.user_can_redact(redacts_id, pdu.sender(), pdu.room_id(), false)
 					.await?
 			{
+				// The target's edits hold copies of its content in `m.new_content`.
+				// They go first, while the target still names its thread, so their
+				// unread counts come off the counter that holds them.
+				let edits = self
+					.services
+					.pdu_metadata
+					.replacement_ids(redacts_id)
+					.await;
+
+				// The redaction is stored by now, so an edit that fails to redact
+				// is only logged; the target's redaction decides the outcome.
+				for edit in &edits {
+					self.redact_pdu(edit, pdu, shortroomid, state_lock)
+						.await
+						.log_err()
+						.ok();
+				}
+
 				self.redact_pdu(redacts_id, pdu, shortroomid, state_lock)
 					.await?;
 			}
