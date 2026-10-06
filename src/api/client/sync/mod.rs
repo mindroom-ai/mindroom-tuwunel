@@ -128,17 +128,19 @@ async fn load_timeline_with_errors(
 	timeline_pdus.reverse();
 
 	// Drop the events the user's history visibility hides, as /messages does.
-	// The user's own leave stays, so a room left from an invite still shows it.
+	// The user's own leave or ban stays, so a room departed from an invite
+	// still shows the departure.
 	let timeline_pdus: Vec<_> = timeline_pdus
 		.into_iter()
 		.stream()
 		.wide_then(async |item| {
-			let visible =
-				matches!(item.1.membership_for(sender_user), Some(MembershipState::Leave))
-					|| services
-						.state_accessor
-						.user_can_see_event(sender_user, &item.1)
-						.await;
+			let visible = matches!(
+				item.1.membership_for(sender_user),
+				Some(MembershipState::Leave | MembershipState::Ban)
+			) || services
+				.state_accessor
+				.user_can_see_event(sender_user, &item.1)
+				.await;
 
 			(item, visible)
 		})

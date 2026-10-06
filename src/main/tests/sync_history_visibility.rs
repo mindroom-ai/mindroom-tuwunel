@@ -25,8 +25,8 @@ const INVITEE_TOKEN: &str = "sync-history-visibility-invitee-access-token";
 /// incremental sync covering the join, an initial sync, or a sliding sync. A
 /// member who leaves and rejoins while another device is offline does not see
 /// the topic change made meanwhile in the timeline, but gets it in the state.
-/// An invitee rejecting an invite to a `shared` room sees its own leave but
-/// none of the room's messages.
+/// An invitee who rejects an invite to a `shared` room, or is banned before
+/// joining, sees its own leave or ban but none of the room's messages.
 #[test]
 fn sync_timelines_honour_history_visibility() -> Result {
 	boot("sync-history-visibility", ["client_sync_timeout_min=0"], exercise)
@@ -44,7 +44,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 	member_reads_nothing_before_its_join(&owner, &member).await?;
 	rejoined_member_gets_the_state_changed_while_away(&owner, &member).await?;
-	rejected_invite_shows_only_its_leave(&owner, &invitee, &invitee_id).await
+	departed_invitee_sees_only_its_membership(&owner, &invitee, &invitee_id).await
 }
 
 async fn member_reads_nothing_before_its_join(owner: &Client<'_>, member: &Client<'_>) -> Result {
@@ -118,37 +118,50 @@ async fn rejoined_member_gets_the_state_changed_while_away(
 	Ok(())
 }
 
-async fn rejected_invite_shows_only_its_leave(
+async fn departed_invitee_sees_only_its_membership(
 	owner: &Client<'_>,
 	invitee: &Client<'_>,
 	invitee_id: &UserId,
 ) -> Result {
-	let room_id = owner
-		.create_room(&json!({ "preset": "private_chat" }))
-		.await?;
-
-	owner
-		.post(&format!("rooms/{room_id}/invite"), &json!({ "user_id": invitee_id }))
-		.await?;
-
-	owner.send_text(&room_id, "while-invited").await?;
-	invitee.act(&room_id, "leave").await?;
-
 	let filter = json!({ "room": { "include_leave": true, "timeline": { "limit": 10 } } });
-	let sync = invitee.sync(None, &filter).await?;
-	let room = format!("/rooms/leave/{room_id}/timeline/events");
 
-	let own_leave = sync
-		.pointer(&room)
-		.and_then(Value::as_array)
-		.into_iter()
-		.flatten()
-		.any(|event| {
-			event["state_key"] == invitee_id.as_str() && event["content"]["membership"] == "leave"
-		});
+	for membership in ["leave", "ban"] {
+		let room_id = owner
+			.create_room(&json!({ "preset": "private_chat" }))
+			.await?;
 
-	assert!(bodies(&sync, &room).is_empty(), "invitee reads the room: {sync}");
-	assert!(own_leave, "invitee's leave is missing: {sync}");
+		owner
+			.post(&format!("rooms/{room_id}/invite"), &json!({ "user_id": invitee_id }))
+			.await?;
+
+		owner
+			.send_text(&room_id, &format!("before-{membership}"))
+			.await?;
+
+		if membership == "ban" {
+			owner
+				.post(&format!("rooms/{room_id}/ban"), &json!({ "user_id": invitee_id }))
+				.await?;
+		} else {
+			invitee.act(&room_id, "leave").await?;
+		}
+
+		let sync = invitee.sync(None, &filter).await?;
+		let room = format!("/rooms/leave/{room_id}/timeline/events");
+
+		let own_membership = sync
+			.pointer(&room)
+			.and_then(Value::as_array)
+			.into_iter()
+			.flatten()
+			.any(|event| {
+				event["state_key"] == invitee_id.as_str()
+					&& event["content"]["membership"] == membership
+			});
+
+		assert!(bodies(&sync, &room).is_empty(), "invitee reads the room: {sync}");
+		assert!(own_membership, "invitee's {membership} is missing: {sync}");
+	}
 
 	Ok(())
 }
