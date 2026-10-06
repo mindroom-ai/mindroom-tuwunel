@@ -83,6 +83,28 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Federated read receipts need a joined user and an event of the room
+
+An `m.receipt` EDU from another server was stored for any of that server's
+users once it had a member in the room, whether or not the named user was
+joined, and for any event id and `thread_id` it named. Users outside the room
+then showed up as readers, and each new user or `thread_id` string stored
+another receipt row, kept until the room is deleted. A federated receipt is now
+stored only for a user joined to the room, as typing notifications already
+require, at an event of the room's timeline, and with no `thread_id`, `main`, or
+a thread root that is an event of the room. Upstream has the same bug. Files:
+`src/api/server/send.rs`, `src/api/client/read_marker/mod.rs`; test in
+`src/main/tests/federation_receipt_edu.rs`.
+
+### Banned rooms refuse member events sent through `/state`
+
+`/join`, `/knock` and `/invite` refuse a room the server admin banned, but the
+same member events sent through `PUT /rooms/{id}/state/m.room.member/{user}`
+were accepted. A non-admin's member event in a banned room is now refused with
+`M_FORBIDDEN` unless it is a leave or a ban, as in Synapse; this includes a
+per-room profile update. Upstream has the same bug. Files:
+`src/api/client/state.rs`; test in `src/main/tests/state_member_banned_room.rs`.
+
 ### A withdrawn knock does not move a former member's departure
 
 Under `shared` history visibility a former member reads events up to their
@@ -187,6 +209,17 @@ media itself. Upstream has the same bug. Files: `src/service/client/mod.rs`,
 `src/service/media/remote.rs`, `src/api/client/media_legacy.rs`; test in
 `src/main/tests/federation_redirect.rs`.
 
+### Server discovery follows redirects only to HTTPS
+
+The `/.well-known/matrix/server` lookup followed up to four redirects without
+checking them, including from HTTPS to plain HTTP, so a peer's well-known
+document could send the lookup on to any address the server can reach. Each
+hop must now be an HTTPS URL that passes the redirect check the media, URL
+preview and push clients use, which refuses IP literals in
+`ip_range_denylist`. Redirects are still followed, as the spec asks. Upstream
+has the same bug. File: `src/service/client/mod.rs`; test in
+`src/main/tests/well_known_redirect.rs`.
+
 ### Per-user room lists stop at the user ID
 
 `rooms_joined`, `rooms_invited`, `rooms_knocked` and `rooms_left` scanned their
@@ -227,6 +260,22 @@ continues past events as old as the room's first event, so such a PDU is
 rejected. Upstream has the same bug.
 Files: `src/service/rooms/event_handler/fetch_prev.rs`; test in
 `src/main/tests/federation_prev_event_room.rs`.
+
+### The state before an incoming event comes only from its room
+
+The state before an incoming PDU is derived from the state at its prev events,
+built locally from the events we hold, or taken from the sending server's
+`/state_ids` answer. Each looks events up by id alone. A prev event that was
+missing during the prev-event walk, and so skipped its room check, could be in
+another room's timeline by the time its state was used; the local build
+followed a held outlier's prev events into another room; and a `/state_ids`
+answer could name events we hold from another room. The PDU was then
+authorized against and stored with that other room's state. Each of these now
+checks the room of every event it loads: the derived state and `/state_ids`
+reject such a PDU, and the local build falls back to `/state_ids`. Upstream
+has the same bug. Files:
+`src/service/rooms/event_handler/{fetch_state,state_at_incoming,state_local_build}.rs`;
+test in `src/main/tests/federation_prev_event_room.rs`.
 
 ### Deleting an alias by power level takes room membership
 
@@ -273,6 +322,16 @@ it reaches the embedded IPv4 host. The URL, redirect, DNS answer and peer
 address checks now match such an address as its IPv4 address, so
 `[::ffff:10.0.0.1]` is refused like `10.0.0.1`. Upstream has the same bug.
 File: `src/service/client/mod.rs`; test in `src/service/client/tests.rs`.
+
+### Default `ip_range_denylist` covers the unspecified addresses
+
+On Linux a connection to `0.0.0.0` or `::` reaches the local host, but the
+default denylist covered the local host only as `127.0.0.0/8` and `::1/128`, so
+a pusher or media URL using the unspecified address was not refused like one
+using `127.0.0.1`. The default now also lists `0.0.0.0/8` and `::/128`; Synapse
+always refuses `0.0.0.0` and `::`. Upstream has the same default. Files:
+`src/core/config/mod.rs`, `tuwunel-example.toml`; test in
+`src/core/config/tests.rs`.
 
 ### GitHub sign-in uses the account id
 
@@ -415,6 +474,45 @@ browser presenting it. The callback now starts the next provider's sign-in
 itself with the account it just signed in, and the endpoint ignores
 `loginToken`. Upstream has the same bug. File:
 `src/api/client/session/sso.rs`; test in `src/main/tests/sso_login_redirect.rs`.
+
+### Legacy SSO login asks before an unlisted `redirectUrl`
+
+The legacy SSO callback sent the fresh login token to whatever `redirectUrl`
+the sign-in link named. A target that is not on the `well_known.client`
+origin, not waived as an OIDC client's redirect would be
+(`oidc_require_client_approval`, `oidc_registration_allowed_redirect_hosts`)
+and not listed in the legacy-SSO-only `sso_trusted_redirect_hosts` (web client
+hosts and native app schemes) now gets the token only from a Continue link on
+a page naming it, and such a `javascript:` target or one with userinfo is
+refused. Upstream has the same bug. Files: `src/api/client/session/sso.rs`,
+`src/api/oidc/complete.rs`, `src/api/router.rs`, `src/core/config/mod.rs`;
+test in `src/main/tests/sso_login_redirect.rs`.
+
+### Backfilled events do not set the old-event cutoff
+
+A live federated event dated before the room's first stored event is skipped
+as old, and the same cutoff bounds the fetch of its missing previous events.
+Backfilled events sort before the rest of the timeline, so after a backfill
+that first event carried a timestamp set by a remote server, and one dated in
+the future made the server silently skip new events in the room until that
+time passed. The cutoff now comes from the first event that was not
+backfilled, which is the first event this server stored itself (the create,
+our join or our knock), the same cutoff it used before any backfill. Upstream
+has the same bug. Files:
+`src/service/rooms/{timeline/mod.rs,event_handler/handle_incoming_pdu.rs}`;
+test in `src/main/tests/incoming_after_future_backfill.rs`.
+
+### Bundled aggregations follow the requester's visibility
+
+A served event's bundled `m.thread` summary and `m.replace` edits were added
+without checking whether the requester may see them, so a user who had left or
+been removed from a room still got a thread's newest reply and the newest edit
+of an event they could read, even when those were sent after they left. A
+requester who is no longer in the room now gets an edit only when the room's
+history visibility lets them see it, and no thread summary when it hides the
+latest reply. Upstream has the same bug. File:
+`src/service/rooms/pdu_metadata/bundling.rs`; test in
+`src/main/tests/bundled_relations_after_leave.rs`.
 
 ### A device's tokens rotate under its device lock
 
