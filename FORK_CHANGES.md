@@ -67,6 +67,17 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Sliding sync looks up delivered required state selectors in a set
+
+When a room's sliding sync configuration changes, each required state entry is
+checked against the selectors the room was last delivered with, so state the
+client had not asked for before is sent in full. Each check scanned the stored
+list, so the cost grew with the product of the current entries and the stored
+selectors, and a request with a million selectors kept a worker busy for
+minutes. The stored selectors are now collected into a hash set once per room.
+Upstream has the same bug. File: `src/api/client/sync/v5/rooms.rs`; test in
+`src/api/client/sync/v5/rooms/tests.rs`.
+
 ### Federated read receipts need a joined user and an event of the room
 
 An `m.receipt` EDU from another server was stored for any of that server's
