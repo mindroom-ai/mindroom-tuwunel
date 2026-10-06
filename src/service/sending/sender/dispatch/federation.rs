@@ -12,12 +12,13 @@ use tuwunel_core::{
 };
 
 use super::SendingResult;
-use crate::sending::{Destination, EduBuf, SendingEvent, Service};
+use crate::sending::{Destination, EduBuf, SendingEvent, Service, sender::MAX_EDU_BYTES};
 
 /// Send a federation transaction, reporting whether one went out at all.
 ///
 /// Rows that all fail to load leave nothing to send; they still succeed, so
-/// their keys are acknowledged.
+/// their keys are acknowledged. An EDU over `MAX_EDU_BYTES` is left out the
+/// same way and acknowledged with the transaction.
 #[implement(Service)]
 #[tracing::instrument(
 	name = "federation",
@@ -58,6 +59,14 @@ pub(super) async fn send_events_dest_federation(
 	let edus: Vec<Raw<Edu>> = events
 		.iter()
 		.filter_map(|event| extract_variant!(event, SendingEvent::Edu))
+		.filter(|edu| {
+			let fits = edu.len() <= MAX_EDU_BYTES;
+			if !fits {
+				warn!(%server, len = edu.len(), "Dropping an EDU too large to send");
+			}
+
+			fits
+		})
 		.map(EduBuf::as_slice)
 		.map(serde_json::from_slice)
 		.filter_map(Result::ok)

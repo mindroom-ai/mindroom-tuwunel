@@ -109,6 +109,19 @@ pub const PDU_LIMIT: usize = 50;
 /// rejected and outbound composition stays under it.
 pub const EDU_LIMIT: usize = 100;
 
+/// Largest device key, cross-signing key or to-device message accepted from a
+/// local client for sending to other servers.
+///
+/// A transaction full of EDUs carrying such payloads stays within the request
+/// body limits peers enforce.
+pub const MAX_EDU_CONTENT_BYTES: usize = 65_536;
+
+/// Largest EDU one federation transaction carries.
+///
+/// A peer refuses a transaction over its request body limit, and the refused
+/// rows return in every later transaction to it, so a larger EDU is dropped.
+const MAX_EDU_BYTES: usize = 1_048_576;
+
 #[implement(Service)]
 #[tracing::instrument(skip(self), level = "debug")]
 pub(super) async fn sender(self: Arc<Self>, id: usize) -> Result {

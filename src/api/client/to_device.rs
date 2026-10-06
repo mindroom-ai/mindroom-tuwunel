@@ -12,11 +12,11 @@ use ruma::{
 	to_device::DeviceIdOrAllDevices,
 };
 use tuwunel_core::{
-	Error, Result,
+	Err, Error, Result,
 	smallvec::SmallVec,
 	utils::{ReadyExt, result::LogErr},
 };
-use tuwunel_service::sending::EduBuf;
+use tuwunel_service::sending::{EduBuf, MAX_EDU_CONTENT_BYTES};
 
 use crate::Ruma;
 
@@ -42,6 +42,20 @@ pub(crate) async fn send_event_to_device_route(
 		.is_ok()
 	{
 		return Ok(send_event_to_device::v3::Response {});
+	}
+
+	// Each message to a remote device goes out in an EDU of its own.
+	let oversized = body
+		.messages
+		.iter()
+		.filter(|(user_id, _)| !services.globals.user_is_local(user_id))
+		.flat_map(|(_, map)| map.values())
+		.any(|event| event.json().get().len() > MAX_EDU_CONTENT_BYTES);
+
+	if oversized {
+		return Err!(Request(TooLarge(
+			"To-device message is too large to send to another server."
+		)));
 	}
 
 	for (target_user_id, map) in &body.messages {
