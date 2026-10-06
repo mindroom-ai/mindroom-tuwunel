@@ -26,9 +26,8 @@ mod tests {
 	#[test]
 	fn apple_login_succeeds_from_id_token_when_userinfo_fails() -> Result {
 		// The callback sends the login token straight only to a listed client.
-		let mut harness = Harness::new("mindroom_rebase_apple_fallback", [
-			"oidc_registration_allowed_redirect_hosts=[\"client.example.test\"]".to_owned(),
-		])?;
+		let trusted = "sso_trusted_redirect_hosts=[\"client.example.test\"]".to_owned();
+		let mut harness = Harness::new("mindroom_rebase_apple_fallback", [trusted])?;
 
 		let id_token = build_unsigned_id_token(&json!({
 			"sub": "apple-user-1",

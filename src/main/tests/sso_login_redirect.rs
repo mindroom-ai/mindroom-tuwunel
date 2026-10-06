@@ -50,7 +50,7 @@ fn sso_login_redirect() -> Result {
 		.with_option(format!("port={port}"))
 		.with_option("listening=true")
 		.with_option(format!("well_known.client=\"{base}\""))
-		.with_option("oidc_registration_allowed_redirect_hosts=[\"client.example\"]");
+		.with_option("sso_trusted_redirect_hosts=[\"client.example\"]");
 
 	let args = [FIRST, SECOND]
 		.into_iter()

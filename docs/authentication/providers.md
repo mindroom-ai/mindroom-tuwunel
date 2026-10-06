@@ -410,8 +410,8 @@ These admin room commands help manage OAuth state:
 4. The provider authenticates the user and redirects back to
    `/_matrix/client/unstable/login/sso/callback/<client_id>`.
 5. Tuwunel exchanges the code for tokens, fetches user claims, maps them to a
-   Matrix user ID, and issues a login token back to the client. A client whose
+   Matrix user ID, and issues a login token back to the client. When
+   `oidc_require_client_approval` is true (the default), a client whose
    `redirectUrl` is not on the `well_known.client` origin and not listed in
    `oidc_registration_allowed_redirect_hosts` or `sso_trusted_redirect_hosts`
-   receives it only after the user continues from a page naming that client
-   (`oidc_require_client_approval`).
+   receives it only after the user continues from a page naming that client.
