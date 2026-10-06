@@ -48,6 +48,21 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### GitHub sign-in uses the account id
+
+GitHub's user API has no `sub`, so a `login` alias made the username the
+identity, and GitHub frees a username after a rename or account deletion.
+Whoever registered it next signed in to the account linked to the previous
+owner, and through the fork's self-reactivation also revived it if it had been
+self-deactivated. GitHub identities are now keyed on the numeric account `id`,
+hashed under their own issuer string, and the `login` only picks a new
+account's localpart. An association stored under a `login` moves to the `id` at
+the next sign-in only when the avatar URL stored with it names that `id`;
+otherwise the sign-in is treated as a new user, and
+`docs/authentication/providers.md` describes how to re-link the account.
+Upstream has the same bug. Files: `src/service/oauth/{mod.rs,user_info.rs}`,
+`src/api/client/session/sso.rs`.
+
 ### Sliding sync withholds the timeline of knocked rooms
 
 Sliding sync lists include rooms the user has knocked on, but only invited rooms

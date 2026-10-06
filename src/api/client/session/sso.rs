@@ -30,7 +30,7 @@ use tuwunel_core::{
 		OptionExt,
 		content_disposition::make_content_disposition,
 		hash::sha256,
-		result::{FlatOk, LogErr},
+		result::{FlatOk, LogErr, NotFound},
 		string::{EMPTY, truncate_deterministic},
 		timepoint_from_now, timepoint_has_passed,
 	},
@@ -41,8 +41,8 @@ use tuwunel_service::{
 	client::read_response_capped,
 	media::MXC_LENGTH,
 	oauth::{
-		CODE_VERIFIER_LENGTH, Provider, SESSION_ID_LENGTH, Session, TokenResponse, UserInfo,
-		unique_id_sub,
+		CODE_VERIFIER_LENGTH, GITHUB_LOGIN_ISSUER, Provider, SESSION_ID_LENGTH, Session,
+		TokenResponse, UserInfo, unique_id_iss_sub, unique_id_sub,
 	},
 	users::{PASSWORD_SENTINEL, Register},
 };
@@ -524,8 +524,10 @@ async fn complete_sso_session(
 		.ok_or_else(|| err!(Request(InvalidParam("Missing SSO session id."))))?;
 
 	let unique_id = unique_id_sub((provider, &userinfo.sub))?;
+	let login_session = github_login_session(services, provider, &userinfo).await?;
 
 	let complete_identity = async |old_user_id: Option<OwnedUserId>| {
+		let old_user_id = old_user_id.or_else(|| login_session.as_ref()?.user_id.clone());
 		let session = Session {
 			user_info: Some(userinfo.clone()),
 			..session
@@ -579,6 +581,16 @@ async fn complete_sso_session(
 		services.oauth.sessions.delete(old_sess_id).await;
 	}
 
+	// Deleting the login-keyed session leaves its index, which then resolves to
+	// no session.
+	if let Some(login_sess_id) = login_session.and_then(|session| session.sess_id) {
+		services
+			.oauth
+			.sessions
+			.delete(&login_sess_id)
+			.await;
+	}
+
 	if services
 		.users
 		.maybe_reactivate_deactivated_sso(&user_id)
@@ -592,6 +604,46 @@ async fn complete_sso_session(
 	}
 
 	Ok((user_id, session))
+}
+
+/// Find the session an earlier release keyed on the presented GitHub `login`.
+///
+/// GitHub releases a `login` for anyone to register after a rename or account
+/// deletion, so the session is returned only when the avatar URL stored with
+/// it, which GitHub serves under the account `id`, names the presented `id`.
+async fn github_login_session(
+	services: &Services,
+	provider: &Provider,
+	userinfo: &UserInfo,
+) -> Result<Option<Session>> {
+	let Some(login) = userinfo
+		.login
+		.as_deref()
+		.filter(|_| provider.brand == "github")
+	else {
+		return Ok(None);
+	};
+
+	let session = services
+		.oauth
+		.sessions
+		.get_by_unique_id(&unique_id_iss_sub((GITHUB_LOGIN_ISSUER, login))?)
+		.await
+		.optional()?;
+
+	Ok(session.filter(|session| github_account_id(session) == Some(userinfo.sub.as_str())))
+}
+
+/// The GitHub account `id` in the avatar URL stored with a session.
+fn github_account_id(session: &Session) -> Option<&str> {
+	session
+		.user_info
+		.as_ref()?
+		.avatar_url
+		.as_deref()?
+		.strip_prefix("https://avatars.githubusercontent.com/u/")?
+		.split('?')
+		.next()
 }
 
 async fn handle_uiaa(
@@ -811,10 +863,9 @@ async fn decide_user_id(
 			.as_deref()
 			.map(str::to_lowercase)
 			.filter(|_| allowed("nickname")),
-		provider
-			.brand
-			.eq(&"github")
-			.then_some(userinfo.sub.as_str())
+		userinfo
+			.login
+			.as_deref()
 			.map(str::to_lowercase)
 			.filter(|_| allowed("login")),
 		userinfo
@@ -930,6 +981,25 @@ fn parse_user_id(server_name: &ServerName, username: &str) -> Result<OwnedUserId
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn github_account_id_reads_the_stored_avatar_url() {
+		let session = |avatar_url: &str| Session {
+			user_info: Some(UserInfo {
+				sub: "alice".to_owned(),
+				avatar_url: Some(avatar_url.to_owned()),
+				..Default::default()
+			}),
+			..Default::default()
+		};
+
+		let owner = session("https://avatars.githubusercontent.com/u/583231?v=4");
+		let unrelated = session("https://example.com/u/583231?v=4");
+
+		assert_eq!(github_account_id(&owner), Some("583231"), "GitHub avatar names the id");
+		assert_eq!(github_account_id(&unrelated), None, "other hosts name no GitHub id");
+		assert_eq!(github_account_id(&Session::default()), None, "no avatar names no id");
+	}
 
 	#[test]
 	fn grant_session_cookie_path_uses_the_callback_path() {
