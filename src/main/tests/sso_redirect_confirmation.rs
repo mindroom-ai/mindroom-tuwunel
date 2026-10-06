@@ -49,6 +49,7 @@ fn sso_redirect_confirmation() -> Result {
 		.with_option("listening=true")
 		.with_option(format!("well_known.client=\"{base}\""))
 		.with_option("oidc_registration_allowed_redirect_hosts=[\"trusted.example\"]")
+		.with_option("sso_trusted_redirect_hosts=[\"web.example\", \"exampleapp\"]")
 		.with_option(option("client_id", &format!("\"{IDP}\"")))
 		.with_option(option("client_secret", "\"test-secret\""))
 		.with_option(option("brand", "\"test\""))
@@ -102,6 +103,8 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	for (target, asks) in [
 		(TRUSTED, false),
 		(own.as_str(), false),
+		("https://web.example/login", false),
+		("exampleapp://auth/login", false),
 		("https://unlisted.example/", true),
 		("element://connect", true),
 	] {

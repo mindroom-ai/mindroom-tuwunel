@@ -520,7 +520,22 @@ fn redirect_vetted(services: &Services, redirect_url: &Url) -> bool {
 		.as_ref()
 		.is_some_and(|client| client.origin() == redirect_url.origin());
 
-	own_origin || approval_waived(services, redirect_url.as_str())
+	own_origin
+		|| approval_waived(services, redirect_url.as_str())
+		|| redirect_trusted(&services.config.sso_trusted_redirect_hosts, redirect_url)
+}
+
+/// Whether `url` names a web client host or native app scheme listed in
+/// `sso_trusted_redirect_hosts`.
+fn redirect_trusted(trusted: &[String], url: &Url) -> bool {
+	let name = match url.scheme() {
+		| "http" | "https" => url.host_str().unwrap_or_default(),
+		| scheme => scheme,
+	};
+
+	trusted
+		.iter()
+		.any(|entry| entry.eq_ignore_ascii_case(name))
 }
 
 /// Ask the user before a login token goes to a target nobody vetted.
