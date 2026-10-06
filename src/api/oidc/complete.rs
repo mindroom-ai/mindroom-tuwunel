@@ -198,7 +198,7 @@ impl Approval<'_> {
 /// an authorization link. An initial access token deliberately does not waive
 /// it, since closing registration says nothing about the clients that were
 /// already registered when it closed.
-fn approval_waived(services: &Services, redirect_uri: &str) -> bool {
+pub(crate) fn approval_waived(services: &Services, redirect_uri: &str) -> bool {
 	let config = &services.config;
 
 	!config.oidc_require_client_approval

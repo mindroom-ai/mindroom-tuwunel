@@ -2049,10 +2049,32 @@ pub struct Config {
 	/// a person takes, a server that shows it wants a `login_token_ttl` long
 	/// enough to read the page.
 	///
+	/// The legacy SSO login takes its `redirectUrl` from whoever sent the
+	/// link, so it asks the same way: a login token for a target that is
+	/// not on the `well_known.client` origin, not vetted as above and not
+	/// listed in `sso_trusted_redirect_hosts` is handed over only from a page
+	/// naming that target.
+	///
 	/// reloadable: yes
 	/// default: true
 	#[serde(default = "true_fn")]
 	pub oidc_require_client_approval: bool,
+
+	/// Redirect targets the legacy SSO login trusts with a login token.
+	///
+	/// The legacy SSO login sends its login token by redirect, without the
+	/// confirmation page, to a `redirectUrl` listed here. An entry names a web
+	/// client's host, which matches http and https targets on that host
+	/// (compared case-insensitively), or a native app's URL scheme, which
+	/// matches any other target with that scheme, e.g. `mindroom` for
+	/// `mindroom://auth/...`.
+	///
+	/// This list does not affect OIDC client registration.
+	///
+	/// reloadable: yes
+	/// default: []
+	#[serde(default)]
+	pub sso_trusted_redirect_hosts: Vec<String>,
 
 	/// Require a `client_uri` in dynamic client registration requests
 	/// (RFC 7591 / MSC2966).

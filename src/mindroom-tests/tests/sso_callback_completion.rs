@@ -40,7 +40,9 @@ mod tests {
 	#[test]
 	#[expect(clippy::too_many_lines)]
 	fn complete_sso_session_reuse_rejection_and_reactivation() -> Result {
-		let mut harness = Harness::new("mindroom_rebase_sso_completion", [])?;
+		// The callback sends the login token straight only to a listed client.
+		let trusted = "sso_trusted_redirect_hosts=[\"client.example.test\"]".to_owned();
+		let mut harness = Harness::new("mindroom_rebase_sso_completion", [trusted])?;
 
 		// Scenario A: re-login reuses the identity and deletes the prior session.
 		let reuse = harness.mock_server(idp_router("sub-reuse", "reuseone@example.test"))?;
