@@ -97,13 +97,14 @@ where
 	skip_all,
 	fields(%event_id),
 )]
+#[expect(clippy::type_complexity)]
 async fn fetch_auth_chain(
 	&self,
 	origin: &ServerName,
 	room_id: &RoomId,
 	event_id: &EventId,
 	room_version: &RoomVersionId,
-) -> (OwnedEventId, Option<PduEvent>, Vec<(OwnedEventId, CanonicalJsonObject)>) {
+) -> (OwnedEventId, Option<PduEvent>, Vec<(OwnedEventId, Vec<u8>)>) {
 	// a. Look in the main timeline (pduid_pdu tree)
 	// b. Look at outlier pdu tree
 	// (get_pdu_json checks both)
@@ -178,7 +179,7 @@ async fn fetch_auth_chain(
 			continue;
 		};
 
-		let Some(value) = parse_fetched_pdu(&outcome.bytes) else {
+		let Some((value, pdu_json)) = parse_fetched_pdu(&outcome.bytes) else {
 			self.record_outcome(Context::Fetch, &next_id, Disposition::Transient);
 			continue;
 		};
@@ -197,7 +198,7 @@ async fn fetch_auth_chain(
 				todo_auth_events.push_back(auth_event.to_owned());
 			});
 
-		events_in_reverse_order.push((next_id.clone(), value));
+		events_in_reverse_order.push((next_id.clone(), pdu_json));
 		events_all.insert(next_id);
 	}
 
@@ -213,7 +214,7 @@ async fn admit_chain(
 	&self,
 	eval: Eval<'_>,
 	event_id: &EventId,
-	chain_in_reverse_order: Vec<(OwnedEventId, CanonicalJsonObject)>,
+	chain_in_reverse_order: Vec<(OwnedEventId, Vec<u8>)>,
 	pdus: Fetched,
 ) -> Fetched {
 	chain_in_reverse_order
@@ -245,7 +246,7 @@ async fn admit_fetched(
 	&self,
 	eval @ Eval { recursion_level, .. }: Eval<'_>,
 	event_id: &EventId,
-	pdu_json: CanonicalJsonObject,
+	pdu_json: Vec<u8>,
 ) -> Option<(PduEvent, CanonicalJsonObject)> {
 	if self
 		.is_suppressed(Context::Auth, event_id, Duration::from_mins(5)..Duration::from_hours(24))
@@ -278,25 +279,34 @@ async fn admit_fetched(
 async fn admit_outlier<'a>(
 	&'a self,
 	eval: Eval<'a>,
-	pdu_json: CanonicalJsonObject,
+	pdu_json: Vec<u8>,
 ) -> Option<(PduEvent, CanonicalJsonObject)> {
-	self.handle_outlier_pdu(eval, pdu_json)
+	let admitted = match serde_json::from_slice(&pdu_json) {
+		| Ok(value) => {
+			drop(pdu_json);
+			self.handle_outlier_pdu(eval, value).await
+		},
+		| Err(error) => Err(error.into()),
+	};
+
+	admitted
 		.inspect_err(|error| {
 			warn!(event_id = %eval.event_id, ?error, "Authentication of fetched event failed");
 		})
-		.map(Result::ok)
-		.await
+		.ok()
 }
 
-/// Parse an event fetched by the auth chain walk. `unsigned` is removed, as
-/// handle_outlier_pdu removes it before checking the PDU size limit, and an
-/// event still larger than that limit is rejected.
-fn parse_fetched_pdu(bytes: &[u8]) -> Option<CanonicalJsonObject> {
+/// Parse an event fetched by the auth chain walk, returning it both parsed and
+/// as canonical JSON. `unsigned` is removed, as handle_outlier_pdu removes it
+/// before checking the PDU size limit, and an event still larger than that
+/// limit is rejected. The walk keeps only the JSON, as a parsed event can take
+/// many times its serialized size in memory.
+fn parse_fetched_pdu(bytes: &[u8]) -> Option<(CanonicalJsonObject, Vec<u8>)> {
 	let mut value: CanonicalJsonObject = serde_json::from_slice(bytes).ok()?;
 	value.remove("unsigned");
 
-	let size = serde_json::to_vec(&value).ok()?.len();
-	(size <= MAX_PDU_BYTES).then_some(value)
+	let pdu_json = serde_json::to_vec(&value).ok()?;
+	(pdu_json.len() <= MAX_PDU_BYTES).then_some((value, pdu_json))
 }
 
 #[cfg(test)]
@@ -318,7 +328,8 @@ mod tests {
 		.expect("serializes");
 		assert!(bytes.len() > MAX_PDU_BYTES);
 
-		let pdu = parse_fetched_pdu(&bytes).expect("kept within the size limit");
+		let (_, pdu_json) = parse_fetched_pdu(&bytes).expect("kept within the size limit");
+		let pdu: CanonicalJsonObject = serde_json::from_slice(&pdu_json).expect("parses");
 		assert!(!pdu.contains_key("unsigned"), "unsigned is not kept");
 	}
 
