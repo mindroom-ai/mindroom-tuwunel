@@ -19,9 +19,9 @@ const TOKEN: &str = "edu-content-size-test-access-token";
 
 /// Keys and remote to-device messages too large to send in an EDU are refused.
 ///
-/// Device keys, a cross-signing key, a to-device message for a remote user and
-/// the device keys of a dehydrated device, each padded past
-/// `MAX_EDU_CONTENT_BYTES`, are answered with 413.
+/// Device keys, a cross-signing key, a to-device message for a remote user (by
+/// its content or its device ID) and the device keys of a dehydrated device,
+/// each padded past `MAX_EDU_CONTENT_BYTES`, are answered with 413.
 #[test]
 fn payloads_too_large_for_an_edu_are_refused() -> Result {
 	let options: [&str; 0] = [];
@@ -70,11 +70,13 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	}
 
 	let to_device = json!({ "messages": { "@peer:remote.example": { "PEER": { "pad": pad } } } });
+	let to_device_id = json!({ "messages": { "@peer:remote.example": { &pad: {} } } });
 	let dehydrated_device_url =
 		format!("{base}/_matrix/client/unstable/org.matrix.msc3814.v1/dehydrated_device");
 
 	for (url, body) in [
 		(client.url("sendToDevice/m.test/edu-content-size"), to_device),
+		(client.url("sendToDevice/m.test/edu-device-id-size"), to_device_id),
 		(dehydrated_device_url, dehydrated_device),
 	] {
 		let response = services

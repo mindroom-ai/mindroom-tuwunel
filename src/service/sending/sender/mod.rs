@@ -109,8 +109,8 @@ pub const PDU_LIMIT: usize = 50;
 /// rejected and outbound composition stays under it.
 pub const EDU_LIMIT: usize = 100;
 
-/// Largest device key, cross-signing key or to-device message accepted from a
-/// local client for sending to other servers.
+/// Largest device key or cross-signing key accepted from a local client, and
+/// largest EDU carrying one of its to-device messages to another server.
 ///
 /// A transaction full of EDUs carrying such payloads stays within the request
 /// body limits peers enforce.
