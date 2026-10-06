@@ -217,6 +217,19 @@ pub async fn set_access_token(
 		"Caller must supply an access_token >= {TOKEN_LENGTH} chars."
 	);
 
+	// Token issuance shares the device lock with `remove_device`: concurrent
+	// refreshes rotate one after another instead of each leaving a refresh
+	// token the device no longer points at, and a refresh already in flight
+	// cannot issue tokens to a device removed meanwhile.
+	let mutex_key = (user_id.to_owned(), device_id.to_owned());
+	let _guard = self.device_key_mutex.lock(&mutex_key).await;
+
+	if !self.device_exists(user_id, device_id).await {
+		return Err!(Request(Forbidden(
+			"Cannot issue tokens for a device that no longer exists."
+		)));
+	}
+
 	if let Some(refresh_token) = refresh_token {
 		self.set_refresh_token(user_id, device_id, refresh_token)
 			.await?;
