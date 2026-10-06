@@ -83,6 +83,17 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### A withdrawn knock does not move a former member's departure
+
+Under `shared` history visibility a former member reads events up to their
+latest leave. Knocking again after leaving or being kicked dropped that leave,
+and withdrawing the knock recorded a new one, so the user then read everything
+sent since their removal; rejecting a later invite did the same. A leave now
+bounds this history only when it ended a join; otherwise the user keeps the
+events sent while they were joined. Upstream has the same bug. File:
+`src/service/rooms/state_accessor/user_can.rs`; test in
+`src/main/tests/knock_withdrawal_history.rs`.
+
 ### Sync timelines follow history visibility
 
 Legacy `/sync` and sliding sync returned a room's newest events without

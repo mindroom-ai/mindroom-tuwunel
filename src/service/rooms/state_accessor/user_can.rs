@@ -163,7 +163,7 @@ async fn history_visibility_at(
 ///
 /// A current member sees the whole room, which the first check answers without
 /// touching room state. A former member keeps events through their latest
-/// leave, and lookup failures deny access.
+/// leave if it ended a join, and lookup failures deny access.
 #[implement(super::Service)]
 async fn user_shared_history(
 	&self,
@@ -199,7 +199,24 @@ async fn user_shared_history(
 		return false;
 	};
 
-	event_count <= PduCount::from_unsigned(left_count)
+	let left_count = PduCount::from_unsigned(left_count);
+	if event_count > left_count {
+		return false;
+	}
+
+	// A knock or an invite after the leave drops it, and leaving again records a
+	// later one, so only a leave that ended a join bounds the history.
+	let Ok(left_shortstatehash) = self
+		.services
+		.timeline
+		.get_shortstatehash(room_id, left_count)
+		.await
+	else {
+		return false;
+	};
+
+	self.user_was_joined(left_shortstatehash, user_id)
+		.await
 }
 
 /// Whether a user is allowed to see an event, based on
