@@ -48,6 +48,15 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### `ip_range_denylist` covers IPv4-mapped IPv6 addresses
+
+An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) was matched against the denylist
+as an IPv6 address, so the IPv4 ranges never matched it, while a connection to
+it reaches the embedded IPv4 host. The URL, redirect, DNS answer and peer
+address checks now match such an address as its IPv4 address, so
+`[::ffff:10.0.0.1]` is refused like `10.0.0.1`. Upstream has the same bug.
+File: `src/service/client/mod.rs`; test in `src/service/client/tests.rs`.
+
 ### GitHub sign-in uses the account id
 
 GitHub's user API has no `sub`, so a `login` alias made the username the
