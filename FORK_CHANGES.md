@@ -83,6 +83,16 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Federated key claims keep only the answering server's users
+
+A remote server's `/user/keys/claim` answer was taken as a whole, so entries
+naming users of other servers, local users included, replaced those users'
+one-time keys in the client's `/keys/claim` response; a local user's key had
+already been taken from storage and was lost. Entries whose user does not
+belong to the answering server are now dropped, as federated key queries
+already do. Upstream has the same bug. File:
+`src/api/client/keys/claim_keys.rs`.
+
 ### Sync timelines follow history visibility
 
 Legacy `/sync` and sliding sync returned a room's newest events without
