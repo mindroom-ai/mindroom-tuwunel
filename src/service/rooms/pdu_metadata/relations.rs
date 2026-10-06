@@ -141,6 +141,21 @@ pub fn try_get_relations<'a>(
 	dir: Direction,
 	user_id: Option<&'a UserId>,
 ) -> impl Stream<Item = Result<(PduCount, Pdu)>> + Send + '_ {
+	self.try_get_relations_limited(shortroomid, target, from, dir, user_id, usize::MAX)
+}
+
+/// Like `try_get_relations`, but reads at most `limit` relations, including
+/// ones whose event does not load.
+#[implement(Service)]
+pub fn try_get_relations_limited<'a>(
+	&'a self,
+	shortroomid: ShortRoomId,
+	target: PduCount,
+	from: Option<PduCount>,
+	dir: Direction,
+	user_id: Option<&'a UserId>,
+	limit: usize,
+) -> impl Stream<Item = Result<(PduCount, Pdu)>> + Send + '_ {
 	let target = target.to_be_bytes();
 	let from = from
 		.map(|from| from.saturating_inc(dir))
@@ -171,6 +186,7 @@ pub fn try_get_relations<'a>(
 			.right_stream(),
 	}
 	.ready_try_take_while(move |key| Ok(key.starts_with(&target)))
+	.take(limit)
 	.map_ok(|to_from| u64_from_u8(&to_from[8..16]))
 	.map_ok(PduCount::from_unsigned)
 	.map_ok(move |count| (user_id, shortroomid, count))

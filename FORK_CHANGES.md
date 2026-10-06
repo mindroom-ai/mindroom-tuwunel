@@ -35,6 +35,19 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Replacing a redacted latest reply searches a bounded range
+
+Redacting a thread's newest reply swaps the newest remaining reply into the
+root's `m.thread` summary, or drops the summary when none remains. Upstream
+walks every relation of the root to find it, loading each event, while the
+redaction holds the room lock and the sequence permit; reactions, edits and
+redacted replies stay in the relation index. Only the root's newest 256
+relations are searched, counting ones whose event no longer loads (such as
+purged edits), and a root with no remaining reply among them drops the summary
+too. The startup summary rebuild still reads every relation. Upstream has the
+same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
+test in `src/service/rooms/threads/tests/redact.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`

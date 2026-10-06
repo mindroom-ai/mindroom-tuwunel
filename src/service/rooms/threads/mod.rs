@@ -37,6 +37,11 @@ mod tests;
 /// the Matrix v1.4 spec recommendation (also MSC3771/MSC3773).
 const MAX_THREAD_HOPS: usize = 3;
 
+/// How many of a root's newest relations are searched to replace a redacted
+/// latest reply. Redaction holds the room lock and sequence permit, and a root
+/// can gather any number of reactions or redacted replies.
+const MAX_LATEST_REPLY_SCAN: usize = 256;
+
 #[derive(Deserialize)]
 struct ExtractThreadRelation {
 	#[serde(rename = "m.relates_to")]
@@ -279,7 +284,8 @@ impl Service {
 	/// Returns the root row changed by redacting a counted thread reply.
 	///
 	/// The caller holds the room lock while the count decreases and the latest
-	/// reply is replaced, or the whole bundle removed when no reply remains.
+	/// reply is replaced, or the whole bundle removed when no reply remains
+	/// among the root's newest relations.
 	/// Missing roots and unchanged summaries return `None`; storage errors are logged.
 	pub async fn redacted_reply_root(
 		&self,
@@ -584,8 +590,10 @@ async fn latest_thread_reply(
 	excluding: &EventId,
 ) -> Option<CanonicalJsonValue> {
 	// An unreadable reply is skipped, so the newest readable one keeps the summary.
+	// Only the newest relations are searched; with no reply among them, the
+	// summary is dropped as when none remains.
 	let replies = self
-		.thread_replies(root_id)
+		.thread_replies(root_id, MAX_LATEST_REPLY_SCAN)
 		.ready_filter_map(|reply| reply.log_err().ok())
 		.ready_filter(|(_, pdu)| pdu.event_id != excluding);
 
@@ -599,12 +607,13 @@ async fn latest_thread_reply(
 fn thread_replies(
 	&self,
 	root_id: RawPduId,
+	limit: usize,
 ) -> impl Stream<Item = Result<(PduCount, Pdu)>> + Send + '_ {
 	let PduId { shortroomid, count } = root_id.into();
 
 	self.services
 		.pdu_metadata
-		.try_get_relations(shortroomid, count, None, Direction::Backward, None)
+		.try_get_relations_limited(shortroomid, count, None, Direction::Backward, None, limit)
 		.ready_try_filter(|(_, pdu)| !pdu.is_redacted())
 		.ready_try_filter(|(_, pdu)| is_thread_reply(pdu))
 }
@@ -626,7 +635,7 @@ async fn rebuild_thread_summary(&self, root_id: RawPduId) -> Result<bool> {
 	let Some(_) = thread_bundle(&root) else { return Ok(false) };
 
 	let (count, latest) = self
-		.thread_replies(root_id)
+		.thread_replies(root_id, usize::MAX)
 		.ready_try_fold((0_usize, None), |(count, latest), (_, pdu)| {
 			Ok((count.saturating_add(1), latest.or(Some(pdu))))
 		})
