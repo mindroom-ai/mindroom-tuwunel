@@ -48,6 +48,17 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### Per-user room lists stop at the user ID
+
+`rooms_joined`, `rooms_invited`, `rooms_knocked` and `rooms_left` scanned their
+`(user_id, room_id)` indexes with the bare user ID as the prefix, so the rooms
+of a user whose ID extends it (`@alice:example.org.other` for
+`@alice:example.org`) were listed as the shorter user's own, for example in
+`/sync` and `/joined_rooms`. The scans now include the key separator after the
+user ID, as the per-user state scans already did. Upstream has the same bug.
+Files: `src/service/rooms/state_cache/mod.rs`; test in
+`src/service/rooms/state_cache/tests.rs`.
+
 ### Public read receipts need a joined user and an event of the room
 
 `POST /rooms/{roomId}/receipt/m.read/{eventId}` and the `m.read` field of
