@@ -83,6 +83,15 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Banned rooms refuse member events sent through `/state`
+
+`/join`, `/knock` and `/invite` refuse a room the server admin banned, but the
+same member events sent through `PUT /rooms/{id}/state/m.room.member/{user}`
+were accepted. A non-admin's member event in a banned room is now refused with
+`M_FORBIDDEN` unless it is a leave or a ban, as in Synapse; this includes a
+per-room profile update. Upstream has the same bug. Files:
+`src/api/client/state.rs`; test in `src/main/tests/state_member_banned_room.rs`.
+
 ### A withdrawn knock does not move a former member's departure
 
 Under `shared` history visibility a former member reads events up to their
@@ -421,6 +430,45 @@ browser presenting it. The callback now starts the next provider's sign-in
 itself with the account it just signed in, and the endpoint ignores
 `loginToken`. Upstream has the same bug. File:
 `src/api/client/session/sso.rs`; test in `src/main/tests/sso_login_redirect.rs`.
+
+### Legacy SSO login asks before an unlisted `redirectUrl`
+
+The legacy SSO callback sent the fresh login token to whatever `redirectUrl`
+the sign-in link named. A target that is not on the `well_known.client`
+origin, not waived as an OIDC client's redirect would be
+(`oidc_require_client_approval`, `oidc_registration_allowed_redirect_hosts`)
+and not listed in the legacy-SSO-only `sso_trusted_redirect_hosts` (web client
+hosts and native app schemes) now gets the token only from a Continue link on
+a page naming it, and such a `javascript:` target or one with userinfo is
+refused. Upstream has the same bug. Files: `src/api/client/session/sso.rs`,
+`src/api/oidc/complete.rs`, `src/api/router.rs`, `src/core/config/mod.rs`;
+test in `src/main/tests/sso_login_redirect.rs`.
+
+### Backfilled events do not set the old-event cutoff
+
+A live federated event dated before the room's first stored event is skipped
+as old, and the same cutoff bounds the fetch of its missing previous events.
+Backfilled events sort before the rest of the timeline, so after a backfill
+that first event carried a timestamp set by a remote server, and one dated in
+the future made the server silently skip new events in the room until that
+time passed. The cutoff now comes from the first event that was not
+backfilled, which is the first event this server stored itself (the create,
+our join or our knock), the same cutoff it used before any backfill. Upstream
+has the same bug. Files:
+`src/service/rooms/{timeline/mod.rs,event_handler/handle_incoming_pdu.rs}`;
+test in `src/main/tests/incoming_after_future_backfill.rs`.
+
+### Bundled aggregations follow the requester's visibility
+
+A served event's bundled `m.thread` summary and `m.replace` edits were added
+without checking whether the requester may see them, so a user who had left or
+been removed from a room still got a thread's newest reply and the newest edit
+of an event they could read, even when those were sent after they left. A
+requester who is no longer in the room now gets an edit only when the room's
+history visibility lets them see it, and no thread summary when it hides the
+latest reply. Upstream has the same bug. File:
+`src/service/rooms/pdu_metadata/bundling.rs`; test in
+`src/main/tests/bundled_relations_after_leave.rs`.
 
 ### A device's tokens rotate under its device lock
 
