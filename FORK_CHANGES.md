@@ -48,6 +48,18 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### Deleting an alias by power level takes room membership
+
+`DELETE /directory/room/{alias}` let anyone holding the room's
+`m.room.canonical_alias` power level delete an alias they did not create,
+whether or not they were in the room. A user who had left, been kicked or been
+banned with a level still on record, or any local user for a room whose
+`users_default` meets the level, could delete its aliases. Apart from the alias
+creator and server admins, the user must now also be joined to the room, as
+Synapse requires. Upstream has the same bug. File:
+`src/service/rooms/alias/mod.rs`; test in
+`src/main/tests/alias_delete_membership.rs`.
+
 ### Email password resets leave deactivated accounts deactivated
 
 Deactivation without erasure keeps the account's email binding, and a

@@ -104,7 +104,7 @@ impl Service {
 
 	/// Removes a local alias on a user's behalf and returns its room.
 	///
-	/// The user must be the alias creator, a server admin, or otherwise
+	/// The user must be the alias creator, a server admin, or a joined member
 	/// permitted to change the room's canonical alias.
 	pub async fn remove_alias_by(
 		&self,
@@ -258,6 +258,16 @@ impl Service {
             || self.services.admin.user_is_admin(user_id).await
 		{
 			return Ok(true);
+		}
+
+		// Anyone else must be joined to the room to change its aliases
+		if !self
+			.services
+			.state_cache
+			.is_joined(user_id, &room_id)
+			.await
+		{
+			return Ok(false);
 		}
 
 		// Checking whether the user is able to change canonical aliases of the room
