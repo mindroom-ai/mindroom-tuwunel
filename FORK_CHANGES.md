@@ -83,6 +83,18 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Prev events from another room are rejected
+
+The prev-event walk checks that each event it visits is in the incoming PDU's
+room, but prev events already in the timeline skipped the walk and that check.
+A PDU could then name another room's event in `prev_events`, and the state at
+that event became the state before the PDU: the PDU was authorized against and
+stored with the other room's state, and for a state event that state was also
+resolved into the room's current state. Prev events already in the timeline now
+get the same room check, so such a PDU is rejected. Upstream has the same bug.
+Files: `src/service/rooms/event_handler/fetch_prev.rs`; test in
+`src/main/tests/federation_prev_event_room.rs`.
+
 ### GitHub sign-in uses the account id
 
 GitHub's user API has no `sub`, so a `login` alias made the username the
