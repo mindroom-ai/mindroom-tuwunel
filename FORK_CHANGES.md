@@ -94,6 +94,17 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### Redacting a message redacts its edits
+
+A redaction pruned only its target, so the target's `m.replace` edits kept the
+new text in `m.new_content` and stayed in the search index. Any member could
+still read a deleted message's latest text by the edit's id, from the target's
+relations, in `/messages` or through `/search`. A redaction now also redacts
+the target's edits that the edit bundle counts (same sender and type), with the
+same redaction as their reason. Upstream redacts only the target too. Files:
+`src/service/rooms/{timeline/append.rs,pdu_metadata/bundling.rs}`; test in
+`src/main/tests/redaction_edits.rs`.
+
 ### Sliding sync profile changes only for joined rooms
 
 The MSC4262 profiles extension of simplified sliding sync read the profile
