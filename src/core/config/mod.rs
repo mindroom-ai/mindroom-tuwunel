@@ -674,8 +674,9 @@ pub struct Config {
 	/// default: 1024
 	///
 	/// This limits how many prior events one recovery traversal visits, and how
-	/// many events are fetched to fill in the auth chains of one event or one
-	/// state lookup. Raising it increases recovery work; it is not a count of
+	/// many events one auth chain walk fetches. The auth chain walks of one
+	/// event or one state lookup together fetch at most this many times 64 KiB
+	/// of events. Raising it increases recovery work; it is not a count of
 	/// network requests.
 	#[serde(default = "default_max_fetch_prev_events")]
 	pub max_fetch_prev_events: u16,

@@ -287,11 +287,13 @@ test in `src/main/tests/email_password_reset/scenarios.rs`.
 Fetching the missing auth events of an incoming event walked the remote server's
 auth chain one event at a time and kept every fetched event in memory until the
 walk ended, with no limit on the number of events and only the federation
-response limit (256 MiB by default) on each one. The walks for one event's auth
-events, or for the events of one `/state_ids` answer, keep what they fetched
-until all of them end, so they share one budget of `max_fetch_prev_events`
-fetches (default 1024); a walk that would fetch past it gives up and drops what
-it fetched. A walk keeps each fetched event as canonical JSON without its
+response limit (256 MiB by default) on each one. A walk now gives up and drops
+what it fetched once it holds `max_fetch_prev_events` events (default 1024) and
+would fetch another. The walks for one event's auth events, or for the events of
+one `/state_ids` answer, keep what they fetched until all of them end, so they
+also share one limit of `max_fetch_prev_events` times 64 KiB (64 MiB by default)
+on the events they fetch; a walk whose fetched event would pass it gives up the
+same way. A walk keeps each fetched event as canonical JSON without its
 `unsigned` field, which the outlier path removes before its own size check, and
 parses it again only to authorize it; an event that is then still larger than
 the 65,535 byte PDU limit is a failed fetch. The fetcher rejects an event
