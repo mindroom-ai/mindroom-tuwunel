@@ -143,12 +143,13 @@ when that drops visible events. Upstream has the same bug. Files:
 Joining a room over federation stored every event of the `send_join` response
 as an outlier, replacing any copy this server already had. An event whose
 content no longer matched its content hash was stored as received instead of
-redacted, and its `unsigned` data was kept. Such events are now redacted,
-`unsigned` is dropped, and an event this server already has keeps its stored
-copy. Upstream checks that `auth_chain` events belong to the joined room since
-v1.9.4 (`d3db90b1d`) and has the rest of the bug. Files:
-`src/service/server_keys/verify.rs`,
-`src/service/membership/join.rs`; test in
+redacted, and its `unsigned` data was kept. Such events are now redacted and
+`unsigned` is dropped. An event in this server's timeline keeps its stored copy,
+and so does any stored event whose new copy had to be redacted; a copy that
+matches its hash still replaces an outlier, such as the unchecked knock state
+stored before the join. Upstream checks that `auth_chain` events belong to the
+joined room since v1.9.4 (`d3db90b1d`) and has the rest of the bug. Files:
+`src/service/server_keys/verify.rs`, `src/service/membership/join.rs`; test in
 `src/service/membership/join/tests.rs`.
 
 ### The state before an incoming event comes only from its room
