@@ -73,6 +73,20 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Public read receipts need a joined user and an event of the room
+
+`POST /rooms/{roomId}/receipt/m.read/{eventId}` and the `m.read` field of
+`/read_markers` stored a public read receipt without checking that the sender
+is joined to the room or that the event belongs to it. A user outside the room
+then showed up as a reader to its members and to other servers, and a receipt
+whose `thread_id` named the same unknown event passed the MSC3771 thread check,
+so each new event id stored another receipt row, kept until the room is
+deleted. Both endpoints now answer 403 to a user who is not joined and 404 for
+an event that is not in the room's timeline, as private read markers already
+do. Upstream has the same bug. Files:
+`src/api/client/read_marker/{mod.rs,receipt.rs,read_markers.rs}`; test in
+`src/main/tests/public_receipt_room.rs`.
+
 ### Prev events from another room are rejected
 
 The prev-event walk checks that each event it visits is in the incoming PDU's
