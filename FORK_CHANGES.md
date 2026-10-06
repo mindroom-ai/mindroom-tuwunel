@@ -35,6 +35,16 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Left rooms carry state only for users who joined
+
+A user who withdrew a knock or rejected an invite has the room among their left
+rooms, and legacy `/sync` sent its whole state at the leave: every member,
+power levels, topic and any custom state, although the user was never in the
+room. A left room's state now goes only to a user who once joined it, or when
+the room is world-readable; anyone else gets only their own membership.
+Upstream has the same bug. Files: `src/api/client/sync/v3.rs`; test in
+`src/main/tests/sync_left_room_state.rs`.
+
 ### Sync timelines follow history visibility
 
 Legacy `/sync` and sliding sync returned a room's newest events without
