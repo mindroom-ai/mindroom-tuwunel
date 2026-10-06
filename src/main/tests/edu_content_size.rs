@@ -17,11 +17,15 @@ mod fixture;
 
 const TOKEN: &str = "edu-content-size-test-access-token";
 
+const PASSWORD: &str = "edu-content-size-test-password";
+
 /// Keys and remote to-device messages too large to send in an EDU are refused.
 ///
 /// Device keys, a cross-signing key, a to-device message for a remote user (by
 /// its content or its device ID) and the device keys of a dehydrated device,
-/// each padded past `MAX_EDU_CONTENT_BYTES`, are answered with 413.
+/// each padded past `MAX_EDU_CONTENT_BYTES`, are answered with 413. A login
+/// choosing a device ID over 512 bytes, which device list updates carry, is
+/// answered with 400.
 #[test]
 fn payloads_too_large_for_an_edu_are_refused() -> Result {
 	let options: [&str; 0] = [];
@@ -91,6 +95,24 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 		assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{url}");
 	}
+
+	services
+		.users
+		.set_password(&user_id, Some(PASSWORD))
+		.await?;
+
+	let login = json!({
+		"type": "m.login.password",
+		"identifier": { "type": "m.id.user", "user": user_id },
+		"password": PASSWORD,
+		"device_id": "x".repeat(513),
+	});
+
+	let response = client
+		.post_url(&client.url("login"), &login)
+		.await?;
+
+	assert_eq!(response.status(), StatusCode::BAD_REQUEST, "login");
 
 	Ok(())
 }

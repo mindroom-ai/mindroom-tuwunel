@@ -92,11 +92,15 @@ federation to it. Device keys, including those of a dehydrated device, and
 each cross-signing key are now refused with 413 `M_TOO_LARGE` over 64 KiB, the
 limit Synapse applies to to-device messages, and so is a to-device message for
 a remote user whose EDU, with its event type and device ID, would be larger
-than that. A federation transaction also leaves out any single EDU over 1 MiB
-with a warning and acknowledges its row with the transaction, so an oversized
-EDU queued earlier no longer holds up its destination. Upstream has the same
-bug. Files:
+than that. A device ID a client chooses, which device list updates carry
+twice when device names are not federated, is refused with 400
+`M_INVALID_PARAM` over 512 bytes, the limit Synapse applies at login. A
+federation transaction also leaves out any single EDU over 1 MiB with a
+warning and acknowledges its row with the transaction, so an oversized EDU
+queued earlier no longer holds up its destination. Upstream has the same bug.
+Files:
 `src/api/client/{to_device.rs,dehydrated_device.rs,keys/upload_keys.rs,keys/upload_signing_keys.rs}`,
+`src/service/users/device.rs`,
 `src/service/sending/sender/{mod.rs,dispatch/federation.rs}`; tests in
 `src/main/tests/edu_content_size.rs` and `src/service/sending/sender/tests.rs`.
 
