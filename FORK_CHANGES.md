@@ -427,6 +427,18 @@ now reads the state as of their leave or ban, as the spec requires and as
 `src/api/client/{state.rs,membership/members.rs,room/initial_sync.rs}`; test
 in `src/main/tests/state_departed_member.rs`.
 
+### The room summary is not given to former members
+
+The room summary of an invite-only or restricted room admitted a former member
+under `shared` history visibility and answered with the room's current name,
+topic, avatar, alias, join rule and member count, so a user who had left or
+been kicked or banned kept seeing later changes. Such a room's summary now goes
+to a joined or invited user, or to anyone while the room is world-readable, as
+in Synapse; the restricted-room and guest checks are unchanged, and an invitee
+is now admitted under every history visibility. Upstream has the same bug.
+File: `src/api/client/room/summary.rs`; test in
+`src/main/tests/state_departed_member.rs`.
+
 ### UIAA keeps only small request bodies for pending sessions
 
 A UIAA request sent without `auth` keeps its JSON body in memory so the
