@@ -611,6 +611,11 @@ async fn collect_required_state(
 		delivered,
 		unread: unread_keys,
 	} = selection;
+	// Every state entry below is looked up in these, so index the fingerprints
+	// once instead of scanning them per entry.
+	let previous: Option<HashSet<u64>> =
+		previous.map(|previous| previous.iter().copied().collect());
+	let unread_set: HashSet<u64> = unread_keys.iter().copied().collect();
 
 	let lazy = required_state
 		.iter()
@@ -687,6 +692,7 @@ async fn collect_required_state(
 			};
 
 			let state_mode = previous
+				.as_ref()
 				.filter(|previous| {
 					!fingerprints_cover(previous, &event_type, state_key.as_str(), sender_user)
 				})
@@ -713,7 +719,7 @@ async fn collect_required_state(
 			let pdu_id = services.timeline.get_pdu_id(&event_id).await.ok();
 			let count = pdu_id.map(RawPduId::pdu_count);
 			let left_unread =
-				fingerprints_cover(unread_keys, &event_type, state_key.as_str(), sender_user);
+				fingerprints_cover(&unread_set, &event_type, state_key.as_str(), sender_user);
 
 			let comparable = !lazy && !left_unread && state_mode != StateMode::Full;
 
@@ -844,7 +850,7 @@ fn wildcard_state<'a>(
 /// A fingerprint covers its own key, every key of its type when it is a wildcard,
 /// and the syncing user's key when it is `$ME`.
 fn fingerprints_cover(
-	fingerprints: &[u64],
+	fingerprints: &HashSet<u64>,
 	event_type: &StateEventType,
 	state_key: &str,
 	sender_user: &UserId,
