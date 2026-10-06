@@ -225,10 +225,12 @@ as an outlier, replacing any copy this server already had. An event whose
 content no longer matched its content hash was stored as received instead of
 redacted, its `unsigned` data was kept, and `auth_chain` events were not checked
 to belong to the joined room. Such events are now redacted, `unsigned` is
-dropped, `auth_chain` events go through the same room and format checks as
-`state` events, and an event this server already has keeps its stored copy.
-Upstream has the same bug. Files: `src/service/server_keys/verify.rs`,
-`src/service/membership/join.rs`; test in
+dropped, and `auth_chain` events go through the same room and format checks as
+`state` events. An event in this server's timeline keeps its stored copy, and
+so does any stored event whose new copy had to be redacted; a copy that matches
+its hash still replaces an outlier, such as the unchecked knock state stored
+before the join. Upstream has the same bug. Files:
+`src/service/server_keys/verify.rs`, `src/service/membership/join.rs`; test in
 `src/service/membership/join/tests.rs`.
 
 ### Failed appservice requests leave the `hs_token` out of the log
