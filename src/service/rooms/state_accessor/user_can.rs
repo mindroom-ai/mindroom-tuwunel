@@ -22,9 +22,13 @@ use tuwunel_core::{
 		BoolExt, FutureBoolExt, OptionExt, future::TryExtExt, result::NotFound, time::now_millis,
 	},
 };
-use tuwunel_matrix::{Event, PduCount, StateKey, pdu::PduBuilder};
+use tuwunel_matrix::{Event, PduCount, RawPduId, StateKey, pdu::PduBuilder};
 
 use crate::rooms::{short::ShortStateHash, state::RoomMutexGuard};
+
+/// How many of a former member's membership events are walked back to find
+/// their last join; past that they keep only the events they were joined for.
+const MEMBERSHIP_STEPS: usize = 16;
 
 /// The state an event's visibility is judged against.
 ///
@@ -396,8 +400,8 @@ where
 ///
 /// A current member sees the whole room, which the first check answers without
 /// touching room state; a user joined at the event sees it too, and a former
-/// member keeps events through their latest leave. A failed read is the error
-/// only when no check grants the event.
+/// member keeps events through the leave or ban that ended their last join. A
+/// failed read is the error only when no check grants the event.
 #[implement(super::Service)]
 async fn user_shared_history<Pdu>(
 	&self,
@@ -473,10 +477,59 @@ where
 		.await?
 		.pdu_id(event_id)?;
 
-	let visible =
-		pdu_id.is_some_and(|pdu_id| pdu_id.pdu_count() <= PduCount::from_unsigned(left_count));
+	let Some(event_count) = pdu_id.map(RawPduId::pdu_count) else {
+		return Ok(false);
+	};
 
-	Ok(visible)
+	let left_count = PduCount::from_unsigned(left_count);
+	if event_count > left_count {
+		return Ok(false);
+	}
+
+	// A knock or an invite since the user's last join drops their leave count,
+	// and the next leave records a later one, so walk back from their current
+	// member event to their last join; the event is shared with them if they
+	// joined at or after it.
+	let Ok(mut member) = self
+		.room_state_get(room_id, &StateEventType::RoomMember, user_id.as_str())
+		.await
+	else {
+		return Ok(false);
+	};
+
+	for _ in 0..MEMBERSHIP_STEPS {
+		if member.membership_for(user_id) == Some(MembershipState::Join) {
+			let join_id = member.event_id();
+			let join_pdu_id = self
+				.services
+				.timeline
+				.pdu_position(join_id)
+				.await?
+				.pdu_id(join_id)?;
+
+			return Ok(join_pdu_id.is_some_and(|id| id.pdu_count() >= event_count));
+		}
+
+		let Ok(before) = self
+			.services
+			.state
+			.pdu_shortstatehash(member.event_id())
+			.await
+		else {
+			return Ok(false);
+		};
+
+		let Ok(previous) = self
+			.state_get(before, &StateEventType::RoomMember, user_id.as_str())
+			.await
+		else {
+			return Ok(false);
+		};
+
+		member = previous;
+	}
+
+	Ok(false)
 }
 
 /// Reports whether a user may read the room's state events.
