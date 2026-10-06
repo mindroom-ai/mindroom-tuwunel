@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use ruma::{OwnedEventId, OwnedUserId};
+use ruma::{OwnedEventId, OwnedUserId, events::TimelineEventType};
 use tuwunel_core::{
 	PduCount,
 	matrix::{
@@ -13,7 +13,7 @@ use tuwunel_core::{
 /// the same sender into just the latest one by timeline order (`PduCount`),
 /// with `event_id` as a deterministic tie-break.
 ///
-/// State events and non-replace events are always kept. For each
+/// State events, redactions and non-replace events are always kept. For each
 /// `(target_event_id, sender)` group with multiple replacements in the batch,
 /// only the newest replacement is retained.
 pub(super) fn collapse_superseded_edits(
@@ -24,6 +24,7 @@ pub(super) fn collapse_superseded_edits(
 
 	for (idx, (_, pdu)) in events.iter().enumerate() {
 		if pdu.state_key.is_none()
+			&& pdu.kind != TimelineEventType::RoomRedaction
 			&& let Ok(content) = pdu.get_content::<ExtractRelatesToInfo>()
 			&& content.relates_to.rel_type == "m.replace"
 		{
@@ -302,6 +303,24 @@ mod tests {
 		let result = collapse_superseded_edits(events);
 		assert_eq!(result.len(), 3);
 		assert_eq!(result[1].1.event_id.as_str(), "$state1:example.com");
+	}
+
+	#[test]
+	fn collapse_keeps_redactions_with_replace_relation() {
+		let (count, mut redaction) =
+			make_pdu("$redaction1:example.com", 2000, Some("$msg1:example.com"));
+		redaction.kind = ruma::events::TimelineEventType::RoomRedaction;
+		redaction.redacts = Some(EventId::parse("$msg1:example.com").expect("valid event_id"));
+
+		let events = vec![
+			make_pdu("$msg1:example.com", 1000, None),
+			(count, redaction),
+			make_pdu("$edit1:example.com", 3000, Some("$msg1:example.com")),
+		];
+
+		let result = collapse_superseded_edits(events);
+		assert_eq!(result.len(), 3);
+		assert_eq!(result[1].1.event_id.as_str(), "$redaction1:example.com");
 	}
 
 	#[test]
