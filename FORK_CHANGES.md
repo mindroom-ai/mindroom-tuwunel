@@ -35,6 +35,19 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### send_join response events are checked before they are stored
+
+Joining a room over federation stored every event of the `send_join` response
+as an outlier, replacing any copy this server already had. An event whose
+content no longer matched its content hash was stored as received instead of
+redacted, and its `unsigned` data was kept. Such events are now redacted,
+`unsigned` is dropped, and an event this server already has keeps its stored
+copy. Upstream checks that `auth_chain` events belong to the joined room since
+v1.9.4 (`d3db90b1d`) and has the rest of the bug. Files:
+`src/service/server_keys/verify.rs`,
+`src/service/membership/join.rs`; test in
+`src/service/membership/join/tests.rs`.
+
 ### Deleting an alias by power level takes room membership
 
 `DELETE /directory/room/{alias}` let anyone holding the room's

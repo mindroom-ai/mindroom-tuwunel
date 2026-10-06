@@ -648,9 +648,11 @@ async fn ingest_send_join_state(
 				.ok()
 		})
 		.fold(HashMap::new(), async |mut state, (event_id, pdu, value)| {
-			self.services
-				.timeline
-				.add_pdu_outlier(&event_id, &value);
+			if !self.services.timeline.pdu_exists(&event_id).await {
+				self.services
+					.timeline
+					.add_pdu_outlier(&event_id, &value);
+			}
 
 			if let Some(state_key) = &pdu.state_key {
 				let shortstatekey = self
@@ -698,10 +700,12 @@ async fn ingest_send_join_auth_chain(
 				.map(move |(_, value)| (event_id, value))
 				.ok()
 		})
-		.ready_for_each(|(event_id, value)| {
-			self.services
-				.timeline
-				.add_pdu_outlier(&event_id, &value);
+		.for_each(async |(event_id, value)| {
+			if !self.services.timeline.pdu_exists(&event_id).await {
+				self.services
+					.timeline
+					.add_pdu_outlier(&event_id, &value);
+			}
 		})
 		.await;
 
@@ -1199,3 +1203,6 @@ pub(super) async fn get_servers_for_room(
 	debug_info!(?servers);
 	Ok(servers)
 }
+
+#[cfg(test)]
+mod tests;
