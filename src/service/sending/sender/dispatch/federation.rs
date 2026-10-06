@@ -118,8 +118,8 @@ pub(super) async fn send_events_dest_federation(
 	(result, true)
 }
 
-/// The EDUs, in order, that fit together in `MAX_TRANSACTION_EDU_BYTES`; the
-/// others are dropped with a warning.
+/// Each EDU, in order, that still fits in `MAX_TRANSACTION_EDU_BYTES` with
+/// those already kept; the others are dropped with a warning.
 fn edus_within_limit<'a>(
 	server: &'a ServerName,
 	edus: impl Iterator<Item = &'a EduBuf> + 'a,

@@ -144,10 +144,11 @@ a remote user whose EDU, with its event type and device ID, would be larger
 than that. A device ID a client chooses, which device list updates carry
 twice when device names are not federated, is refused with 400
 `M_INVALID_PARAM` over 512 bytes, the limit Synapse applies at login. A
-federation transaction also carries its EDUs only while together they fit in
-8 MiB, leaves out the rest with a warning and acknowledges their rows with the
-transaction, so oversized EDUs, including ones queued earlier, no longer hold
-up the destination. Upstream has the same bug.
+federation transaction also keeps each EDU, in order, that still fits within
+8 MiB together with those already kept, leaves out the others with a warning
+and acknowledges their rows with the transaction, so oversized EDUs, including
+ones queued earlier, no longer hold up the destination. Upstream has the same
+bug.
 Files:
 `src/api/client/{to_device.rs,dehydrated_device.rs,keys/upload_keys.rs,keys/upload_signing_keys.rs}`,
 `src/service/users/device.rs`,

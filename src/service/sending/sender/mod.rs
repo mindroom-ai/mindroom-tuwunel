@@ -112,8 +112,8 @@ pub const EDU_LIMIT: usize = 100;
 /// Largest device key or cross-signing key accepted from a local client, and
 /// largest EDU carrying one of its to-device messages to another server.
 ///
-/// A transaction full of EDUs carrying such payloads stays within the request
-/// body limits peers enforce.
+/// This keeps ordinary key and to-device EDUs well inside
+/// `MAX_TRANSACTION_EDU_BYTES`.
 pub const MAX_EDU_CONTENT_BYTES: usize = 65_536;
 
 /// Most bytes of EDUs one federation transaction carries.
