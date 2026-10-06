@@ -672,8 +672,9 @@ pub struct Config {
 	/// reloadable: yes
 	/// default: 1024
 	///
-	/// This limits how many prior events one recovery traversal visits. Raising
-	/// it increases recovery work; it is not a count of network requests.
+	/// This limits how many prior events one recovery traversal visits, and how
+	/// many events one auth chain walk fetches. Raising it increases recovery
+	/// work; it is not a count of network requests.
 	#[serde(default = "default_max_fetch_prev_events")]
 	pub max_fetch_prev_events: u16,
 
