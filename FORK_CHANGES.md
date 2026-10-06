@@ -48,6 +48,19 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### send_join response events are checked before they are stored
+
+Joining a room over federation stored every event of the `send_join` response
+as an outlier, replacing any copy this server already had. An event whose
+content no longer matched its content hash was stored as received instead of
+redacted, its `unsigned` data was kept, and `auth_chain` events were not checked
+to belong to the joined room. Such events are now redacted, `unsigned` is
+dropped, `auth_chain` events go through the same room and format checks as
+`state` events, and an event this server already has keeps its stored copy.
+Upstream has the same bug. Files: `src/service/server_keys/verify.rs`,
+`src/service/membership/join.rs`; test in
+`src/service/membership/join/tests.rs`.
+
 ### Failed appservice requests leave the `hs_token` out of the log
 
 An appservice request also sends the `hs_token` as the legacy `access_token`

@@ -5,20 +5,21 @@
 //! to newer event formats.
 
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue, OwnedEventId, RoomVersionId,
+	CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, RoomVersionId,
+	canonical_json::redact_in_place,
 	signatures::{Verified, verify_event},
 };
 use serde_json::value::RawValue as RawJsonValue;
 use tuwunel_core::{
-	Err, Result, implement,
+	Err, Result, debug_info, err, implement,
 	matrix::{event::gen_event_id_canonical_json, room_version},
 };
 
 /// Derives an event ID, runs event verification, and returns canonical JSON.
 ///
-/// Missing verification keys may be fetched. Newer room versions receive the
-/// derived `event_id` after any successful [`Verified`] result, including the
-/// signatures-only classification produced for a content-hash mismatch.
+/// Missing verification keys may be fetched. The sender's `unsigned` data is
+/// dropped, and an event whose content hash does not match is redacted. Newer
+/// room versions then receive the derived `event_id`.
 #[implement(super::Service)]
 pub async fn validate_and_add_event_id(
 	&self,
@@ -27,14 +28,8 @@ pub async fn validate_and_add_event_id(
 ) -> Result<(OwnedEventId, CanonicalJsonObject)> {
 	let (event_id, mut value) = gen_event_id_canonical_json(pdu, room_version_id)?;
 
-	if let Err(e) = self
-		.verify_event(&value, Some(room_version_id))
-		.await
-	{
-		return Err!(BadServerResponse(debug_error!(
-			"Event {event_id} failed verification: {e:?}"
-		)));
-	}
+	self.verify_received_event(&event_id, &mut value, room_version_id)
+		.await?;
 
 	// For v3+ rooms we add the event_id, but for v1/v2 rooms it's already present.
 	if !room_version::rules(room_version_id)?
@@ -50,8 +45,8 @@ pub async fn validate_and_add_event_id(
 /// Derives and checks an event using only keys already in local storage.
 ///
 /// The method rejects the event before verification when any required key is
-/// absent. Any successful [`Verified`] classification is accepted, including a
-/// signatures-only result after a content-hash mismatch.
+/// absent. As with [`Self::validate_and_add_event_id`], the sender's `unsigned`
+/// data is dropped and an event whose content hash does not match is redacted.
 #[implement(super::Service)]
 pub async fn validate_and_add_event_id_no_fetch(
 	&self,
@@ -70,14 +65,8 @@ pub async fn validate_and_add_event_id_no_fetch(
 		)));
 	}
 
-	if let Err(e) = self
-		.verify_event(&value, Some(room_version_id))
-		.await
-	{
-		return Err!(BadServerResponse(debug_error!(
-			"Event {event_id} failed verification: {e:?}"
-		)));
-	}
+	self.verify_received_event(&event_id, &mut value, room_version_id)
+		.await?;
 
 	// For v3+ rooms we add the event_id, but for v1/v2 rooms it's already present.
 	if !room_version_rules.event_format.require_event_id {
@@ -85,6 +74,36 @@ pub async fn validate_and_add_event_id_no_fetch(
 	}
 
 	Ok((event_id, value))
+}
+
+/// Verifies an event received from another server in place.
+///
+/// As for any other received event, the sender's `unsigned` data is dropped
+/// and an event whose content does not match its content hash is redacted.
+#[implement(super::Service)]
+async fn verify_received_event(
+	&self,
+	event_id: &EventId,
+	value: &mut CanonicalJsonObject,
+	room_version_id: &RoomVersionId,
+) -> Result {
+	value.remove("unsigned");
+
+	match self
+		.verify_event(value, Some(room_version_id))
+		.await
+	{
+		| Ok(Verified::All) => Ok(()),
+		| Ok(Verified::Signatures) => {
+			debug_info!("Calculated hash does not match (redaction): {event_id}");
+			let rules = room_version::rules(room_version_id)?;
+			redact_in_place(value, &rules.redaction, None).map_err(|e| {
+				err!(BadServerResponse("Event {event_id} could not be redacted: {e}"))
+			})
+		},
+		| Err(e) =>
+			Err!(BadServerResponse(debug_error!("Event {event_id} failed verification: {e:?}"))),
+	}
 }
 
 /// Verifies an event and returns ruma's verification classification.
