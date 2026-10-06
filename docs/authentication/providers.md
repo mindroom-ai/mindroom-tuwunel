@@ -152,6 +152,16 @@ callback_url = "https://matrix.example.com/_matrix/client/unstable/login/sso/cal
 GitHub's `issuer_url` and `base_path` are pre-configured. `client_id` doubles
 as the provider ID in the callback URL.
 
+Tuwunel identifies a GitHub account by its numeric account `id`, not by its
+`login`, which GitHub releases for anyone to register after a rename or account
+deletion. An account that an earlier release linked by `login` moves to the
+`id` at its next sign-in when the stored avatar URL names that `id`. Otherwise
+link it again: if a sign-in already linked that GitHub `id` to another account,
+remove that link with `query oauth delete <other_user_id> --force`, then run
+[associate](#admin-approved-association-for-untrusted-providers) with
+`--force --claim sub=<id>`. `--force` replaces the account's old link and also
+removes its OAuth sessions with other providers.
+
 ### Google
 
 ```toml
