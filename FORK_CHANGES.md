@@ -91,10 +91,10 @@ seen: rooms the user has left or been removed from, which the connection
 keeps, and rooms they are invited to or have knocked on. Their members'
 profile changes kept arriving after the user left. Rooms in the window now
 follow the required-state rule, as receipts and typing do, and a room known
-only to the connection counts while the user is joined. Upstream main only
-sends users who share a joined room with the requester, but still reads these
-rooms' change logs. Files: `src/api/client/sync/v5/extensions/profiles.rs`;
-test in `src/main/tests/sync_v5_departed_profiles.rs`.
+only to the connection counts while the user is joined. Upstream main fixes
+this in its rewrite of the extension (`005830a1b`); drop this change when
+rebasing onto it. Files: `src/api/client/sync/v5/extensions/profiles.rs`; test
+in `src/main/tests/sync_v5_departed_profiles.rs`.
 
 ### Sync timelines follow history visibility
 
