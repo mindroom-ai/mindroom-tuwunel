@@ -120,16 +120,23 @@ async fn remote_token(
 
 	let federation = &self.services.federation;
 	let client = &self.services.client.livekit_federation;
+	let limit = self
+		.services
+		.server
+		.config
+		.network
+		.http
+		.max_response_size;
 	let stable = stable_request(sender_user, request);
 	let jwt = match federation
-		.execute_on(client, server_name, stable)
+		.execute_on(client, server_name, stable, limit)
 		.await
 	{
 		| Err(error) if is_unrecognized(&error) => {
 			let unstable = unstable_request(sender_user, request);
 
 			federation
-				.execute_on(client, server_name, unstable)
+				.execute_on(client, server_name, unstable, limit)
 				.await
 				.map(|response| response.jwt)
 		},
