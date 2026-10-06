@@ -196,6 +196,17 @@ media itself. Upstream has the same bug. Files: `src/service/client/mod.rs`,
 `src/service/media/remote.rs`, `src/api/client/media_legacy.rs`; test in
 `src/main/tests/federation_redirect.rs`.
 
+### Server discovery follows redirects only to HTTPS
+
+The `/.well-known/matrix/server` lookup followed up to four redirects without
+checking them, including from HTTPS to plain HTTP, so a peer's well-known
+document could send the lookup on to any address the server can reach. Each
+hop must now be an HTTPS URL that passes the redirect check the media, URL
+preview and push clients use, which refuses IP literals in
+`ip_range_denylist`. Redirects are still followed, as the spec asks. Upstream
+has the same bug. File: `src/service/client/mod.rs`; test in
+`src/main/tests/well_known_redirect.rs`.
+
 ### Per-user room lists stop at the user ID
 
 `rooms_joined`, `rooms_invited`, `rooms_knocked` and `rooms_left` scanned their
