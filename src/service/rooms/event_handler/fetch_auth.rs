@@ -10,7 +10,10 @@ use ruma::{
 };
 use tuwunel_core::{
 	debug, debug_error, debug_warn, expected, implement,
-	matrix::{PduEvent, pdu::MAX_AUTH_EVENTS},
+	matrix::{
+		PduEvent,
+		pdu::{MAX_AUTH_EVENTS, MAX_PDU_BYTES},
+	},
 	trace,
 	utils::stream::{BroadbandExt, IterStream},
 	warn,
@@ -142,6 +145,7 @@ async fn fetch_auth_chain(
 	// c. Ask origin server over federation
 	// We also handle its auth chain here so we don't get a stack overflow in
 	// handle_outlier_pdu.
+	let limit = self.services.server.config.max_fetch_prev_events;
 	let mut events_all = HashSet::new();
 	let mut events_in_reverse_order = Vec::new();
 	let mut todo_auth_events: VecDeque<_> = [event_id.to_owned()].into();
@@ -173,6 +177,11 @@ async fn fetch_auth_chain(
 			break;
 		}
 
+		if events_in_reverse_order.len() >= usize::from(limit) {
+			debug_warn!(?limit, "Max auth chain fetch limit reached for {event_id}");
+			return (event_id.to_owned(), None, Vec::new());
+		}
+
 		debug!("Fetching {next_id} over federation.");
 		let opts = Opts::new(Op::AuthEvent, room_id.to_owned())
 			.event_id(next_id.clone())
@@ -193,7 +202,7 @@ async fn fetch_auth_chain(
 			continue;
 		};
 
-		let Ok(value) = serde_json::from_slice::<CanonicalJsonObject>(&outcome.bytes) else {
+		let Some(value) = parse_fetched_pdu(&outcome.bytes) else {
 			self.record_outcome(Context::Fetch, &next_id, Disposition::Transient);
 			continue;
 		};
@@ -217,4 +226,50 @@ async fn fetch_auth_chain(
 	}
 
 	(event_id.to_owned(), None, events_in_reverse_order)
+}
+
+/// Parse an event fetched by the auth chain walk. `unsigned` is removed, as
+/// handle_outlier_pdu removes it before checking the PDU size limit, and an
+/// event still larger than that limit is rejected.
+fn parse_fetched_pdu(bytes: &[u8]) -> Option<CanonicalJsonObject> {
+	let mut value: CanonicalJsonObject = serde_json::from_slice(bytes).ok()?;
+	value.remove("unsigned");
+
+	let size = serde_json::to_vec(&value).ok()?.len();
+	(size <= MAX_PDU_BYTES).then_some(value)
+}
+
+#[cfg(test)]
+mod tests {
+	use serde_json::{json, to_vec};
+
+	use super::*;
+
+	#[test]
+	fn fetched_pdu_size_excludes_unsigned() {
+		// A state event served with the previous content under `unsigned`: over
+		// the limit as served, within it once `unsigned` is removed.
+		let content = json!({ "pad": "x".repeat(40_000) });
+		let bytes = to_vec(&json!({
+			"type": "m.room.power_levels",
+			"content": content,
+			"unsigned": { "prev_content": content },
+		}))
+		.expect("serializes");
+		assert!(bytes.len() > MAX_PDU_BYTES);
+
+		let pdu = parse_fetched_pdu(&bytes).expect("kept within the size limit");
+		assert!(!pdu.contains_key("unsigned"), "unsigned is not kept");
+	}
+
+	#[test]
+	fn fetched_pdu_over_the_size_limit_is_rejected() {
+		let bytes = to_vec(&json!({
+			"type": "m.room.message",
+			"content": { "pad": "x".repeat(MAX_PDU_BYTES) },
+		}))
+		.expect("serializes");
+
+		assert!(parse_fetched_pdu(&bytes).is_none());
+	}
 }
