@@ -102,6 +102,17 @@ were accepted. A non-admin's member event in a banned room is now refused with
 per-room profile update. Upstream has the same bug. Files:
 `src/api/client/state.rs`; test in `src/main/tests/state_member_banned_room.rs`.
 
+### `ban-room` makes local members leave the room
+
+`ban-room` bans the room before making its local members leave, and leaving a
+banned or disabled room only cleared the membership cache. The member events in
+room state stayed `join`, so remote servers still listed the evicted users, and
+their join still authorized the events they sent afterwards. Leaving such a
+room now sends the leave event when the server is in the room; only leaving
+through another server is still skipped. Upstream has the same bug. File:
+`src/service/membership/leave.rs`; test in
+`src/main/tests/ban_room_member_leave.rs`.
+
 ### A withdrawn knock does not move a former member's departure
 
 Under `shared` history visibility a former member reads events up to their
