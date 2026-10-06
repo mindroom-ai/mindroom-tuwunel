@@ -63,6 +63,9 @@ type EventTypeString = SmallString<[u8; 32]>;
 type TimelineMembers<'a> = SmallVec<[&'a str; 2]>;
 pub(super) type RoomDetails = (usize, HashSet<(StateEventType, StateKey)>);
 
+/// Most timeline events one room returns per response, as legacy sync allows.
+const TIMELINE_LIMIT_MAX: usize = 100;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum StateMode {
 	Full,
@@ -291,7 +294,9 @@ pub(super) fn merged_room_details(
 		.chain(conn.subscriptions.get(room_id))
 		.fold((0_usize, HashSet::new()), |(timeline_limit, mut required_state), config| {
 			required_state.extend(config.required_state.iter().cloned());
-			(timeline_limit.max(usize_from_ruma(config.timeline_limit)), required_state)
+			let limit = usize_from_ruma(config.timeline_limit).min(TIMELINE_LIMIT_MAX);
+
+			(timeline_limit.max(limit), required_state)
 		})
 }
 

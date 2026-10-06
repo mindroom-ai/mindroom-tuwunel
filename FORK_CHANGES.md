@@ -48,6 +48,15 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### Sliding Sync caps the timeline limit
+
+Sliding Sync lists and room subscriptions passed their `timeline_limit` to the
+timeline loader without a ceiling, so a large value read a room's whole history
+into one response. The limit is now capped at 100 events, as legacy `/sync`
+caps a filter's timeline limit; a room with more new events comes back
+`limited` with a `prev_batch`. Upstream has the same bug. File:
+`src/api/client/sync/v5/rooms.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every
