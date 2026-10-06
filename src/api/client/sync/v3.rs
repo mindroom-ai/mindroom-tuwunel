@@ -968,6 +968,16 @@ async fn load_left_room(
 		.boxed()
 		.await?;
 
+	// A user who never joined, such as a knocker who withdrew or an invitee who
+	// rejected, sees only their own membership unless the room is world-readable.
+	let once_joined = services
+		.state_cache
+		.once_joined(sender_user, room_id);
+
+	let world_readable = services.state_accessor.is_world_readable(room_id);
+
+	let sees_room_state = once_joined.or(world_readable).await;
+
 	let is_sender_membership = |event: &PduEvent| {
 		*event.kind() == RoomMember && event.state_key() == Some(sender_user.as_str())
 	};
@@ -989,6 +999,7 @@ async fn load_left_room(
 
 	let state_events = state_events
 		.into_iter()
+		.filter(|pdu| sees_room_state || is_sender_membership(pdu))
 		.filter(|pdu| filter.room.state.matches(pdu))
 		.filter(|pdu| timeline_limit > 0 || !is_sender_membership(pdu))
 		.chain(timeline_sender_member)
