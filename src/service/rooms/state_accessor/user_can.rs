@@ -1,4 +1,4 @@
-use futures::pin_mut;
+use futures::{future::try_join, pin_mut};
 use ruma::{
 	EventId, RoomId, UserId,
 	events::{
@@ -11,10 +11,10 @@ use ruma::{
 	},
 };
 use tuwunel_core::{
-	Err, Result, implement,
+	Err, Result, at, implement,
 	matrix::{Event, PduCount, StateKey},
 	pdu::PduBuilder,
-	utils::FutureBoolExt,
+	utils::{FutureBoolExt, result::NotFound},
 };
 
 use crate::rooms::{short::ShortStateHash, state::RoomMutexGuard};
@@ -289,6 +289,76 @@ pub async fn user_can_see_state_events(&self, user_id: &UserId, room_id: &RoomId
 
 		| _ => false,
 	}
+}
+
+/// The room state a user admitted by `user_can_see_state_events` reads.
+///
+/// A former member reads the state from when they left, as the spec requires,
+/// and everyone else reads the current state.
+#[implement(super::Service)]
+pub async fn user_visible_shortstatehash(
+	&self,
+	user_id: &UserId,
+	room_id: &RoomId,
+) -> Result<ShortStateHash> {
+	let current = self
+		.services
+		.state
+		.get_room_shortstatehash(room_id)
+		.await?;
+
+	if self
+		.services
+		.state_cache
+		.is_joined(user_id, room_id)
+		.await
+	{
+		return Ok(current);
+	}
+
+	let Some(member) = self
+		.state_get(current, &StateEventType::RoomMember, user_id.as_str())
+		.await
+		.optional()?
+	else {
+		return Ok(current);
+	};
+
+	let content: RoomMemberEventContent = member.get_content()?;
+	if !matches!(content.membership, MembershipState::Leave | MembershipState::Ban) {
+		return Ok(current);
+	}
+
+	self.departure_shortstatehash(room_id, member.event_id(), current)
+		.await
+		.map(at!(1))
+}
+
+/// The timeline count of a member's leave or ban, and the room state after it.
+///
+/// After the room's newest timeline event that state is `current`; after any
+/// other it is the state the next timeline event was sent in.
+#[implement(super::Service)]
+pub async fn departure_shortstatehash(
+	&self,
+	room_id: &RoomId,
+	departure: &EventId,
+	current: ShortStateHash,
+) -> Result<(PduCount, ShortStateHash)> {
+	let timeline = &self.services.timeline;
+	let count = timeline.get_pdu_count(departure);
+	let latest = timeline.last_timeline_count(None, room_id, None);
+	let (count, latest) = try_join(count, latest).await?;
+
+	let shortstatehash = if count == latest {
+		current
+	} else {
+		timeline
+			.next_shortstatehash(room_id, count)
+			.await?
+	};
+
+	Ok((count, shortstatehash))
 }
 
 /// Whether a user may see a room: a current or prior membership (joined,

@@ -336,6 +336,17 @@ Entries whose user does not belong to the answering server are now dropped, as
 the device list and signing key update EDUs already do. Upstream has the same
 bug. File: `src/api/client/keys/get_keys.rs`.
 
+### Remote hierarchy answers leave summaries of local rooms alone
+
+A remote server's `/hierarchy` answer for a space was cached for every child
+it listed, so the cached summary (name, topic, avatar, join rule, member count)
+of a room this server is in could be replaced by the remote's version, which
+`/hierarchy` then served until the room's state changed or the entry expired.
+Children this server is in are now skipped when caching such an answer; their
+summaries come from local state. Upstream has the same bug. File:
+`src/service/rooms/spaces/federation.rs`; test in
+`src/service/rooms/spaces/tests.rs`.
+
 ### Sliding Sync caps the timeline limit
 
 Sliding Sync lists and room subscriptions passed their `timeline_limit` to the
@@ -356,6 +367,18 @@ sends ephemeral events only for joined rooms. The user's own private read
 receipt and room account data are unchanged. Upstream has the same bug. Files:
 `src/api/client/sync/v5/{range.rs,rooms.rs,extensions/typing.rs}`; test in
 `src/main/tests/sync_v5_departed_ephemeral.rs`.
+
+### Former members read the room state from when they left
+
+`/rooms/{roomId}/state`, `/state/{eventType}/{stateKey}` and `/members` admit
+a former member under `shared` history visibility, but answered from the
+room's current state, so a user who had left or been kicked or banned kept
+seeing later renames, topics, power levels and new members. A former member
+now reads the state as of their leave or ban, as the spec requires and as
+`/initialSync` already did. Upstream has the same bug. Files:
+`src/service/rooms/state_accessor/user_can.rs`,
+`src/api/client/{state.rs,membership/members.rs,room/initial_sync.rs}`; test
+in `src/main/tests/state_departed_member.rs`.
 
 ### UIAA keeps only small request bodies for pending sessions
 
@@ -388,6 +411,19 @@ browser presenting it. The callback now starts the next provider's sign-in
 itself with the account it just signed in, and the endpoint ignores
 `loginToken`. Upstream has the same bug. File:
 `src/api/client/session/sso.rs`; test in `src/main/tests/sso_login_redirect.rs`.
+
+### A device's tokens rotate under its device lock
+
+Refresh-token rotation read the token a device points at, removed it, and wrote
+the new one without a lock, so two concurrent refreshes of one token could each
+write a refresh token while the device kept pointing at only one. Logout and
+device removal delete only the token the device points at, so the other one
+stayed. A refresh already in flight could also issue tokens to a device removed
+meanwhile. `set_access_token` now takes the per-device lock that
+`remove_device` already holds and refuses a device that no longer exists, so
+concurrent refreshes rotate one after another. Upstream has the same bug. File:
+`src/service/users/device.rs`; test in
+`src/main/tests/refresh_removed_device.rs`.
 
 ### SSO username fallback skips accounts linked to another identity
 
