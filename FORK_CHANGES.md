@@ -149,6 +149,17 @@ Entries whose user does not belong to the answering server are now dropped, as
 the device list and signing key update EDUs already do. Upstream has the same
 bug. File: `src/api/client/keys/get_keys.rs`.
 
+### Remote hierarchy answers leave summaries of local rooms alone
+
+A remote server's `/hierarchy` answer for a space was cached for every child
+it listed, so the cached summary (name, topic, avatar, join rule, member count)
+of a room this server is in could be replaced by the remote's version, which
+`/hierarchy` then served until the room's state changed or the entry expired.
+Children this server is in are now skipped when caching such an answer; their
+summaries come from local state. Upstream has the same bug. File:
+`src/service/rooms/spaces/federation.rs`; test in
+`src/service/rooms/spaces/tests.rs`.
+
 ### Sliding Sync caps the timeline limit
 
 Sliding Sync lists and room subscriptions passed their `timeline_limit` to the

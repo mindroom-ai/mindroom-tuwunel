@@ -1,11 +1,11 @@
 use futures::StreamExt;
 use ruma::{
-	OwnedServerName, RoomId,
+	OwnedRoomId, OwnedServerName, RoomId,
 	api::federation::space::{
 		SpaceHierarchyParentSummary as ParentSummary,
 		get_hierarchy::v1::{Request, Response},
 	},
-	room::RoomType,
+	room::{RoomSummary, RoomType},
 };
 use tuwunel_core::{Err, Result, debug, implement, utils::IterStream};
 
@@ -66,22 +66,8 @@ pub(super) async fn get_summary_and_children_federation(
 		return Err!(Request(NotFound("Space room not found over federation.")));
 	};
 
-	for room_id in &inaccessible_children {
-		self.cache_put(room_id, None);
-	}
-
-	for summary in children
-		.into_iter()
-		.filter(|child| child.room_type.ne(&Some(RoomType::Space)))
-	{
-		let room_id = summary.room_id.clone();
-		let summary = ParentSummary {
-			summary,
-			children_state: Default::default(),
-		};
-
-		self.cache_put(&room_id, Some(&summary));
-	}
+	self.cache_children(children, inaccessible_children)
+		.await;
 
 	self.cache_put(current_room, Some(&room));
 
@@ -89,4 +75,45 @@ pub(super) async fn get_summary_and_children_federation(
 		.await
 		.then(|| Ok(Accessible(room)))
 		.unwrap_or(Ok(Inaccessible))
+}
+
+/// Caches the children listed in a remote hierarchy answer.
+///
+/// A remote answer is not authoritative for rooms this server is in; their
+/// summaries come from local state.
+#[implement(super::Service)]
+pub(super) async fn cache_children(
+	&self,
+	children: Vec<RoomSummary>,
+	inaccessible_children: Vec<OwnedRoomId>,
+) {
+	let inaccessible = inaccessible_children
+		.into_iter()
+		.map(|room_id| (room_id, None));
+
+	let accessible = children
+		.into_iter()
+		.filter(|child| child.room_type.ne(&Some(RoomType::Space)))
+		.map(|summary| {
+			let room_id = summary.room_id.clone();
+			let summary = ParentSummary {
+				summary,
+				children_state: Default::default(),
+			};
+
+			(room_id, Some(summary))
+		});
+
+	for (room_id, summary) in inaccessible.chain(accessible) {
+		if self
+			.services
+			.state_cache
+			.server_in_room(self.services.server.name.as_ref(), &room_id)
+			.await
+		{
+			continue;
+		}
+
+		self.cache_put(&room_id, summary.as_ref());
+	}
 }
