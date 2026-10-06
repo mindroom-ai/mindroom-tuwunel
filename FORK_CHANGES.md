@@ -261,6 +261,22 @@ rejected. Upstream has the same bug.
 Files: `src/service/rooms/event_handler/fetch_prev.rs`; test in
 `src/main/tests/federation_prev_event_room.rs`.
 
+### The state before an incoming event comes only from its room
+
+The state before an incoming PDU is derived from the state at its prev events,
+built locally from the events we hold, or taken from the sending server's
+`/state_ids` answer. Each looks events up by id alone. A prev event that was
+missing during the prev-event walk, and so skipped its room check, could be in
+another room's timeline by the time its state was used; the local build
+followed a held outlier's prev events into another room; and a `/state_ids`
+answer could name events we hold from another room. The PDU was then
+authorized against and stored with that other room's state. Each of these now
+checks the room of every event it loads: the derived state and `/state_ids`
+reject such a PDU, and the local build falls back to `/state_ids`. Upstream
+has the same bug. Files:
+`src/service/rooms/event_handler/{fetch_state,state_at_incoming,state_local_build}.rs`;
+test in `src/main/tests/federation_prev_event_room.rs`.
+
 ### Deleting an alias by power level takes room membership
 
 `DELETE /directory/room/{alias}` let anyone holding the room's
