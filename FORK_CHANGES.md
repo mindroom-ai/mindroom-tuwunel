@@ -202,6 +202,18 @@ itself with the account it just signed in, and the endpoint ignores
 `loginToken`. Upstream has the same bug. File:
 `src/api/client/session/sso.rs`; test in `src/main/tests/sso_login_redirect.rs`.
 
+### Bundled aggregations follow the requester's visibility
+
+A served event's bundled `m.thread` summary and `m.replace` edits were added
+without checking whether the requester may see them, so a user who had left or
+been removed from a room still got a thread's newest reply and the newest edit
+of an event they could read, even when those were sent after they left. A
+requester who is no longer in the room now gets an edit only when the room's
+history visibility lets them see it, and no thread summary when it hides the
+latest reply. Upstream has the same bug. File:
+`src/service/rooms/pdu_metadata/bundling.rs`; test in
+`src/main/tests/bundled_relations_after_leave.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
