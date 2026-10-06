@@ -1,10 +1,9 @@
 use axum::extract::State;
 use futures::{
 	FutureExt, TryFutureExt, TryStreamExt,
-	future::{ok, try_join, try_join4},
+	future::{ok, try_join4},
 };
 use ruma::{
-	RoomId,
 	api::client::room::initial_sync::v3::{PaginationChunk, Request, Response},
 	events::{
 		AnyRawAccountDataEvent,
@@ -14,14 +13,13 @@ use ruma::{
 };
 use tuwunel_core::{
 	Event, Result, at, err, extract_variant,
-	matrix::{Pdu, PduCount},
+	matrix::PduCount,
 	utils::{
 		BoolExt, TryReadyExt,
 		result::NotFound,
 		stream::{TryTools, TryWidebandExt},
 	},
 };
-use tuwunel_service::rooms::short::ShortStateHash;
 
 use crate::{Ruma, client::visibility_filter};
 
@@ -74,14 +72,12 @@ pub(crate) async fn room_initial_sync_route(
 		.filter(|membership| matches!(membership, MembershipState::Leave | MembershipState::Ban))
 		.zip(member.as_ref())
 		.map(|(membership, pdu)| {
-			departure_snapshot(
-				&services,
-				room_id,
-				pdu,
-				membership.to_owned(),
-				current_shortstatehash,
-			)
-			.left_future()
+			let membership = Some(membership.to_owned());
+			services
+				.state_accessor
+				.departure_shortstatehash(room_id, pdu.event_id(), current_shortstatehash)
+				.map_ok(move |(count, shortstatehash)| (count, shortstatehash, membership))
+				.left_future()
 		});
 
 	let current_snapshot = ok((PduCount::Normal(next_batch), current_shortstatehash, membership));
@@ -152,31 +148,4 @@ pub(crate) async fn room_initial_sync_route(
 		}
 		.into(),
 	})
-}
-
-async fn departure_snapshot(
-	services: &crate::State,
-	room_id: &RoomId,
-	pdu: &Pdu,
-	membership: MembershipState,
-	current_shortstatehash: ShortStateHash,
-) -> Result<(PduCount, ShortStateHash, Option<MembershipState>)> {
-	let timeline_end = services.timeline.get_pdu_count(pdu.event_id());
-	let latest_count = services
-		.timeline
-		.last_timeline_count(None, room_id, None);
-
-	let (timeline_end, latest_count) = try_join(timeline_end, latest_count).await?;
-
-	let shortstatehash = (latest_count == timeline_end)
-		.then(|| ok(current_shortstatehash).left_future())
-		.unwrap_or_else(|| {
-			services
-				.timeline
-				.next_shortstatehash(room_id, timeline_end)
-				.right_future()
-		})
-		.await?;
-
-	Ok((timeline_end, shortstatehash, Some(membership)))
 }
