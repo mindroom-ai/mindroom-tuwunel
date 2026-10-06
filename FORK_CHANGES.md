@@ -67,6 +67,19 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Remote profile lookups replace the cached profile within the local limits
+
+Looking up a remote user's profile fetches it from their server on every
+request. Each returned field was stored without the field-name grammar and
+64 KiB total size that local profiles are held to, and a field the server no
+longer returned was never removed, so the cached profile kept stale fields and
+grew with every new field name a server returned. The response now replaces the
+cached profile, as `!admin users refresh-profile` already did, and a response
+with a field name outside the MSC4133 grammar or over 64 KiB is refused without
+being stored. Upstream has the same bug. Files:
+`src/service/profile/{mod.rs,remote.rs}`; test in
+`src/service/profile/tests/remote/mod.rs`.
+
 ### Replacing a redacted latest reply searches a bounded range
 
 Redacting a thread's newest reply swaps the newest remaining reply into the

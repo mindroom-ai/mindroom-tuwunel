@@ -819,14 +819,7 @@ pub async fn fetch_remote_profile(&self, user_id: &UserId) -> Result {
 				.await?;
 		}
 
-		for (key, value) in response.iter() {
-			self.set_profile_keys(
-				user_id,
-				&[(key.as_str().into(), Some(value.clone()))],
-				Some(Propagation::None),
-			)
-			.await?;
-		}
+		self.mirror_profile(user_id, response).await?;
 	}
 
 	Ok(())
