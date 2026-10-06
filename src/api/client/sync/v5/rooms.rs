@@ -311,7 +311,7 @@ fn digest_word(digest: Sha256Digest) -> u64 {
 	)
 }
 
-fn membership_allows_required_state(membership: Option<&MembershipState>) -> bool {
+pub(super) fn membership_allows_required_state(membership: Option<&MembershipState>) -> bool {
 	matches!(membership, None | Some(MembershipState::Join))
 }
 
