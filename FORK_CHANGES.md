@@ -73,6 +73,22 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Prev events from another room are rejected
+
+The prev-event walk checks that each event it visits is in the incoming PDU's
+room, but prev events already in the timeline skipped the walk and that check.
+The walk also stopped at a prev event exactly as old as the room's first event,
+which was still added to the timeline, so its own prev events went unchecked.
+A PDU could then name another room's event in `prev_events`, directly or through
+such a prev event, and the state at that event became the state before it: the
+event was authorized against and stored with the other room's state, and for a
+state event that state was also resolved into the room's current state. Prev
+events already in the timeline now get the same room check, and the walk
+continues past events as old as the room's first event, so such a PDU is
+rejected. Upstream has the same bug.
+Files: `src/service/rooms/event_handler/fetch_prev.rs`; test in
+`src/main/tests/federation_prev_event_room.rs`.
+
 ### Deleting an alias by power level takes room membership
 
 `DELETE /directory/room/{alias}` let anyone holding the room's
