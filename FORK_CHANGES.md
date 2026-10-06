@@ -80,6 +80,17 @@ too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
 
+### Sliding sync looks up delivered required state selectors in a set
+
+When a room's sliding sync configuration changes, each required state entry is
+checked against the selectors the room was last delivered with, so state the
+client had not asked for before is sent in full. Each check scanned the stored
+list, so the cost grew with the product of the current entries and the stored
+selectors, and a request with a million selectors kept a worker busy for
+minutes. The stored selectors are now collected into a hash set once per room.
+Upstream has the same bug. File: `src/api/client/sync/v5/rooms.rs`; test in
+`src/api/client/sync/v5/rooms/tests.rs`.
+
 ### Federated read receipts need a joined user and an event of the room
 
 An `m.receipt` EDU from another server was stored for any of that server's
@@ -294,9 +305,13 @@ would fetch another. It keeps each fetched event as canonical JSON without its
 parses it again only to authorize it; an event that is then still larger than
 the 65,535 byte PDU limit is a failed fetch. The fetcher rejects an event
 response larger than four times that limit before parsing it, which leaves room
-for the `unsigned` data a server serves with the event. Upstream has the same
-bug. Files: `src/service/rooms/event_handler/fetch_auth.rs`,
-`src/service/fetcher/validate.rs`.
+for the `unsigned` data a server serves with the event, and stops reading an
+event response once it passes that size instead of buffering it up to the
+federation response limit first. Upstream has the same bug. Files:
+`src/service/rooms/event_handler/fetch_auth.rs`,
+`src/service/fetcher/validate.rs`, `src/service/fetcher/transport.rs`,
+`src/service/federation/execute.rs`; test in
+`src/main/tests/federation_event_response_limit.rs`.
 
 ### `ip_range_denylist` covers IPv4-mapped IPv6 addresses
 
