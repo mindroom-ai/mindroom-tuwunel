@@ -68,7 +68,7 @@ async fn check_public_receipt(
 
 /// Resolves `event` to its PDU id, failing unless it is a timeline event of
 /// `room_id`.
-async fn room_event_pdu_id(
+pub(crate) async fn room_event_pdu_id(
 	services: &Services,
 	room_id: &RoomId,
 	event: &EventId,
