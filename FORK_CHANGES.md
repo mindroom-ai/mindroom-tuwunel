@@ -198,7 +198,7 @@ Behavior:
 - Adds `POST /_matrix/client/unstable/org.mindroom.login/apple`.
 - Verifies native Sign in with Apple identity tokens against Apple's JWKS,
   issuer, audience, expiration, and nonce (with a brief in-memory JWKS cache
-  that refreshes on an unknown key ID).
+  that refreshes on an unknown key ID at most once a minute).
 - Accepts configured native app bundle IDs via
   `global.identity_provider.native_client_ids` while keeping the web Services ID
   valid; reuses the normal SSO mapping/registration/reactivation/loginToken
