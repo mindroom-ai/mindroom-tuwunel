@@ -30,9 +30,10 @@ immutability policy around them. UIAA password flows follow upstream's
 credential-matched rule (`0726625e6`). The upstream fixes the fork had
 backported from `main` and that `v1.9.3` does not contain are carried as
 individual cherry-picks (see below). The fork's sliding sync profiles fix
-(#60) is dropped as well: upstream's rewrite of the profiles extension
-(`005830a1b`) sends profile changes only for joined rooms, and #60's test
-passes on v1.9.3 without it.
+(#60) was dropped at that rebase because its test passes on v1.9.3 without
+it, but upstream's rewrite of the profiles extension (`005830a1b`) only checks
+that each user shares a joined room with the requester, so the fix is carried
+again (see "Sliding sync profile changes only for joined rooms").
 See the [v1.9.3 rebase record](docs/rebase-v1.9.3-2026-10-05.md).
 
 On upstream `main` (`3f5db6d3a`), the fork's thread summary fixes (#19-#21)
@@ -79,6 +80,19 @@ purged edits), and a root with no remaining reply among them drops the summary
 too. The startup summary rebuild still reads every relation. Upstream has the
 same bug. Files: `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`;
 test in `src/service/rooms/threads/tests/redact.rs`.
+
+### Sliding sync profile changes only for joined rooms
+
+The MSC4262 profiles extension of simplified sliding sync read the profile
+change log of every room in the window and every room the connection had seen,
+without checking the user's membership. A room the user has left or been
+removed from, which a room subscription keeps in the window, and rooms they are
+invited to or have knocked on kept sending their members' profile changes
+whenever the member also shared another room with the user. Rooms in the
+window now follow the required-state rule, as receipts and typing do, and a
+room known only to the connection counts while the user is joined. Upstream
+has the same bug. File: `src/api/client/sync/v5/extensions/profiles.rs`; test
+in `src/main/tests/sync_v5_profiles.rs`.
 
 ### Federated read receipts need a joined user and an event of the room
 
