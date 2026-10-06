@@ -192,6 +192,24 @@ async fn handle_left_room(
 	.await
 }
 
+/// Whether a user sees a left room's state beyond their own membership.
+///
+/// A user who never joined, such as a knocker who withdrew or an invitee who
+/// rejected, sees only their own membership unless the room is world-readable.
+async fn sees_left_room_state(
+	services: &Services,
+	sender_user: &UserId,
+	room_id: &RoomId,
+) -> bool {
+	let once_joined = services
+		.state_cache
+		.once_joined(sender_user, room_id);
+
+	let world_readable = services.state_accessor.is_world_readable(room_id);
+
+	once_joined.or(world_readable).await
+}
+
 /// Whether the room holds no departure event this sync can send.
 ///
 /// An invite rescinded or rejected after this server left the room writes only
@@ -320,6 +338,8 @@ async fn load_left_room(
 		})
 		.await?;
 
+	let sees_room_state = sees_left_room_state(services, sender_user, room_id).await;
+
 	let is_sender_membership = |event: &PduEvent| {
 		*event.kind() == RoomMember && event.state_key() == Some(sender_user.as_str())
 	};
@@ -345,6 +365,7 @@ async fn load_left_room(
 
 	let state_events = state_events
 		.into_iter()
+		.filter(|pdu| sees_room_state || is_sender_membership(pdu))
 		.filter(|pdu| !has_departure || !is_sender_membership(pdu))
 		.chain(departure)
 		.filter(|pdu| filter.room.state.matches(pdu))
