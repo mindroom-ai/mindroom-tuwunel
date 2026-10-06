@@ -242,8 +242,23 @@ pub async fn request_userinfo(
 
 	self.request((Some(provider), Some(session)), Method::GET, url, Option::<Query>::None)
 		.await
-		.and_then(|value| serde_json::from_value(value).map_err(Into::into))
+		.and_then(|value| parse_userinfo(provider, value))
 		.log_err()
+}
+
+/// Deserialize a userinfo response.
+///
+/// GitHub returns no `sub`; its immutable account `id` stands in. The `login`
+/// must not, because GitHub releases it for anyone to register after a rename
+/// or account deletion.
+fn parse_userinfo(provider: &Provider, mut value: JsonValue) -> Result<UserInfo> {
+	if provider.brand == "github"
+		&& let Some(id) = value.get("id").and_then(JsonValue::as_u64)
+	{
+		value["sub"] = id.to_string().into();
+	}
+
+	serde_json::from_value(value).map_err(Into::into)
 }
 
 /// Network request to a Provider returning information for a Session based on
@@ -445,12 +460,20 @@ fn unique_id_sub_parts<'a>(
 		.map(|iss| (iss, sub))
 }
 
-/// Issuer string used as input to the identity hash. Pinned per-brand for
-/// providers whose published issuer has changed under us, so existing account
-/// associations survive the change.
+/// Issuer that earlier releases hashed with a GitHub `login`. Read only to
+/// migrate those associations.
+pub const GITHUB_LOGIN_ISSUER: &str = "https://github.com/";
+
+/// Issuer hashed with a GitHub account `id`. A `login` may be all digits, so
+/// this differs from [`GITHUB_LOGIN_ISSUER`] to keep an account `id` from
+/// matching a login-keyed association.
+const GITHUB_ID_ISSUER: &str = "https://api.github.com/user";
+
+/// Issuer string used as input to the identity hash. Pinned per-brand where it
+/// must not follow the provider's published issuer.
 fn identity_issuer(provider: &Provider) -> Option<&str> {
 	match provider.brand.as_str() {
-		| "github" => Some("https://github.com/"),
+		| "github" => Some(GITHUB_ID_ISSUER),
 		| _ => provider.issuer_url.as_ref().map(Url::as_str),
 	}
 }

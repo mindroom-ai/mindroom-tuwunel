@@ -83,6 +83,21 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### GitHub sign-in uses the account id
+
+GitHub's user API has no `sub`, so a `login` alias made the username the
+identity, and GitHub frees a username after a rename or account deletion.
+Whoever registered it next signed in to the account linked to the previous
+owner, and through the fork's self-reactivation also revived it if it had been
+self-deactivated. GitHub identities are now keyed on the numeric account `id`,
+hashed under their own issuer string, and the `login` only picks a new
+account's localpart. An association stored under a `login` moves to the `id` at
+the next sign-in only when the avatar URL stored with it names that `id`;
+otherwise the sign-in is treated as a new user, and
+`docs/authentication/providers.md` describes how to re-link the account.
+Upstream has the same bug. Files: `src/service/oauth/{mod.rs,user_info.rs}`,
+`src/api/client/session/sso.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
