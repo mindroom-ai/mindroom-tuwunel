@@ -403,6 +403,16 @@ caps a filter's timeline limit; a room with more new events comes back
 `limited` with a `prev_batch`. Upstream has the same bug. File:
 `src/api/client/sync/v5/rooms.rs`.
 
+### Sliding sync caps the requested profile fields
+
+The MSC4262 `profiles.fields` list of a sliding sync request had no length
+limit. Each request compared it with the connection's previous list name by
+name, and each requested field costs one read for every user the extension
+carries: on a room's initial pass, every member unless members are lazy-loaded.
+Only the first 64 names are now compared and kept on the connection. Upstream
+has the same bug. Files: `src/service/{profile/mod.rs,sync/mod.rs}`; test in
+`src/service/sync/tests.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every

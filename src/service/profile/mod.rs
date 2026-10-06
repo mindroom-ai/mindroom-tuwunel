@@ -90,6 +90,12 @@ const MAX_STATUS_TEXT_LENGTH: usize = 256;
 /// MSC4426 maximum `m.status` emoji length, in bytes.
 const MAX_STATUS_EMOJI_LENGTH: usize = 32;
 
+/// The most profile fields one sync request asks for (MSC4262 and MSC4429).
+///
+/// Each requested field costs a read for every user the response carries, so
+/// sync uses only the first this many names of a longer list.
+pub const MAX_SYNC_FIELDS: usize = 64;
+
 /// Per-update policy for fanning a global profile change out to each of
 /// the user's joined rooms as a fresh `m.room.member` event. Mirrors the
 /// MSC4466 `propagate_to` axis.
