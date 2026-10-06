@@ -1,13 +1,22 @@
 use std::str::FromStr;
 
 use ruma::{
-	UInt,
+	RoomId, UInt,
 	api::federation::space::SpaceHierarchyParentSummary,
+	events::room::member::{MembershipState, RoomMemberEventContent},
 	owned_room_id, owned_server_name,
 	room::{JoinRuleSummary, RoomSummary},
+	room_id, user_id,
 };
+use tuwunel_core::{Result, config::Figment, matrix::PduCount};
 
-use crate::rooms::spaces::{PaginationToken, get_parent_children_via};
+use crate::{
+	rooms::{
+		spaces::{PaginationToken, get_parent_children_via},
+		state_cache::MembershipUpdate,
+	},
+	test_utils::fixture,
+};
 
 #[test]
 fn get_summary_children() {
@@ -144,4 +153,65 @@ fn pagination_token_to_string() {
 		.to_string(),
 		"9,34_3_1_true"
 	);
+}
+
+/// A remote hierarchy answer does not cache summaries of rooms this server is
+/// in, which come from local state; its other rooms are still cached.
+#[tokio::test]
+async fn remote_children_skip_resident_rooms() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let local = room_id!("!local:localhost");
+	let remote = room_id!("!remote:remote.invalid");
+	let alice = user_id!("@alice:localhost");
+
+	services
+		.state_cache
+		.update_membership(MembershipUpdate {
+			room_id: local,
+			user_id: alice,
+			membership_event: RoomMemberEventContent::new(MembershipState::Join),
+			sender: alice,
+			last_state: None,
+			invite_via: None,
+			update_joined_count: true,
+			count: PduCount::Normal(1),
+		})
+		.await?;
+
+	let summary = |room_id: &RoomId, name: &str| {
+		let mut summary = RoomSummary::new(
+			room_id.to_owned(),
+			JoinRuleSummary::Public,
+			false,
+			UInt::from(1_u32),
+			false,
+		);
+		summary.name = Some(name.to_owned());
+		summary
+	};
+
+	services
+		.spaces
+		.cache_children(vec![summary(local, "Forged"), summary(remote, "Remote")], Vec::new())
+		.await;
+
+	assert!(
+		services
+			.spaces
+			.cache_get(local)
+			.await
+			.is_err_and(|error| error.is_not_found())
+	);
+
+	let cached = services.spaces.cache_get(remote).await?;
+	let name = cached
+		.summary
+		.and_then(|parent| parent.summary.name);
+	assert_eq!(name.as_deref(), Some("Remote"));
+
+	Ok(())
 }
