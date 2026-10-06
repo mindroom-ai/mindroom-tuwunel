@@ -3,11 +3,14 @@ mod uiaa;
 
 use std::{borrow::Cow, collections::BTreeMap, net::IpAddr, time::Duration};
 
-use axum::extract::State;
+use axum::{
+	extract::State,
+	response::{Html, IntoResponse, Response},
+};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as b64};
 use futures::{TryFutureExt, future::try_join};
-use reqwest::header::{CONTENT_TYPE, HeaderValue};
+use reqwest::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue, REFERRER_POLICY, SET_COOKIE};
 use ruma::{
 	Mxc, OwnedMxcUri, OwnedUserId, ServerName, UserId,
 	api::client::{
@@ -26,6 +29,7 @@ use tuwunel_core::{
 	utils::{
 		content_disposition::make_content_disposition,
 		hash::sha256,
+		html::escape as html_escape,
 		result::{FlatOk, LogErr, NotFound},
 		stream::ReadyExt,
 		string::{EMPTY, truncate_deterministic},
@@ -50,7 +54,7 @@ pub(crate) use self::{
 	uiaa::{sso_complete_js_route, sso_css_route, sso_fallback_route},
 };
 use super::TOKEN_LENGTH;
-use crate::{ClientIp, Ruma};
+use crate::{ClientIp, Ruma, RumaResponse, oidc::approval_waived};
 
 /// Grant phase query string.
 #[derive(Debug, Serialize)]
@@ -288,7 +292,7 @@ pub(crate) async fn sso_callback_route(
 	State(services): State<crate::State>,
 	ClientIp(client): ClientIp,
 	body: Ruma<sso_callback::unstable::Request>,
-) -> Result<sso_callback::unstable::Response> {
+) -> Result<Response> {
 	let sess_id = body
 		.body
 		.state
@@ -385,7 +389,9 @@ pub(crate) async fn sso_callback_route(
 		.as_ref()
 		.filter(|url| url.scheme() == "uiaa")
 	{
-		return handle_uiaa(&services, &user_id, cookie, redirect_url).await;
+		return handle_uiaa(&services, &user_id, cookie, redirect_url)
+			.await
+			.map(|response| RumaResponse(response).into_response());
 	}
 
 	let redirect_url = session
@@ -403,15 +409,17 @@ pub(crate) async fn sso_callback_route(
 		)
 		.await?;
 
-		return Ok(sso_callback::unstable::Response {
-			location: next.location,
-			cookie: next.cookie,
-		});
+		return Ok(RumaResponse(next).into_response());
+	}
+
+	if !redirect_vetted(&services, &redirect_url) {
+		return confirm_login_redirect(&services, &redirect_url, &user_id, cookie);
 	}
 
 	let location = finalize_login_redirect(&services, redirect_url, &user_id);
+	let response = sso_callback::unstable::Response { location, cookie: Some(cookie) };
 
-	Ok(sso_callback::unstable::Response { location, cookie: Some(cookie) })
+	Ok(RumaResponse(response).into_response())
 }
 
 fn validate_session_cookie(
@@ -499,6 +507,101 @@ fn finalize_login_redirect(
 		.append_pair("loginToken", &login_token);
 
 	redirect_url.into()
+}
+
+/// Whether a login token may go to `redirect_url` without asking the user.
+///
+/// The OIDC completion on this server's client origin asks for itself; any
+/// other target is vetted as an OIDC client's redirect target would be, or
+/// listed in `sso_trusted_redirect_hosts`.
+fn redirect_vetted(services: &Services, redirect_url: &Url) -> bool {
+	let own_origin = services
+		.config
+		.well_known
+		.client
+		.as_ref()
+		.is_some_and(|client| client.origin() == redirect_url.origin());
+
+	own_origin
+		|| approval_waived(services, redirect_url.as_str())
+		|| redirect_trusted(&services.config.sso_trusted_redirect_hosts, redirect_url)
+}
+
+/// Whether `url` names a web client host or native app scheme listed in
+/// `sso_trusted_redirect_hosts`.
+fn redirect_trusted(trusted: &[String], url: &Url) -> bool {
+	let name = match url.scheme() {
+		| "http" | "https" => url.host_str().unwrap_or_default(),
+		| scheme => scheme,
+	};
+
+	trusted
+		.iter()
+		.any(|entry| entry.eq_ignore_ascii_case(name))
+}
+
+/// Ask the user before a login token goes to a target nobody vetted.
+///
+/// Whoever sent the sign-in link chose its `redirectUrl`, so the page names
+/// that target and only the user's own click delivers the token.
+fn confirm_login_redirect(
+	services: &Services,
+	redirect_url: &Url,
+	user_id: &UserId,
+	cookie: Cow<'static, str>,
+) -> Result<Response> {
+	// A javascript: link would run on this page rather than leave it.
+	if redirect_url.scheme() == "javascript" {
+		return Err!(Request(InvalidParam("Unsupported redirect_url scheme.")));
+	}
+
+	// Userinfo would put a name other than the real host first on the page.
+	if !redirect_url.username().is_empty() || redirect_url.password().is_some() {
+		return Err!(Request(InvalidParam("redirect_url must not contain userinfo.")));
+	}
+
+	let mut target = redirect_url.clone();
+	target.set_query(None);
+	target.set_fragment(None);
+
+	let user = html_escape(user_id.as_str());
+	let target = html_escape(target.as_str());
+	let href = html_escape(&finalize_login_redirect(services, redirect_url.clone(), user_id));
+
+	let html = format!(
+		r#"<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+	<title>Continue Sign-In</title>
+	<link rel="stylesheet" href="/_tuwunel/sso/sso.css">
+</head>
+
+<body class="required">
+	<div class="card">
+		<h1>Continue Sign-In</h1>
+		<p>You are signing in as <strong>{user}</strong> to <strong>{target}</strong>.</p>
+		<a href="{href}" class="btn">Continue</a>
+		<div class="warning">
+			<strong>Security Notice:</strong>
+			Continue only if you started this sign-in yourself. Continuing gives this
+			application access to your account.
+		</div>
+	</div>
+</body>
+
+</html>"#
+	);
+
+	let headers = [
+		(SET_COOKIE, cookie.into_owned()),
+		(CACHE_CONTROL, "no-store".to_owned()),
+		(REFERRER_POLICY, "no-referrer".to_owned()),
+	];
+
+	Ok((headers, Html(html)).into_response())
 }
 
 /// Map an authenticated SSO/OIDC identity onto a local account and return the

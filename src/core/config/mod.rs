@@ -2003,10 +2003,32 @@ pub struct Config {
 	/// a person takes, a server that shows it wants a `login_token_ttl` long
 	/// enough to read the page.
 	///
+	/// The legacy SSO login takes its `redirectUrl` from whoever sent the
+	/// link, so it asks the same way: a login token for a target that is
+	/// not on the `well_known.client` origin, not vetted as above and not
+	/// listed in `sso_trusted_redirect_hosts` is handed over only from a page
+	/// naming that target.
+	///
 	/// reloadable: yes
 	/// default: true
 	#[serde(default = "true_fn")]
 	pub oidc_require_client_approval: bool,
+
+	/// Redirect targets the legacy SSO login trusts with a login token.
+	///
+	/// The legacy SSO login sends its login token by redirect, without the
+	/// confirmation page, to a `redirectUrl` listed here. An entry names a web
+	/// client's host, which matches http and https targets on that host
+	/// (compared case-insensitively), or a native app's URL scheme, which
+	/// matches any other target with that scheme, e.g. `mindroom` for
+	/// `mindroom://auth/...`.
+	///
+	/// This list does not affect OIDC client registration.
+	///
+	/// reloadable: yes
+	/// default: []
+	#[serde(default)]
+	pub sso_trusted_redirect_hosts: Vec<String>,
 
 	/// Require a `client_uri` in dynamic client registration requests
 	/// (RFC 7591 / MSC2966).
@@ -3066,11 +3088,11 @@ pub struct Config {
 	/// To disable, set this to be an empty vector (`[]`).
 	///
 	/// Defaults to:
-	/// ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
+	/// ["127.0.0.0/8", "0.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
 	/// "192.168.0.0/16", "100.64.0.0/10", "192.0.0.0/24", "169.254.0.0/16",
 	/// "192.88.99.0/24", "198.18.0.0/15", "192.0.2.0/24", "198.51.100.0/24",
-	/// "203.0.113.0/24", "224.0.0.0/4", "::1/128", "fe80::/10", "fc00::/7",
-	/// "2001:db8::/32", "ff00::/8", "fec0::/10"]
+	/// "203.0.113.0/24", "224.0.0.0/4", "::1/128", "::/128", "fe80::/10",
+	/// "fc00::/7", "2001:db8::/32", "ff00::/8", "fec0::/10"]
 	#[serde(default = "default_ip_range_denylist")]
 	pub ip_range_denylist: Vec<String>,
 
@@ -5790,6 +5812,7 @@ pub fn default_default_room_version() -> RoomVersionId { RoomVersionId::V11 }
 fn default_ip_range_denylist() -> Vec<String> {
 	vec![
 		"127.0.0.0/8".to_owned(),
+		"0.0.0.0/8".to_owned(),
 		"10.0.0.0/8".to_owned(),
 		"172.16.0.0/12".to_owned(),
 		"192.168.0.0/16".to_owned(),
@@ -5803,6 +5826,7 @@ fn default_ip_range_denylist() -> Vec<String> {
 		"203.0.113.0/24".to_owned(),
 		"224.0.0.0/4".to_owned(),
 		"::1/128".to_owned(),
+		"::/128".to_owned(),
 		"fe80::/10".to_owned(),
 		"fc00::/7".to_owned(),
 		"2001:db8::/32".to_owned(),
