@@ -25,6 +25,10 @@ use tuwunel_core::{
 
 use crate::rooms::{short::ShortStateHash, state::RoomMutexGuard};
 
+/// How many of a former member's membership events are walked back to find
+/// their last join; past that they keep only the events they were joined for.
+const MEMBERSHIP_STEPS: usize = 16;
+
 /// Reports whether a user may redact an event in a room.
 ///
 /// Cross-room targets are denied, while create and server-ACL targets return a
@@ -170,8 +174,8 @@ async fn history_visibility_at(
 /// Whether a user may see an event under `shared` history visibility.
 ///
 /// A current member sees the whole room, which the first check answers without
-/// touching room state. A former member keeps events through their latest
-/// leave, and lookup failures deny access.
+/// touching room state. A former member keeps events up to their latest leave
+/// that were sent before their last join, and lookup failures deny access.
 #[implement(super::Service)]
 async fn user_shared_history(
 	&self,
@@ -207,7 +211,52 @@ async fn user_shared_history(
 		return false;
 	};
 
-	event_count <= PduCount::from_unsigned(left_count)
+	let left_count = PduCount::from_unsigned(left_count);
+	if event_count > left_count {
+		return false;
+	}
+
+	// A knock or an invite since the user's last join drops their leave count,
+	// and the next leave records a later one, so walk back from their current
+	// member event to their last join; the event is shared with them if they
+	// joined at or after it.
+	let Ok(mut member) = self
+		.room_state_get(room_id, &StateEventType::RoomMember, user_id.as_str())
+		.await
+	else {
+		return false;
+	};
+
+	for _ in 0..MEMBERSHIP_STEPS {
+		if member.membership_for(user_id) == Some(MembershipState::Join) {
+			return self
+				.services
+				.timeline
+				.get_pdu_count(member.event_id())
+				.await
+				.is_ok_and(|join_count| join_count >= event_count);
+		}
+
+		let Ok(before) = self
+			.services
+			.state
+			.pdu_shortstatehash(member.event_id())
+			.await
+		else {
+			return false;
+		};
+
+		let Ok(previous) = self
+			.state_get(before, &StateEventType::RoomMember, user_id.as_str())
+			.await
+		else {
+			return false;
+		};
+
+		member = previous;
+	}
+
+	false
 }
 
 /// Reports whether a user may read the room's current state events.
