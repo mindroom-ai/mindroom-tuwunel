@@ -213,7 +213,7 @@ hosts and native app schemes) now gets the token only from a Continue link on
 a page naming it, and such a `javascript:` target or one with userinfo is
 refused. Upstream has the same bug. Files: `src/api/client/session/sso.rs`,
 `src/api/oidc/complete.rs`, `src/api/router.rs`, `src/core/config/mod.rs`;
-test in `src/main/tests/sso_redirect_confirmation.rs`.
+test in `src/main/tests/sso_login_redirect.rs`.
 
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:

@@ -34,6 +34,7 @@ use self::client::wait_until_ready;
 const FIRST: &str = "first-idp";
 const SECOND: &str = "second-idp";
 const CLIENT: &str = "https://client.example/callback";
+const TRUSTED: &str = "https://trusted.example/callback";
 
 /// Both providers are `default`, so a sign-in at the first continues at the
 /// second for the same account, and a sign-in at the second ends there.
@@ -50,7 +51,10 @@ fn sso_login_redirect() -> Result {
 		.with_option(format!("port={port}"))
 		.with_option("listening=true")
 		.with_option(format!("well_known.client=\"{base}\""))
-		.with_option("sso_trusted_redirect_hosts=[\"client.example\"]");
+		.with_option("oidc_registration_allowed_redirect_hosts=[\"trusted.example\"]")
+		.with_option(
+			"sso_trusted_redirect_hosts=[\"client.example\", \"web.example\", \"exampleapp\"]",
+		);
 
 	let args = [FIRST, SECOND]
 		.into_iter()
@@ -106,6 +110,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 	link_token_binds_nothing(services, &client, base).await?;
 	chain_carries_the_account(services, &client, base).await?;
+	unvetted_target_asks_first(services, &client, base).await?;
 
 	Ok(())
 }
@@ -156,6 +161,60 @@ async fn chain_carries_the_account(services: &Services, client: &Client, base: &
 	let response = callback(client, base, SECOND, &response, "bob-elsewhere").await?;
 
 	assert_eq!(signed_in(services, &response).await?, user(services, "bob")?);
+
+	Ok(())
+}
+
+/// A login token goes straight only to this server or a listed host. Any other
+/// target is named on a page, and only following its link delivers the token.
+async fn unvetted_target_asks_first(services: &Services, client: &Client, base: &str) -> Result {
+	let own = format!("{base}/_tuwunel/oidc/_complete?oidc_req_id=x");
+	let dave = user(services, "dave")?;
+
+	for (target, asks) in [
+		(TRUSTED, false),
+		(own.as_str(), false),
+		("https://web.example/login", false),
+		("exampleapp://auth/login", false),
+		("https://unlisted.example/", true),
+		("element://connect", true),
+	] {
+		let response = start(client, base, SECOND, &[("redirectUrl", target)]).await?;
+		let response = callback(client, base, SECOND, &response, "dave").await?;
+
+		let destination = if asks {
+			assert_eq!(response.status(), StatusCode::OK);
+			assert!(!response.headers().contains_key(LOCATION));
+
+			let html = response.text().await?;
+			let href = html
+				.split("href=\"")
+				.find_map(|part| {
+					part.split('"')
+						.next()
+						.filter(|href| href.contains("loginToken"))
+				})
+				.expect("continue link");
+
+			assert!(html.contains(&format!("<strong>{target}</strong>")));
+
+			Url::parse(&href.replace("&amp;", "&"))?
+		} else {
+			assert_eq!(response.status(), StatusCode::FOUND);
+
+			location(&response)?
+		};
+
+		assert!(destination.as_str().starts_with(target));
+		assert_eq!(token_owner(services, &destination).await?, dave);
+	}
+
+	for target in ["javascript:alert(1)//", "https://web.example@unlisted.example/"] {
+		let response = start(client, base, SECOND, &[("redirectUrl", target)]).await?;
+		let response = callback(client, base, SECOND, &response, "dave").await?;
+
+		assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+	}
 
 	Ok(())
 }
