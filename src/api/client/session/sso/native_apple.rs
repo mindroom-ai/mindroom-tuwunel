@@ -168,6 +168,7 @@ fn apple_userinfo_from_claim_values(
 		preferred_username: preferred_username.clone(),
 		username: preferred_username,
 		nickname: None,
+		login: None,
 		name,
 		given_name,
 		family_name,
