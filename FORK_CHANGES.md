@@ -83,6 +83,181 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Left rooms carry state only for users who joined
+
+A user who withdrew a knock or rejected an invite has the room among their left
+rooms, and legacy `/sync` sent its whole state at the leave: every member,
+power levels, topic and any custom state, although the user was never in the
+room. A left room's state now goes only to a user who once joined it, or when
+the room is world-readable; anyone else gets only their own membership.
+Upstream has the same bug. Files: `src/api/client/sync/v3.rs`; test in
+`src/main/tests/sync_left_room_state.rs`.
+
+### Sliding sync profile changes only for joined rooms
+
+The MSC4262 profiles extension of simplified sliding sync read the profile
+change log of every room in the window and every room the connection had
+seen: rooms the user has left or been removed from, which the connection
+keeps, and rooms they are invited to or have knocked on. Their members'
+profile changes kept arriving after the user left. Rooms in the window now
+follow the required-state rule, as receipts and typing do, and a room known
+only to the connection counts while the user is joined. Upstream main fixes
+this in its rewrite of the extension (`005830a1b`); drop this change when
+rebasing onto it. Files: `src/api/client/sync/v5/extensions/profiles.rs`; test
+in `src/main/tests/sync_v5_departed_profiles.rs`.
+
+### Federated key claims keep only the answering server's users
+
+A remote server's `/user/keys/claim` answer was taken as a whole, so entries
+naming users of other servers, local users included, replaced those users'
+one-time keys in the client's `/keys/claim` response; a local user's key had
+already been taken from storage and was lost. Entries whose user does not
+belong to the answering server are now dropped, as federated key queries
+already do. Upstream has the same bug. File:
+`src/api/client/keys/claim_keys.rs`.
+
+### Sync timelines follow history visibility
+
+Legacy `/sync` and sliding sync returned a room's newest events without
+checking history visibility, so a user who joined a `joined` or `invited` room
+received events sent before their join or invite, and a room left by
+rejecting an invite to a `shared` room carried its recent messages. Timeline
+events now pass the per-event check `/messages` uses, except that the user's
+own leave or ban is always kept. The `state` section only covers changes
+before the first timeline event, so the timeline starts after the last hidden
+state event (such as a topic change while the user was away), and is `limited`
+when that drops visible events. Upstream has the same bug. Files:
+`src/api/client/sync/mod.rs`; test in
+`src/main/tests/sync_history_visibility.rs`.
+
+### Appservice account data stays within its user namespace
+
+The account-data endpoints (`GET`, `PUT` and MSC3391 `DELETE`, global and per
+room) let any appservice request act on the path `userId`, so an appservice
+could read, change or delete the account data of users outside its
+registration. An appservice may now act only on its own sender and the users in
+its `users` namespace, as the profile endpoints already require. Upstream has
+the same bug. Files: `src/api/client/account_data/mod.rs`; test in
+`src/api/client/account_data/tests.rs`.
+
+### send_join response events are checked before they are stored
+
+Joining a room over federation stored every event of the `send_join` response
+as an outlier, replacing any copy this server already had. An event whose
+content no longer matched its content hash was stored as received instead of
+redacted, its `unsigned` data was kept, and `auth_chain` events were not checked
+to belong to the joined room. Such events are now redacted, `unsigned` is
+dropped, `auth_chain` events go through the same room and format checks as
+`state` events, and an event this server already has keeps its stored copy.
+Upstream has the same bug. Files: `src/service/server_keys/verify.rs`,
+`src/service/membership/join.rs`; test in
+`src/service/membership/join/tests.rs`.
+
+### Failed appservice requests leave the `hs_token` out of the log
+
+An appservice request also sends the `hs_token` as the legacy `access_token`
+query parameter, and when it could not be sent (connection refused, timeout)
+the logged `reqwest` error printed the full request URL with that token. The
+error now drops its URL before it is logged or returned, as federation requests
+already do; the log line still names the appservice and its registered URL.
+Upstream has the same bug. Files: `src/service/appservice/{request.rs,ping.rs}`;
+test in `src/main/tests/appservice_request_error.rs`.
+
+### Federation requests follow no redirects
+
+The federation clients followed a peer's redirects, and a redirect target was
+never checked against `ip_range_denylist`, so a peer could send a request on to
+any address the server can reach, including over plain HTTP. A legacy media
+fetch then stored that address's answer as the peer's media and returned it to
+the requesting client. Federation requests now follow no redirects, and legacy
+media requests to peers no longer set `allow_redirect`, so the peer serves the
+media itself. Upstream has the same bug. Files: `src/service/client/mod.rs`,
+`src/service/media/remote.rs`, `src/api/client/media_legacy.rs`; test in
+`src/main/tests/federation_redirect.rs`.
+
+### Per-user room lists stop at the user ID
+
+`rooms_joined`, `rooms_invited`, `rooms_knocked` and `rooms_left` scanned their
+`(user_id, room_id)` indexes with the bare user ID as the prefix, so the rooms
+of a user whose ID extends it (`@alice:example.org.other` for
+`@alice:example.org`) were listed as the shorter user's own, for example in
+`/sync` and `/joined_rooms`. The scans now include the key separator after the
+user ID, as the per-user state scans already did. Upstream has the same bug.
+Files: `src/service/rooms/state_cache/mod.rs`; test in
+`src/service/rooms/state_cache/tests.rs`.
+
+### Public read receipts need a joined user and an event of the room
+
+`POST /rooms/{roomId}/receipt/m.read/{eventId}` and the `m.read` field of
+`/read_markers` stored a public read receipt without checking that the sender
+is joined to the room or that the event belongs to it. A user outside the room
+then showed up as a reader to its members and to other servers, and a receipt
+whose `thread_id` named the same unknown event passed the MSC3771 thread check,
+so each new event id stored another receipt row, kept until the room is
+deleted. Both endpoints now answer 403 to a user who is not joined and 404 for
+an event that is not in the room's timeline, as private read markers already
+do. Upstream has the same bug. Files:
+`src/api/client/read_marker/{mod.rs,receipt.rs,read_markers.rs}`; test in
+`src/main/tests/public_receipt_room.rs`.
+
+### Prev events from another room are rejected
+
+The prev-event walk checks that each event it visits is in the incoming PDU's
+room, but prev events already in the timeline skipped the walk and that check.
+The walk also stopped at a prev event exactly as old as the room's first event,
+which was still added to the timeline, so its own prev events went unchecked.
+A PDU could then name another room's event in `prev_events`, directly or through
+such a prev event, and the state at that event became the state before it: the
+event was authorized against and stored with the other room's state, and for a
+state event that state was also resolved into the room's current state. Prev
+events already in the timeline now get the same room check, and the walk
+continues past events as old as the room's first event, so such a PDU is
+rejected. Upstream has the same bug.
+Files: `src/service/rooms/event_handler/fetch_prev.rs`; test in
+`src/main/tests/federation_prev_event_room.rs`.
+
+### Deleting an alias by power level takes room membership
+
+`DELETE /directory/room/{alias}` let anyone holding the room's
+`m.room.canonical_alias` power level delete an alias they did not create,
+whether or not they were in the room. A user who had left, been kicked or been
+banned with a level still on record, or any local user for a room whose
+`users_default` meets the level, could delete its aliases. Apart from the alias
+creator and server admins, the user must now also be joined to the room, as
+Synapse requires. Upstream has the same bug. File:
+`src/service/rooms/alias/mod.rs`; test in
+`src/main/tests/alias_delete_membership.rs`.
+
+### Email password resets leave deactivated accounts deactivated
+
+Deactivation without erasure keeps the account's email binding, and a
+logged-out password reset through that email stored the new password without
+checking the account, which made a deactivated account usable again. The reset
+now refuses a deactivated account with `M_USER_DEACTIVATED`, as login does.
+Upstream has the same bug. Files: `src/api/client/account/change_password.rs`;
+test in `src/main/tests/email_password_reset/scenarios.rs`.
+
+### Auth chain fetch walks are bounded
+
+Fetching the missing auth events of an incoming event walked the remote server's
+auth chain one event at a time and kept every fetched event in memory until the
+walk ended, with no limit on the number of events and only the federation
+response limit (256 MiB by default) on each one. A walk now gives up and drops
+what it fetched once it holds `max_fetch_prev_events` events (default 1024) and
+would fetch another. It keeps each fetched event without its `unsigned` field,
+which the outlier path removes before its own size check, and treats an event
+that is then still larger than the 65,535 byte PDU limit as a failed fetch.
+Upstream has the same bug. File: `src/service/rooms/event_handler/fetch_auth.rs`.
+
+### `ip_range_denylist` covers IPv4-mapped IPv6 addresses
+
+An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) was matched against the denylist
+as an IPv6 address, so the IPv4 ranges never matched it, while a connection to
+it reaches the embedded IPv4 host. The URL, redirect, DNS answer and peer
+address checks now match such an address as its IPv4 address, so
+`[::ffff:10.0.0.1]` is refused like `10.0.0.1`. Upstream has the same bug.
+File: `src/service/client/mod.rs`; test in `src/service/client/tests.rs`.
+
 ### GitHub sign-in uses the account id
 
 GitHub's user API has no `sub`, so a `login` alias made the username the
@@ -214,6 +389,18 @@ latest reply. Upstream has the same bug. File:
 `src/service/rooms/pdu_metadata/bundling.rs`; test in
 `src/main/tests/bundled_relations_after_leave.rs`.
 
+### SSO username fallback skips accounts linked to another identity
+
+When every username a new identity claims at an untrusted provider is taken,
+it falls back to a localpart derived from its issuer and subject. An existing
+`sso`-origin account at that localpart was handed to it even when another
+identity already signed in to that account, linking both identities to it. The
+fallback now skips an account that has a linked identity, so the sign-in fails
+with `M_USER_IN_USE`. An account with no linked identity, such as one whose
+links an admin removed, is still reused at its fallback. Upstream has the same
+bug. File: `src/api/client/session/sso.rs`; test in
+`src/main/tests/sso_fallback_account.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
@@ -235,6 +422,7 @@ Files:
 
 Behavior:
 - Adds `/sync` timeline compaction for superseded non-state `m.replace` events.
+  Redactions are never compacted, even when their content claims a relation.
 - Adds a background purge worker that deletes old superseded edit events from
   storage and indexes, retaining the newest eligible edit per (room, target,
   sender). Candidates and originals must be non-state events with matching
@@ -498,6 +686,9 @@ Database-path isolation, pagination bounds, quiet-room full-state sync, and
 stored-key corruption coverage use upstream's native tests under `src/main/tests/`.
 Only the corruption fixture's normal replacement/retry expectations are adapted
 to the fork's immutable-device policy; all corrupt-byte cases remain intact.
+Upstream's `auto_accept_invites.rs` reads the accepted room's `m.direct` once
+after the join, racing the write that follows it; the fork polls for that write
+first.
 
 ## Runtime Configuration
 
