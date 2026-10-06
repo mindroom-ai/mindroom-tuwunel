@@ -1789,7 +1789,8 @@
 #
 #[global.federation.history]
 
-# Limits prior events visited by one recovery traversal.
+# Limits prior events visited by one recovery traversal, and events
+# fetched by one auth chain walk.
 #
 # reloadable: yes
 #

@@ -251,7 +251,8 @@ pub struct Fanout {
 	group = "true"
 )]
 pub struct History {
-	/// Limits prior events visited by one recovery traversal.
+	/// Limits prior events visited by one recovery traversal, and events
+	/// fetched by one auth chain walk.
 	///
 	/// reloadable: yes
 	/// default: 1024
