@@ -22,7 +22,8 @@ const MEMBER_TOKEN: &str = "knock-withdrawal-history-member-access-token";
 ///
 /// A kicked member who knocks and withdraws the knock still reads what was
 /// sent before and while it was joined, and its own join, but nothing sent
-/// after the kick.
+/// after the kick. After withdrawing, it reads the room state from the kick;
+/// while knocking it may not read the room state at all.
 #[test]
 fn departure_bounds_history() -> Result {
 	let options: [&str; 0] = [];
@@ -45,6 +46,7 @@ async fn withdrawn_knock(owner: &Client<'_>, member: &Client<'_>, member_id: &Us
 	let room_id = owner
 		.create_room(&json!({
 			"preset": "private_chat",
+			"name": "before",
 			"initial_state": [{
 				"type": "m.room.join_rules",
 				"state_key": "",
@@ -70,14 +72,31 @@ async fn withdrawn_knock(owner: &Client<'_>, member: &Client<'_>, member_id: &Us
 		.post(&format!("rooms/{room_id}/kick"), &target)
 		.await?;
 
+	let name_path = format!("rooms/{room_id}/state/m.room.name/");
+
 	owner.send_text(&room_id, "after-kick").await?;
+	owner
+		.put(&name_path, &json!({ "name": "after" }))
+		.await?;
+
 	member
 		.post(&format!("knock/{room_id}"), &json!({}))
+		.await?;
+
+	let knocking_state = member.get_status(&name_path).await?;
+	let knocking_initial_sync = member
+		.get_status(&format!("rooms/{room_id}/initialSync"))
 		.await?;
 
 	member
 		.post(&format!("rooms/{room_id}/leave"), &json!({}))
 		.await?;
+
+	let withdrawn_name = member.get(&name_path, &[]).await?;
+
+	assert_eq!(knocking_state, 404, "knocking member reads the room state");
+	assert_eq!(knocking_initial_sync, 403, "knocking member previews the room");
+	assert_eq!(withdrawn_name["name"], "before", "withdrawn knock reads the new name");
 
 	let messages = member
 		.get(&format!("rooms/{room_id}/messages"), &[("dir", "b")])
@@ -114,13 +133,38 @@ fn bodies(messages: &Value) -> Vec<&str> {
 /// Send a text message, using its body as the transaction id.
 #[implement(Client, params = "<'_>")]
 async fn send_text(&self, room_id: &RoomId, body: &str) -> Result {
+	let path = format!("rooms/{room_id}/send/m.room.message/{body}");
+
+	self.put(&path, &json!({ "msgtype": "m.text", "body": body }))
+		.await
+}
+
+/// The status of a GET of one endpoint path as this user.
+#[implement(Client, params = "<'_>")]
+async fn get_status(&self, path: &str) -> Result<u16> {
+	let response = self
+		.services
+		.client
+		.clients
+		.default
+		.get(self.url(path))
+		.bearer_auth(self.token)
+		.send()
+		.await?;
+
+	Ok(response.status().as_u16())
+}
+
+/// Put a JSON body to one endpoint path as this user.
+#[implement(Client, params = "<'_>")]
+async fn put(&self, path: &str, body: &Value) -> Result {
 	self.services
 		.client
 		.clients
 		.default
-		.put(self.url(&format!("rooms/{room_id}/send/m.room.message/{body}")))
+		.put(self.url(path))
 		.bearer_auth(self.token)
-		.json(&json!({ "msgtype": "m.text", "body": body }))
+		.json(body)
 		.send()
 		.await?
 		.error_for_status()?;

@@ -108,9 +108,9 @@ Under `shared` history visibility a former member reads events up to their
 latest leave. Knocking again after leaving or being kicked dropped that leave,
 and withdrawing the knock recorded a new one, so the user then read everything
 sent since their removal; rejecting a later invite did the same. A former
-member now sees an event they were not joined for only if they joined at or
-after it, found by walking back from their current membership event to their
-last join. Upstream has the same bug. File:
+member now sees an event they were not joined for only up to the leave or ban
+that ended their last join, found by walking back from their current
+membership event to that join. Upstream has the same bug. File:
 `src/service/rooms/state_accessor/user_can.rs`; test in
 `src/main/tests/knock_withdrawal_history.rs`.
 
@@ -222,6 +222,23 @@ departure sync. The user's own private read receipt and room account data are
 unchanged. Upstream has the same bug. Files:
 `src/api/client/sync/v5/{range.rs,rooms.rs,extensions/typing.rs}`; test in
 `src/main/tests/sync_v5_departed_ephemeral.rs`.
+
+### A withdrawn knock does not move a former member's state snapshot
+
+Upstream serves a former member the room state as of their departure
+(`750dbc0b9`, `ed0ec6157`), but takes the departure from the leave or ban in
+current state. Knocking again after leaving or being kicked and withdrawing
+the knock, or rejecting a later invite, records a new leave, so `/state`,
+`/state/{eventType}/{stateKey}`, `/members`, `/initialSync`, `/context` and
+legacy `/sync` left rooms then served the state as of the withdrawal, with the
+renames, topics, power levels and members added since the user's removal. The
+departure is now the leave or ban that ended the user's last join, found by
+the walk that bounds their history (see "A withdrawn knock does not move a
+former member's departure"); a walk past 16 membership events fails the read.
+While a knock is pending the user may not read the state, as upstream decides.
+Upstream has the same bug. File:
+`src/service/rooms/state_accessor/user_can.rs`; test in
+`src/main/tests/knock_withdrawal_history.rs`.
 
 ### Bundled aggregations follow the requester's visibility
 
