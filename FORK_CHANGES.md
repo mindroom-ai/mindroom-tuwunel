@@ -95,6 +95,26 @@ receipt and room account data are unchanged. Upstream has the same bug. Files:
 `src/api/client/sync/v5/{range.rs,rooms.rs,extensions/typing.rs}`; test in
 `src/main/tests/sync_v5_departed_ephemeral.rs`.
 
+### UIAA keeps only small request bodies for pending sessions
+
+A UIAA request sent without `auth` keeps its JSON body in memory so the
+follow-up request can omit fields, and nothing removed a body again, not even
+when its session finished. The bodies now live in an LRU of 1024 sessions,
+bodies over 4 KiB of serialized JSON are not kept (the client resends the full
+request, as after a restart), and a finished session releases its body.
+Upstream has the same bug. Files: `src/service/uiaa/mod.rs`; test in
+`src/service/uiaa/tests.rs`.
+
+### `/context` keeps current state from requesters who may not read it
+
+A room's create event and backfilled events have no state snapshot, so
+`/context` around one of them returned the room's current state, even to a user
+who had never joined. That fallback now applies only to a requester who passes
+the `/state` check (`user_can_see_state_events`) or to the admin room-context
+endpoint; anyone else gets an empty `state`. Upstream has the same bug. Files:
+`src/api/client/context.rs`; test in
+`src/main/tests/context_snapshotless_state.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
