@@ -157,6 +157,18 @@ endpoint; anyone else gets an empty `state`. Upstream has the same bug. Files:
 `src/api/client/context.rs`; test in
 `src/main/tests/context_snapshotless_state.rs`.
 
+### Bundled aggregations follow the requester's visibility
+
+A served event's bundled `m.thread` summary and `m.replace` edits were added
+without checking whether the requester may see them, so a user who had left or
+been removed from a room still got a thread's newest reply and the newest edit
+of an event they could read, even when those were sent after they left. A
+requester who is no longer in the room now gets an edit only when the room's
+history visibility lets them see it, and no thread summary when it hides the
+latest reply. Upstream has the same bug. File:
+`src/service/rooms/pdu_metadata/bundling.rs`; test in
+`src/main/tests/bundled_relations_after_leave.rs`.
+
 ### A device's tokens rotate under its device lock
 
 Refresh-token rotation read the token a device points at, removed it, and wrote
