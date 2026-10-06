@@ -26,8 +26,12 @@ use tuwunel_core::{
 	utils::{BoolExt, math::ruma_from_usize_saturating},
 };
 
-use super::{Op, Opts};
+use super::{Op, Opts, validate::MAX_SERVED_PDU_BYTES};
 use crate::services::OnceServices;
+
+/// Largest `/event` response read: the served PDU and the few fields around
+/// it. A larger body is dropped while it is read rather than buffered first.
+const MAX_EVENT_RESPONSE_BYTES: usize = MAX_SERVED_PDU_BYTES + 4096;
 
 /// Abstracts the network operation for one federation fetch attempt.
 ///
@@ -64,8 +68,10 @@ impl Transport for FederationTransport {
 		match op {
 			| Op::Event | Op::AuthEvent => {
 				let event_id = require_event_id(opts)?;
+				let client = &self.services.client.federation;
+				let request = EventRequest { event_id };
 				let res = federation
-					.execute(server, EventRequest { event_id })
+					.execute_on(client, server, request, MAX_EVENT_RESPONSE_BYTES)
 					.await?;
 
 				Ok(Bytes::copy_from_slice(res.pdu.get().as_bytes()))
