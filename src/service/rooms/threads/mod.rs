@@ -31,6 +31,11 @@ mod tests;
 /// the Matrix v1.4 spec recommendation (also MSC3771/MSC3773).
 const MAX_THREAD_HOPS: usize = 3;
 
+/// How many of a root's newest relations are searched to replace a redacted
+/// latest reply. Redaction holds the room lock and sequence permit, and a root
+/// can gather any number of reactions or redacted replies.
+const MAX_LATEST_REPLY_SCAN: usize = 256;
+
 #[derive(Deserialize)]
 struct ExtractThreadRelation {
 	#[serde(rename = "m.relates_to")]
@@ -361,7 +366,8 @@ impl Service {
 	}
 
 	/// If the root's bundled `latest_event` is `redacted`, swap in the newest
-	/// other thread reply, or drop it when none remains.
+	/// other thread reply among its newest relations, or drop it when none is
+	/// found there.
 	async fn replace_thread_latest(
 		&self,
 		json: &mut CanonicalJsonObject,
@@ -374,7 +380,14 @@ impl Service {
 		let replies = self
 			.services
 			.pdu_metadata
-			.get_relations(shortroomid, count, None, Direction::Backward, None)
+			.get_relations_limited(
+				shortroomid,
+				count,
+				None,
+				Direction::Backward,
+				None,
+				MAX_LATEST_REPLY_SCAN,
+			)
 			.ready_filter(|(_, pdu)| {
 				pdu.event_id != redacted && thread_root(pdu.get_content_as_value()).is_some()
 			});
@@ -385,7 +398,7 @@ impl Service {
 			serde_json::from_str(latest.json().get()).ok()
 		});
 
-		// A summary needs a latest event; with no reply left, drop it entirely.
+		// A summary needs a latest event; with no reply found, drop it entirely.
 		match latest {
 			| Some(latest) => _ = thread_bundle(json)?.insert("latest_event".into(), latest),
 			| None => remove_thread_bundle(json),
