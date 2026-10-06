@@ -23,7 +23,10 @@ use tuwunel_core::{
 	},
 	warn,
 };
-use tuwunel_service::{Services, profile::ProfileChange};
+use tuwunel_service::{
+	Services,
+	profile::{MAX_SYNC_FIELDS, ProfileChange},
+};
 
 /// The profile fields one user changed or holds.
 ///
@@ -89,10 +92,10 @@ struct MemberContent {
 
 /// Collects the MSC4429 profile updates for a legacy sync response.
 ///
-/// The filter selects fields, with an empty default opting out. Changes and
-/// current bases share a user-field set and require current shared membership,
-/// except for self. Read failures abort collection before its position can be
-/// acknowledged.
+/// The filter selects fields, with an empty default opting out, and only its
+/// first [`MAX_SYNC_FIELDS`] are used. Changes and current bases share a
+/// user-field set and require current shared membership, except for self. Read
+/// failures abort collection before its position can be acknowledged.
 #[tracing::instrument(name = "profiles", level = "trace", skip_all)]
 pub(super) async fn collect(
 	services: &Services,
@@ -102,7 +105,8 @@ pub(super) async fn collect(
 	filter: &FilterDefinition,
 	rooms: &Rooms,
 ) -> Result<Users> {
-	let requested = filter.profile_fields.ids.as_slice();
+	let ids = &filter.profile_fields.ids;
+	let requested = &ids[..ids.len().min(MAX_SYNC_FIELDS)];
 
 	if requested.is_empty() {
 		return Ok(Users::new());
