@@ -64,10 +64,14 @@ Files: `src/service/rooms/timeline/redact.rs`, `src/service/rooms/threads/mod.rs
 A root's stored `m.thread.latest_event` copies its newest reply, so redacting
 that reply kept serving its content (clients, federation, appservices). Redaction
 now swaps in the newest remaining reply, or drops the summary if none remains.
+Only the root's newest 256 relations are searched, counting ones whose event no
+longer loads (such as purged edits), which bounds the work done while the
+redaction holds the sequence permit; a root with no remaining reply among them
+drops the summary too.
 A backfilled root's replies are not indexed, so it drops the summary even when
 older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
-`src/service/rooms/threads/mod.rs`.
+`src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
