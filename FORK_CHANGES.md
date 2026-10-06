@@ -83,6 +83,17 @@ older replies remain. A one-time startup scrub (`scrub_redacted_thread_latest`
 marker) fixes affected roots. Upstream has the same bug. Files:
 `src/service/rooms/{threads/mod.rs,pdu_metadata/relations.rs}`.
 
+### Knock state leaves local memberships alone
+
+A knock on a room this server is not in installs the answering server's
+`knock_room_state` as the room's state, unchecked, and forcing that state
+replayed each `m.room.member` event in it into the membership cache, so it
+could mark other local users as joined, invited, or no longer invited. Member
+events are now left out of knock state; the knocking user's own membership
+still comes from the knock event this server builds. Upstream has the same
+bug. Files: `src/service/membership/knock.rs`; test in
+`src/service/membership/knock/tests.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
