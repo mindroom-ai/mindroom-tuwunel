@@ -82,8 +82,15 @@ where
 	T::PathBuilder: FedPath,
 {
 	let client = &self.services.client.federation;
+	let limit = self
+		.services
+		.server
+		.config
+		.network
+		.http
+		.max_response_size;
 
-	self.execute_on_allow_self(client, dest, request)
+	self.execute_on_allow_self(client, dest, request, limit)
 		.await
 }
 
@@ -160,8 +167,9 @@ where
 
 /// Sends through a supplied client and records the peer outcome.
 ///
-/// A response body larger than `limit` bytes fails the request. The
-/// destination's resolved route picks the direct or SRV half of the client.
+/// A response body larger than `limit` bytes, or than `max_response_size` if
+/// that is smaller, fails the request. The destination's resolved route picks
+/// the direct or SRV half of the client.
 /// A successful response clears every stored failure row for the destination.
 /// Only a failed resolution or send is recorded, and only when classified as a
 /// peer failure; a request this server refuses before contacting the peer
@@ -202,20 +210,13 @@ pub(super) async fn execute_on_allow_self<T>(
 	client: &Federation,
 	dest: &ServerName,
 	request: T,
+	limit: usize,
 ) -> Result<T::IncomingResponse>
 where
 	T: OutgoingRequest + Send,
 	T::Authentication: FedAuth,
 	T::PathBuilder: FedPath,
 {
-	let limit = self
-		.services
-		.server
-		.config
-		.network
-		.http
-		.max_response_size;
-
 	self.execute_counted(client, dest, request, true, limit)
 		.await
 }
@@ -342,6 +343,7 @@ pub(super) async fn execute_uncounted_allow_self<T>(
 	client: &Federation,
 	dest: &ServerName,
 	request: T,
+	limit: usize,
 ) -> Result<T::IncomingResponse>
 where
 	T: OutgoingRequest + Send,
@@ -356,13 +358,6 @@ where
 		.await?;
 
 	let request = self.prepare(&actual, dest, request)?;
-	let limit = self
-		.services
-		.server
-		.config
-		.network
-		.http
-		.max_response_size;
 
 	self.perform::<T>(&actual, dest, request, client, limit)
 		.await
@@ -483,6 +478,14 @@ where
 {
 	let url = request.url().clone();
 	let method = request.method().clone();
+	let limit = limit.min(
+		self.services
+			.server
+			.config
+			.network
+			.http
+			.max_response_size,
+	);
 
 	debug!(?method, ?url, "Sending request");
 
