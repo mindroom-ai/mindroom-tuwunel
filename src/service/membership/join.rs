@@ -611,9 +611,10 @@ struct ExtractDepth {
 ///
 /// Events whose signatures, content hash and format check out are authorized
 /// against their own auth events in depth order, so an event's auth events in
-/// the response are decided before it. An event that fails, or one with a
-/// rejected auth event, is rejected: it is not stored and stays out of the
-/// returned room state. A rejected create event, or one of another room
+/// the response are decided before it. An event is accepted only if it passes
+/// and all of its auth events were accepted before it; a stored copy of an
+/// auth event does not count. A rejected event is not stored and stays out of
+/// the returned room state. A rejected create event, or one of another room
 /// version than the join's, fails the join.
 #[implement(Service)]
 async fn ingest_send_join_events(
@@ -642,7 +643,7 @@ async fn ingest_send_join_events(
 	});
 
 	let cork = self.services.db.cork_and_flush();
-	let mut rejected = HashSet::new();
+	let mut accepted = HashSet::new();
 	let mut state = HashMap::new();
 	for (pdu, in_state) in pdus {
 		let Ok((event_id, value, verified)) = self
@@ -664,10 +665,10 @@ async fn ingest_send_join_events(
 			continue;
 		};
 
-		let accepted = !pdu
+		let allowed = pdu
 			.auth_events
 			.iter()
-			.any(|auth_event_id| rejected.contains(auth_event_id))
+			.all(|auth_event_id| accepted.contains(auth_event_id))
 			&& self
 				.services
 				.event_handler
@@ -677,7 +678,7 @@ async fn ingest_send_join_events(
 				.is_ok();
 
 		if pdu.kind == TimelineEventType::RoomCreate
-			&& !(accepted
+			&& !(allowed
 				&& pdu
 					.get_content::<RoomCreateEventContent>()
 					.is_ok_and(|content| content.room_version == *room_version_id))
@@ -688,13 +689,14 @@ async fn ingest_send_join_events(
 			)));
 		}
 
-		if !accepted {
-			rejected.insert(event_id);
+		if !allowed {
 			continue;
 		}
 
 		self.add_send_join_outlier(&event_id, &value, verified)
 			.await;
+
+		accepted.insert(event_id.clone());
 
 		if in_state && let Some(state_key) = &pdu.state_key {
 			let shortstatekey = self

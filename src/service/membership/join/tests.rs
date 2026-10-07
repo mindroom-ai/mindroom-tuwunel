@@ -46,7 +46,7 @@ async fn send_join_auth_chain_is_checked_before_storing() -> Result {
 		.ingest_send_join_events(room_id, &version, &rules, &auth_chain, &[])
 		.await?;
 
-	let auth_chain = raw(&[&altered(&known), &altered(&unknown), &foreign])?;
+	let auth_chain = raw(&[&create, &join, &altered(&known), &altered(&unknown), &foreign])?;
 	services
 		.membership
 		.ingest_send_join_events(room_id, &version, &rules, &auth_chain, &[])
@@ -155,7 +155,9 @@ async fn send_join_create_keeps_its_own_room_id() -> Result {
 /// send_join events are checked against their own auth events.
 ///
 /// A join the creator sends for another user is rejected: it is not stored and
-/// stays out of the room state, while the creator's own events are kept.
+/// stays out of the room state, while the creator's own events are kept. So is
+/// a topic whose power levels were stored before, as knock state is, when the
+/// response leaves them out or they come after the topic and are rejected.
 #[tokio::test]
 async fn send_join_state_is_authorized() -> Result {
 	let Some(fixture) = fixture(Figment::new()).await? else {
@@ -175,19 +177,39 @@ async fn send_join_state_is_authorized() -> Result {
 		&json!({ "membership": "join" }),
 		&[&create_id, &join_id],
 	)?;
+	let (power_id, power) = state_event(
+		services,
+		room_id,
+		"m.room.power_levels",
+		"",
+		&json!({ "users": { "@bob:localhost": 100 } }),
+		&[&create_id, &join_id, &alice_id],
+	)?;
+	let (powered_id, powered) =
+		topic(services, room_id, "powered", &[&create_id, &join_id, &power_id])?;
 
 	store_own_keys(services);
 
-	let state = raw(&[&create, &join, &alice])?;
-	let state: HashSet<_> = services
-		.membership
-		.ingest_send_join_events(room_id, &version, &rules, &[], &state)
-		.await?
-		.into_values()
-		.collect();
+	let mut stored = power.clone();
+	stored["event_id"] = power_id.as_str().into();
+	services
+		.timeline
+		.add_pdu_outlier(&power_id, &serde_json::from_value(stored)?);
 
-	assert_eq!(state, HashSet::from([create_id, join_id]));
-	assert!(!services.timeline.pdu_exists(&alice_id).await);
+	let omitted = raw(&[&create, &join, &alice, &powered])?;
+	let after = raw(&[&create, &join, &alice, &powered, &power])?;
+	for state in [omitted, after] {
+		let state: HashSet<_> = services
+			.membership
+			.ingest_send_join_events(room_id, &version, &rules, &[], &state)
+			.await?
+			.into_values()
+			.collect();
+
+		assert_eq!(state, HashSet::from([create_id.clone(), join_id.clone()]));
+		assert!(!services.timeline.pdu_exists(&alice_id).await);
+		assert!(!services.timeline.pdu_exists(&powered_id).await);
+	}
 
 	Ok(())
 }
