@@ -1,5 +1,6 @@
 use axum::extract::State;
 use futures::{FutureExt, StreamExt, TryFutureExt, future::join3};
+use itertools::Itertools;
 use ruma::{
 	OwnedServerName, RoomId, UserId,
 	api::{
@@ -23,6 +24,12 @@ use tuwunel_service::{
 };
 
 use crate::{ClientIp, Ruma, RumaResponse};
+
+/// Most servers a remote room's summary is requested from.
+const MAX_SUMMARY_SERVERS: usize = 8;
+
+/// Largest hierarchy response read from each of them.
+const MAX_HIERARCHY_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// # `GET /_matrix/client/unstable/im.nheko.summary/rooms/{roomIdOrAlias}/summary`
 ///
@@ -235,7 +242,14 @@ async fn remote_room_summary_hierarchy_response(
 	}
 
 	let request = get_hierarchy::v1::Request::new(room_id.to_owned());
+	let servers = servers
+		.iter()
+		.unique()
+		.take(MAX_SUMMARY_SERVERS)
+		.cloned();
+
 	let opts = Opts {
+		limit: Some(MAX_HIERARCHY_RESPONSE_BYTES),
 		record: Record::Contribute,
 		..Default::default()
 	};
@@ -257,7 +271,7 @@ async fn remote_room_summary_hierarchy_response(
 
 	let response = services
 		.federation
-		.fanout_to(servers.iter().cloned().stream(), move |_| request.clone(), opts)
+		.fanout_to(servers.stream(), move |_| request.clone(), opts)
 		.inspect(|outcome| match &outcome.result {
 			| Ok(_) => {},
 			| Err(Fault::Error(e)) => {

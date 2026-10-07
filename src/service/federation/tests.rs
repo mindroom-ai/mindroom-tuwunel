@@ -374,8 +374,15 @@ async fn assert_refused_without_a_record(fixture: &Fixture, dest: &ServerName) {
 
 	refused("execute", result).await;
 
+	let limit = fixture
+		.services
+		.server
+		.config
+		.network
+		.http
+		.max_response_size;
 	let result = federation
-		.execute_on_allow_self(client, dest, VersionRequest {})
+		.execute_on_allow_self(client, dest, VersionRequest {}, limit)
 		.await;
 
 	refused("execute_on_allow_self", result).await;
@@ -412,8 +419,15 @@ async fn failed_request_records_peer_status() -> Result {
 		.await
 		.expect_err("nothing listens on port 1");
 
+	let limit = fixture
+		.services
+		.server
+		.config
+		.network
+		.http
+		.max_response_size;
 	federation
-		.execute_on_allow_self(client, &allow_self, VersionRequest {})
+		.execute_on_allow_self(client, &allow_self, VersionRequest {}, limit)
 		.await
 		.expect_err("nothing listens on port 2");
 
