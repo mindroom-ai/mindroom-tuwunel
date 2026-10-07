@@ -129,6 +129,33 @@ minutes. The stored selectors are now collected into a hash set once per room.
 Upstream has the same bug. File: `src/api/client/sync/v5/rooms.rs`; test in
 `src/api/client/sync/v5/rooms/tests.rs`.
 
+### EDUs sent to other servers are bounded in size
+
+Device keys and cross-signing keys a local client uploaded were stored with no
+size limit and sent to other servers unchanged in `m.device_list_update` and
+`m.signing_key_update` EDUs, and a to-device message for a remote user went out
+as an EDU as large as the client made it. A peer refuses a transaction over its
+request body limit, and the refused transaction's rows are sent again with
+every later transaction to that peer, so one oversized EDU stopped outbound
+federation to it. Device keys, including those of a dehydrated device, and
+each cross-signing key are now refused with 413 `M_TOO_LARGE` over 64 KiB, the
+limit Synapse applies to to-device messages, and so is a to-device message for
+a remote user whose EDU, with its event type and device ID, would be larger
+than that. A device ID a client chooses, which device list updates carry
+twice when device names are not federated, is refused with 400
+`M_INVALID_PARAM` over 512 bytes, the limit Synapse applies at login. A
+federation transaction also keeps each EDU, in order, that still fits within
+8 MiB together with those already kept, leaves out the others with a warning
+and acknowledges their rows with the transaction, so oversized EDUs, including
+ones queued earlier, no longer hold up the destination. Upstream has the same
+bug.
+Files:
+`src/api/client/{to_device.rs,dehydrated_device.rs,keys/upload_keys.rs,keys/upload_signing_keys.rs}`,
+`src/service/users/device.rs`,
+`src/service/sending/sender/{mod.rs,dispatch/federation.rs}`; tests in
+`src/main/tests/edu_content_size.rs`, `src/service/sending/sender/tests.rs` and
+`src/service/sending/sender/dispatch/federation/tests.rs`.
+
 ### Federated read receipts need a joined user and an event of the room
 
 An `m.receipt` EDU from another server was stored for any of that server's

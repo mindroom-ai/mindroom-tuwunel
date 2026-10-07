@@ -27,13 +27,19 @@ use super::DeviceListChange;
 /// generated device ID length
 const DEVICE_ID_LENGTH: usize = 10;
 
+/// Longest device ID a client may choose, the limit Synapse applies at login.
+///
+/// Other servers receive the ID in device list updates.
+const MAX_DEVICE_ID_LENGTH: usize = 512;
+
 /// generated user access token length
 pub const TOKEN_LENGTH: usize = 32;
 
 /// Adds a new device to a user.
 ///
-/// A device ID coinciding with one of the user's cross-signing key IDs is
-/// refused, since both share the device key row space.
+/// A device ID longer than `MAX_DEVICE_ID_LENGTH` bytes is refused, and so is
+/// one coinciding with one of the user's cross-signing key IDs, since both
+/// share the device key row space.
 #[implement(super::Service)]
 #[tracing::instrument(level = "info", skip(self, access_token))]
 pub async fn create_device(
@@ -46,6 +52,10 @@ pub async fn create_device(
 	client_ip: Option<IpAddr>,
 ) -> Result<OwnedDeviceId> {
 	let device_id = resolve_device_id(device_id);
+
+	if device_id.as_str().len() > MAX_DEVICE_ID_LENGTH {
+		return Err!(Request(InvalidParam("Device ID is too long.")));
+	}
 
 	if !self.exists(user_id).await {
 		return Err!(Request(InvalidParam(error!(

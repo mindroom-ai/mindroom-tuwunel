@@ -12,11 +12,11 @@ use ruma::{
 	to_device::DeviceIdOrAllDevices,
 };
 use tuwunel_core::{
-	Error, Result,
+	Err, Error, Result,
 	smallvec::SmallVec,
 	utils::{ReadyExt, result::LogErr},
 };
-use tuwunel_service::sending::EduBuf;
+use tuwunel_service::sending::{EduBuf, MAX_EDU_CONTENT_BYTES};
 
 use crate::Ruma;
 
@@ -44,30 +44,49 @@ pub(crate) async fn send_event_to_device_route(
 		return Ok(send_event_to_device::v3::Response {});
 	}
 
+	// Each message to a remote device goes out in an EDU of its own. Build them
+	// all first, so a request with one too large to send queues none of them.
+	let mut edus = Vec::new();
+	for (target_user_id, map) in &body.messages {
+		if services.globals.user_is_local(target_user_id) {
+			continue;
+		}
+
+		for (target_device_id_maybe, event) in map {
+			let mut map = BTreeMap::new();
+			map.insert(target_device_id_maybe.clone(), event.clone());
+			let mut messages = BTreeMap::new();
+			messages.insert(target_user_id.clone(), map);
+
+			let mut buf = EduBuf::new();
+			serde_json::to_writer(
+				&mut buf,
+				&federation::transactions::edu::Edu::DirectToDevice(DirectDeviceContent {
+					sender: sender_user.to_owned(),
+					ev_type: body.event_type.clone(),
+					message_id: services.globals.next_count().to_string().into(),
+					messages,
+				}),
+			)
+			.expect("DirectToDevice EDU can be serialized");
+
+			if buf.len() > MAX_EDU_CONTENT_BYTES {
+				return Err!(Request(TooLarge(
+					"To-device message is too large to send to another server."
+				)));
+			}
+
+			edus.push((target_user_id.server_name(), buf));
+		}
+	}
+
+	for (server, buf) in edus {
+		services.sending.send_edu_server(server, buf)?;
+	}
+
 	for (target_user_id, map) in &body.messages {
 		for (target_device_id_maybe, event) in map {
 			if !services.globals.user_is_local(target_user_id) {
-				let mut map = BTreeMap::new();
-				map.insert(target_device_id_maybe.clone(), event.clone());
-				let mut messages = BTreeMap::new();
-				messages.insert(target_user_id.clone(), map);
-
-				let mut buf = EduBuf::new();
-				serde_json::to_writer(
-					&mut buf,
-					&federation::transactions::edu::Edu::DirectToDevice(DirectDeviceContent {
-						sender: sender_user.to_owned(),
-						ev_type: body.event_type.clone(),
-						message_id: services.globals.next_count().to_string().into(),
-						messages,
-					}),
-				)
-				.expect("DirectToDevice EDU can be serialized");
-
-				services
-					.sending
-					.send_edu_server(target_user_id.server_name(), buf)?;
-
 				continue;
 			}
 

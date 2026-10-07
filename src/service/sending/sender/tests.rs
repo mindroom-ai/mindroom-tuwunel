@@ -11,20 +11,21 @@ use futures::StreamExt;
 use http::StatusCode;
 use ruma::{OwnedServerName, api::error::ErrorBody};
 use serde_json::Value;
-use tuwunel_core::{Err, Error, Result};
+use tuwunel_core::{Err, Error, Result, config::Figment};
 
 use self::fixture::fixture;
 use super::{
-	NewEvents, SendingFutures, TransactionStatus, TransactionStatuses, WakeQueue,
+	MAX_TRANSACTION_EDU_BYTES, NewEvents, SendingFutures, TransactionStatus, TransactionStatuses,
+	WakeQueue,
 	dispatch::{Completion, SendingResult},
 	select::Selection,
 };
 use crate::{
 	sending::{
-		Destination, SendingEvent, Service,
+		Destination, EduBuf, SendingEvent, Service,
 		data::{Keys, QueueItem},
 	},
-	test_utils::pdu_id,
+	test_utils::{fixture as service_fixture, pdu_id},
 };
 
 #[tokio::test]
@@ -286,6 +287,29 @@ async fn failure_streak_survives_replays() -> Result {
 
 	assert!(!carries(&active, &head));
 	assert!(matches!(statuses.get(&dest), Some(TransactionStatus::Running { tries: 0 })));
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn an_oversized_edu_is_left_out_of_its_transaction() -> Result {
+	// With federation off, a transaction left with anything to send fails.
+	let config = Figment::new().merge(("allow_federation", false));
+	let Some(fixture) = service_fixture(config).await? else {
+		return Ok(());
+	};
+
+	let sending = &fixture.services.sending;
+	let dest = Destination::Federation("remote.example".try_into()?);
+	let edu = format!(
+		r#"{{"edu_type":"m.presence","pad":"{}"}}"#,
+		"x".repeat(MAX_TRANSACTION_EDU_BYTES)
+	);
+	let item = enqueue(sending, &dest, SendingEvent::Edu(EduBuf::from_slice(edu.as_bytes())));
+	let Completion { result: Ok(_), .. } = sending.send_events(dest, vec![item], None).await
+	else {
+		return Err!("a transaction of one oversized EDU sends nothing and succeeds");
+	};
 
 	Ok(())
 }
