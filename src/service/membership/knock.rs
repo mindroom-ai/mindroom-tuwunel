@@ -537,7 +537,7 @@ async fn ingest_send_knock_state(
 		debug_warn!(?verdict, %room_id, drop_create, "MSC4311 knock create-event validation failed");
 	}
 
-	// Only full PDUs can be checked; the client still gets every entry.
+	// Only full PDUs can be checked.
 	let state = send_knock_response
 		.knock_room_state
 		.iter()
