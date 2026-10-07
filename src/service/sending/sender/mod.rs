@@ -117,6 +117,12 @@ pub const EDU_LIMIT: usize = 100;
 /// one unit and the envelope gets one, leaving the rest for EDUs.
 pub(super) const EDU_BYTES_LIMIT: usize = (200 - PDU_LIMIT - 1) * 65_536;
 
+/// Largest device key or cross-signing key accepted from a local client.
+///
+/// Other servers receive these keys in EDUs. This is the limit to-device
+/// content is held to, and keeps key EDUs well inside `EDU_BYTES_LIMIT`.
+pub const MAX_EDU_CONTENT_BYTES: usize = 65_536;
+
 #[implement(Service)]
 #[tracing::instrument(skip(self), level = "debug")]
 pub(super) async fn sender(self: Arc<Self>, id: usize) -> Result {

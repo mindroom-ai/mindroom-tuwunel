@@ -29,7 +29,7 @@ use self::worker::num_senders;
 pub use self::{
 	data::{Data, Park},
 	dest::Destination,
-	sender::{EDU_LIMIT, PDU_LIMIT},
+	sender::{EDU_LIMIT, MAX_EDU_CONTENT_BYTES, PDU_LIMIT},
 };
 use crate::rooms::timeline::RawPduId;
 
