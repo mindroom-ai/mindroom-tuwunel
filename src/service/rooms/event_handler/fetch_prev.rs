@@ -14,11 +14,11 @@ use ruma::{
 use serde_json::value::RawValue as RawJsonValue;
 use tokio::time::{Instant, timeout_at};
 use tuwunel_core::{
-	Result, err, implement,
+	Err, Result, err, implement,
 	matrix::{
 		Event, PduEvent,
 		event::gen_event_id,
-		pdu::{MAX_PREV_EVENTS, check_room_id},
+		pdu::{MAX_PREV_EVENTS, MAX_SERVED_PDU_BYTES, check_room_id},
 	},
 	utils::{
 		BoolExt,
@@ -355,6 +355,12 @@ async fn land_missing_event(
 	recursion_level: usize,
 	held_bytes: &AtomicUsize,
 ) -> Result {
+	if pdu.get().len() > MAX_SERVED_PDU_BYTES {
+		return Err!(BadServerResponse(
+			"missing-events pdu is larger than maximum of {MAX_SERVED_PDU_BYTES} bytes"
+		));
+	}
+
 	let value: CanonicalJsonObject = serde_json::from_str(pdu.get())
 		.map_err(|e| err!(BadServerResponse("missing-events pdu is not canonical json: {e}")))?;
 

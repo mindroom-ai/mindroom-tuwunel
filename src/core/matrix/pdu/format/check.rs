@@ -2,10 +2,24 @@ use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, ID_MAX_BYTES, RoomId, int,
 	room_version_rules::EventFormatRules,
 };
-use serde_json::to_string as to_json_string;
+use serde_json::{to_string as to_json_string, value::RawValue as RawJsonValue};
 
-use super::super::{MAX_AUTH_EVENTS, MAX_PDU_BYTES, MAX_PREV_EVENTS, Pdu};
+use super::super::{MAX_AUTH_EVENTS, MAX_PDU_BYTES, MAX_PREV_EVENTS, MAX_SERVED_PDU_BYTES, Pdu};
 use crate::{Err, Result, err};
+
+/// Rejects a PDU from another server longer than [`MAX_SERVED_PDU_BYTES`].
+///
+/// Callers check before parsing, since the parsed tree is many times the size
+/// of its JSON.
+pub fn check_raw_size(pdu: &RawJsonValue) -> Result {
+	if pdu.get().len() > MAX_SERVED_PDU_BYTES {
+		return Err!(Request(TooLarge(
+			"PDU is larger than maximum of {MAX_SERVED_PDU_BYTES} bytes"
+		)));
+	}
+
+	Ok(())
+}
 
 /// Verifies that a parsed PDU belongs to the expected room.
 ///
