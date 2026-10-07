@@ -4,7 +4,7 @@ use ruma::{
 };
 use serde_json::value::RawValue as RawJsonValue;
 use tuwunel_core::{Result, err, implement, result::FlatOk};
-use tuwunel_matrix::event::gen_event_id;
+use tuwunel_matrix::{event::gen_event_id, pdu::check_raw_size};
 
 use super::room_version_of;
 
@@ -20,6 +20,8 @@ type Parsed = (OwnedRoomId, OwnedEventId, CanonicalJsonObject);
     )
 )]
 pub async fn parse_incoming_pdu(&self, pdu: &RawJsonValue) -> Result<Parsed> {
+	check_raw_size(pdu)?;
+
 	let value: CanonicalJsonObject = serde_json::from_str(pdu.get()).map_err(|e| {
 		err!(BadServerResponse(debug_error!("Error parsing incoming event: {e} {pdu:#?}")))
 	})?;
