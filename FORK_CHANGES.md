@@ -313,6 +313,23 @@ ID. Upstream has the same bug. Files: `src/service/server_keys/verify.rs`,
 `src/service/membership/join.rs`, `src/core/matrix/pdu.rs`,
 `src/core/matrix/pdu/format.rs`; test in `src/service/membership/join/tests.rs`.
 
+### send_join response events pass the authorization rules
+
+Joining a room over federation installed the `state` and `auth_chain` of the
+`send_join` response after checking only their hashes, signatures and format;
+only the join event itself went through the authorization rules. A state event
+the rules reject, such as a membership event for another user of this server,
+or a create event that cannot belong to the room ID, became part of this
+server's room state. Each event of the response is now checked against its own
+auth events in depth order, and is accepted only if all of its auth events were
+accepted before it in the same response; a copy stored earlier, such as knock
+state, does not count. An event that is not accepted is not stored and stays
+out of the room state. A rejected create event, or one whose room version
+differs from the `make_join` answer, fails the join.
+Upstream has the same bug. Files: `src/service/membership/join.rs`,
+`src/service/rooms/event_handler/handle_outlier_pdu.rs`; test in
+`src/service/membership/join/tests.rs`.
+
 ### Failed appservice requests leave the `hs_token` out of the log
 
 An appservice request also sends the `hs_token` as the legacy `access_token`
