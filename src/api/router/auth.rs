@@ -37,8 +37,11 @@ use ruma::{
 use tuwunel_core::{Err, Result, utils::deadline_has_passed};
 use tuwunel_service::{Services, appservice::RegistrationInfo};
 
-pub(super) use self::dispatch::{AuthDispatch, Scheme};
 pub use self::uiaa::auth_uiaa;
+pub(super) use self::{
+	dispatch::{AuthDispatch, Scheme},
+	server::origin_key,
+};
 use super::request::Request;
 
 pub(super) enum Token {
