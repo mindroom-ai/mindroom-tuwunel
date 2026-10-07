@@ -13,6 +13,12 @@ type Removed = SmallVec<[ProfileFieldName; 1]>;
 
 type Fields = Vec<(ProfileFieldName, Option<Value>)>;
 
+/// The most fields a served profile may hold.
+///
+/// Every lookup refetches the profile and rewrites each field it serves or
+/// drops, so this bounds the work of one lookup; real profiles hold a handful.
+pub(super) const MAX_SERVED_PROFILE_FIELDS: usize = 100;
+
 /// Replaces a remote user's cached profile with the one their server serves.
 ///
 /// A cached field missing from the response is removed, so a value the remote
@@ -46,9 +52,9 @@ pub async fn mirror_remote_profile(&self, user_id: &UserId) -> Result<Removed> {
 ///
 /// Every returned field is written and every cached field the response omits
 /// is deleted in one logged write under the profile lock, so no concurrent
-/// write interleaves and connected clients see the removals. A response a
-/// local user could not have set, with a field name outside the MSC4133
-/// grammar or over the 64 KiB cap, is refused and the cache is left as it was.
+/// write interleaves and connected clients see the removals. A response with a
+/// field name outside the MSC4133 grammar, over the 64 KiB cap, or with more
+/// than 100 fields is refused and the cache is left as it was.
 #[implement(Service)]
 pub(super) async fn mirror_profile(
 	&self,
@@ -76,8 +82,13 @@ pub(super) async fn mirror_profile(
 	Ok(removed)
 }
 
-/// Checks a served profile against the field-name and size limits of a local one.
+/// Checks a served profile against the field-name and size limits of a local
+/// one, and against the field-count cap.
 fn check_served_profile(response: &Response) -> Result {
+	if response.iter().len() > MAX_SERVED_PROFILE_FIELDS {
+		return Err!(Request(ProfileTooLarge("Profile has more than 100 fields.")));
+	}
+
 	response
 		.iter()
 		.try_for_each(|(name, _)| check_profile_key(name))?;

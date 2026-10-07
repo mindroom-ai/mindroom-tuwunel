@@ -76,8 +76,10 @@ request. Each returned field was stored without the field-name grammar and
 longer returned was never removed, so the cached profile kept stale fields and
 grew with every new field name a server returned. The response now replaces the
 cached profile, as `!admin users refresh-profile` already did, and a response
-with a field name outside the MSC4133 grammar or over 64 KiB is refused without
-being stored. Upstream has the same bug. Files:
+with a field name outside the MSC4133 grammar, over 64 KiB, or with more than
+100 fields is refused without being stored. The field cap bounds the work of
+one lookup, which rewrites and logs every field the server serves or drops.
+Upstream has the same bug. Files:
 `src/service/profile/{mod.rs,remote.rs}`; test in
 `src/service/profile/tests/remote/mod.rs`.
 
@@ -478,6 +480,20 @@ events are now left out of knock state; the knocking user's own membership
 still comes from the knock event this server builds. Upstream has the same
 bug. Files: `src/service/membership/knock.rs`; test in
 `src/service/membership/knock/tests.rs`.
+
+### Knock state is checked before it is stored
+
+A knock on a room this server is not in stored every non-member
+`knock_room_state` event as an outlier under the event ID computed from it,
+unchecked, replacing any copy this server already had. A copy whose content no
+longer matched its hash kept the real event ID, so it could replace a stored
+event of any room, and events of other rooms were stored too. Knock state events
+are now checked as `send_join` events are: only a non-member full PDU of the
+knocked room whose signatures and content hash check out is stored, if this
+server has no copy yet, and enters the room's state. The knock state the client
+sees is built from that room state, so it now leaves out events that fail the
+check. Upstream has the same bug. Files: `src/service/membership/knock.rs`;
+test in `src/service/membership/knock/tests.rs`.
 
 ### A pending knock does not open a room over federation
 

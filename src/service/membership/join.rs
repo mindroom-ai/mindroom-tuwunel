@@ -694,7 +694,8 @@ async fn ingest_send_join_auth_chain(
 ///
 /// An event in the timeline keeps its stored copy, and so does any stored event
 /// whose new copy had to be redacted. A copy whose content matches its hash
-/// replaces an outlier, such as knock state stored unchecked.
+/// replaces an outlier, such as knock state stored unchecked by earlier
+/// versions.
 #[implement(Service)]
 async fn add_send_join_outlier(
 	&self,
