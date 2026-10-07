@@ -14,7 +14,7 @@ use ruma::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{Connection, Lists, MAX_SYNC_FIELDS, Room, Subscriptions};
+use super::{Connection, Lists, MAX_SYNC_FIELDS, REQUIRED_STATE_MAX, Room, Subscriptions};
 
 const LIST_ID: &str = "main";
 
@@ -308,6 +308,41 @@ fn update_cache_tracks_subscription_changes() {
 	assert!(!conn.update_cache(&request_with_subscription(room_id, expanded)));
 	assert!(conn.update_cache(&Request::new()));
 	assert!(!conn.update_cache(&Request::new()));
+}
+
+#[test]
+fn update_cache_keeps_only_the_first_required_state_selectors() {
+	let room_id = room_id!("!subscription:example.com");
+	let required_state: Vec<_> = (0..=REQUIRED_STATE_MAX)
+		.map(|key| (StateEventType::RoomMember, key.to_string().into()))
+		.collect();
+
+	let list = list_with_required_state(&[], required_state.clone());
+	let subscription = ListConfig {
+		required_state: required_state.clone(),
+		..Default::default()
+	};
+
+	let mut request = request_with_list(list.clone());
+
+	request.lists.insert("new".into(), list);
+	request.room_subscriptions = [(room_id.to_owned(), subscription)].into();
+
+	let mut conn = Connection::default();
+
+	assert!(conn.update_cache(&request_with_list(List::default())));
+	assert!(conn.update_cache(&request));
+	assert!(!conn.update_cache(&request));
+
+	let configs = conn
+		.lists
+		.values()
+		.map(|list| &list.room_details)
+		.chain(conn.subscriptions.values());
+
+	for config in configs {
+		assert_eq!(config.required_state, &required_state[..REQUIRED_STATE_MAX]);
+	}
 }
 
 #[test]

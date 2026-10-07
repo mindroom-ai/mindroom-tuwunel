@@ -131,6 +131,19 @@ minutes. The stored selectors are now collected into a hash set once per room.
 Upstream has the same bug. File: `src/api/client/sync/v5/rooms.rs`; test in
 `src/api/client/sync/v5/rooms/tests.rs`.
 
+### Sliding sync caps the required state selectors
+
+The `required_state` list of a sliding sync list or room subscription had no
+length limit. Each request copied, hashed and, on a room's initial pass, looked
+up every selector for every room in the window, and the connection kept a
+fingerprint of each selector per room and was stored after every response, so
+the cost grew with the rooms times the selectors. The connection now keeps only
+the first 256 selectors of each list and subscription, and a room uses at most
+256 selectors across the lists and the subscription that cover it. Upstream has
+the same bug. Files: `src/service/sync/mod.rs`,
+`src/api/client/sync/v5/rooms.rs`; tests in `src/service/sync/tests.rs` and
+`src/api/client/sync/v5/rooms/tests.rs`.
+
 ### EDUs sent to other servers are bounded in size
 
 Device keys and cross-signing keys a local client uploaded were stored with no

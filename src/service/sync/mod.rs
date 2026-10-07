@@ -15,6 +15,7 @@ use ruma::{
 		ConnId as ConnectionId, ListId, Request, request,
 		request::{AccountData, E2EE, Profiles, Receipts, ToDevice, Typing},
 	},
+	events::{StateEventType, StateKey},
 	profile::ProfileFieldName,
 };
 use serde::{Deserialize, Serialize};
@@ -104,6 +105,12 @@ pub type RequiredState = SmallVec<[u64; 18]>;
 ///
 /// Both values advance together only after a room payload is assembled.
 pub type RoomConfig = (u64, RequiredState);
+
+/// The most required-state selectors one list, room subscription or room uses.
+///
+/// Each selector costs a lookup and a stored fingerprint for every room it
+/// applies to, so only the first this many selectors of a longer list are kept.
+pub const REQUIRED_STATE_MAX: usize = 256;
 
 type Connections = TokioMutex<BTreeMap<ConnectionKey, ConnectionVal>>;
 pub type ConnectionVal = Arc<TokioMutex<Connection>>;
@@ -390,9 +397,10 @@ fn update_cache_lists(request: &Request, cached: &mut Self) -> bool {
 			let list_changed = match cached.lists.get_mut(list_id) {
 				| Some(cached_list) => Self::update_cache_list(request_list, cached_list),
 				| None => {
-					cached
-						.lists
-						.insert(list_id.clone(), request_list.clone());
+					// A new list is merged into an empty one, so it is capped the same way.
+					let cached_list = cached.lists.entry(list_id.clone()).or_default();
+
+					Self::update_cache_list(request_list, cached_list);
 
 					true
 				},
@@ -408,8 +416,9 @@ fn update_cache_list(request: &request::List, cached: &mut request::List) -> boo
 	let timeline_limit_changed =
 		request.room_details.timeline_limit != cached.room_details.timeline_limit;
 
-	let required_state_changed = !request.room_details.required_state.is_empty()
-		&& request.room_details.required_state != cached.room_details.required_state;
+	let required_state = kept_required_state(&request.room_details);
+	let required_state_changed =
+		!required_state.is_empty() && required_state != cached.room_details.required_state;
 
 	let filters_changed = request.filters.as_ref().is_some_and(|request| {
 		cached
@@ -428,10 +437,7 @@ fn update_cache_list(request: &request::List, cached: &mut request::List) -> boo
 	cached.room_details.timeline_limit = request.room_details.timeline_limit;
 
 	if required_state_changed {
-		cached
-			.room_details
-			.required_state
-			.clone_from(&request.room_details.required_state);
+		cached.room_details.required_state = required_state.to_vec();
 	}
 
 	if filters_changed {
@@ -449,6 +455,10 @@ fn update_cache_subscriptions(request: &Request, cached: &mut Self) -> bool {
 		cached
 			.subscriptions
 			.clone_from(&request.room_subscriptions);
+
+		for config in cached.subscriptions.values_mut() {
+			config.required_state = kept_required_state(config).to_vec();
+		}
 	}
 
 	changed
@@ -466,7 +476,15 @@ fn subscriptions_are_equal(request: &Subscriptions, cached: &Subscriptions) -> b
 
 fn list_config_is_equal(request: &request::ListConfig, cached: &request::ListConfig) -> bool {
 	request.timeline_limit == cached.timeline_limit
-		&& request.required_state == cached.required_state
+		&& kept_required_state(request) == cached.required_state
+}
+
+/// The required-state selectors a connection keeps of a list or room
+/// subscription: the first [`REQUIRED_STATE_MAX`].
+fn kept_required_state(config: &request::ListConfig) -> &[(StateEventType, StateKey)] {
+	let required_state = &config.required_state;
+
+	&required_state[..required_state.len().min(REQUIRED_STATE_MAX)]
 }
 
 fn list_filters_are_equal(request: &request::ListFilters, cached: &request::ListFilters) -> bool {
