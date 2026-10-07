@@ -96,8 +96,10 @@ request. Each returned field was stored without the field-name grammar and
 longer returned was never removed, so the cached profile kept stale fields and
 grew with every new field name a server returned. The response now replaces the
 cached profile, as `!admin users refresh-profile` already did, and a response
-with a field name outside the MSC4133 grammar or over 64 KiB is refused without
-being stored. Upstream has the same bug. Files:
+with a field name outside the MSC4133 grammar, over 64 KiB, or with more than
+100 fields is refused without being stored. The field cap bounds the work of
+one lookup, which rewrites and logs every field the server serves or drops.
+Upstream has the same bug. Files:
 `src/service/profile/{mod.rs,remote.rs}`; test in
 `src/service/profile/tests/remote/mod.rs`.
 
@@ -147,6 +149,19 @@ list, so the cost grew with the product of the current entries and the stored
 selectors, and a request with a million selectors kept a worker busy for
 minutes. The stored selectors are now collected into a hash set once per room.
 Upstream has the same bug. File: `src/api/client/sync/v5/rooms.rs`; test in
+`src/api/client/sync/v5/rooms/tests.rs`.
+
+### Sliding sync caps the required state selectors
+
+The `required_state` list of a sliding sync list or room subscription had no
+length limit. Each request copied, hashed and, on a room's initial pass, looked
+up every selector for every room in the window, and the connection kept a
+fingerprint of each selector per room and was stored after every response, so
+the cost grew with the rooms times the selectors. The connection now keeps only
+the first 256 selectors of each list and subscription, and a room uses at most
+256 selectors across the lists and the subscription that cover it. Upstream has
+the same bug. Files: `src/service/sync/mod.rs`,
+`src/api/client/sync/v5/rooms.rs`; tests in `src/service/sync/tests.rs` and
 `src/api/client/sync/v5/rooms/tests.rs`.
 
 ### EDUs sent to other servers are bounded in size
@@ -420,6 +435,23 @@ federation response limit first. Upstream has the same bug. Files:
 `src/service/federation/execute.rs`; test in
 `src/main/tests/federation_event_response_limit.rs`.
 
+### An incoming event's fetches share its limits
+
+The walk over an incoming event's missing prev events queued a fetch for every
+prev event of each event it walked, up to 20 each, but counted only the walked
+events against `max_fetch_prev_events`. The queued fetches all run at once and
+keep their results, so one incoming event could start about 20 times that many.
+The walk now counts every event it queues. The `/get_missing_events` batch
+fetched before the walk asks for 10 events but stored every event the remote
+server answered with; it now stores at most 10. Each auth chain fetch started
+for the incoming event, for its own auth events, for each prev event the walk
+fetches and for each event of that batch, also had its own limit of
+`max_fetch_prev_events` times 64 KiB; they now share one. Upstream has the same
+bugs. Files: `src/service/rooms/event_handler/fetch_prev.rs`,
+`src/service/rooms/event_handler/fetch_auth.rs`,
+`src/service/rooms/event_handler/handle_incoming_pdu.rs`; tests in
+`src/main/tests/auth_chain_fetch_budget.rs`.
+
 ### `ip_range_denylist` covers IPv4-mapped IPv6 addresses
 
 An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) was matched against the denylist
@@ -485,6 +517,20 @@ events are now left out of knock state; the knocking user's own membership
 still comes from the knock event this server builds. Upstream has the same
 bug. Files: `src/service/membership/knock.rs`; test in
 `src/service/membership/knock/tests.rs`.
+
+### Knock state is checked before it is stored
+
+A knock on a room this server is not in stored every non-member
+`knock_room_state` event as an outlier under the event ID computed from it,
+unchecked, replacing any copy this server already had. A copy whose content no
+longer matched its hash kept the real event ID, so it could replace a stored
+event of any room, and events of other rooms were stored too. Knock state events
+are now checked as `send_join` events are: only a non-member full PDU of the
+knocked room whose signatures and content hash check out is stored, if this
+server has no copy yet, and enters the room's state. The knock state the client
+sees is built from that room state, so it now leaves out events that fail the
+check. Upstream has the same bug. Files: `src/service/membership/knock.rs`;
+test in `src/service/membership/knock/tests.rs`.
 
 ### A pending knock does not open a room over federation
 

@@ -18,12 +18,13 @@ use ruma::{
 		StateEventType,
 		room::member::{MembershipState, RoomMemberEventContent},
 	},
+	signatures::Verified,
 };
 use tuwunel_core::{
 	Err, Event, PduCount, Result, async_noinline, at, debug, debug_info, debug_warn, err,
 	implement, info,
 	matrix::{event::gen_event_id, room_version::rules as room_version_rules},
-	pdu::{PduBuilder, PduEvent, from_incoming_federation},
+	pdu::{PduBuilder, PduEvent},
 	trace, utils, warn,
 };
 
@@ -513,11 +514,6 @@ async fn execute_send_knock(
 }
 
 #[implement(Service)]
-#[expect(
-	deprecated,
-	reason = "Matrix 1.16 still permits receiving the legacy stripped variant for backwards \
-	          compatibility."
-)]
 async fn ingest_send_knock_state(
 	&self,
 	room_id: &RoomId,
@@ -541,21 +537,35 @@ async fn ingest_send_knock_state(
 		debug_warn!(?verdict, %room_id, drop_create, "MSC4311 knock create-event validation failed");
 	}
 
+	// Only full PDUs can be checked.
 	let state = send_knock_response
 		.knock_room_state
 		.iter()
 		.filter_map(|event| match event {
-			| RawStrippedState::Pdu(raw) =>
-				serde_json::from_str::<CanonicalJsonObject>(raw.get()).ok(),
-			| RawStrippedState::Stripped(raw) =>
-				serde_json::from_str::<CanonicalJsonObject>(raw.json().get()).ok(),
+			| RawStrippedState::Pdu(raw) => Some(raw),
+			| _ => None,
 		});
+
+	self.services
+		.server_keys
+		.acquire_events_pubkeys(state.clone())
+		.await;
 
 	let rules = room_version_rules(room_version_id)?;
 
 	let mut state_map: HashMap<u64, OwnedEventId> = HashMap::new();
 
-	for event in state {
+	for pdu in state {
+		let Ok((event_id, event, Verified::All)) = self
+			.services
+			.server_keys
+			.validate_and_add_event_id_no_fetch(pdu, room_version_id)
+			.await
+		else {
+			debug_warn!("Knock response state event failed verification.");
+			continue;
+		};
+
 		let Some(state_key) = event.get("state_key") else {
 			debug_warn!(?event, "Knock response state event lacks a state key.");
 			continue;
@@ -583,24 +593,29 @@ async fn ingest_send_knock_state(
 			continue;
 		}
 
-		// Forcing this state replays its memberships, and nothing here is
-		// verified; the knock itself sets our user's membership.
+		// Forcing this state replays its memberships, which the answering server
+		// picks; the knock itself sets our user's membership.
 		if event_type == StateEventType::RoomMember {
 			continue;
 		}
 
-		let event_id = gen_event_id(&event, room_version_id)?;
+		let Ok((_, event)) = PduEvent::from_object_federation(room_id, &event_id, event, &rules)
+		else {
+			debug_warn!(%event_id, "Knock response state event is invalid for this room.");
+			continue;
+		};
+
 		let shortstatekey = self
 			.services
 			.short
 			.get_or_create_shortstatekey(&event_type, &state_key)
 			.await;
 
-		let event = from_incoming_federation(room_id, &event_id, event, &rules);
-
-		self.services
-			.timeline
-			.add_pdu_outlier(&event_id, &event);
+		if !self.services.timeline.pdu_exists(&event_id).await {
+			self.services
+				.timeline
+				.add_pdu_outlier(&event_id, &event);
+		}
 
 		state_map.insert(shortstatekey, event_id.clone());
 	}

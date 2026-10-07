@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicUsize;
+
 use futures::{FutureExt, TryFutureExt, TryStreamExt, future::try_join5};
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, RoomId, ServerName, UserId,
@@ -148,8 +150,21 @@ pub async fn handle_incoming_pdu<'a>(
 	let room_version = from_create_event(&create_event)?;
 	let recursion_level = 0;
 
+	// The auth chain walks started for this event, for its own auth events and
+	// for its missing prev events, share one bound on the bytes they fetch.
+	let held_bytes = AtomicUsize::new(0);
+
 	let (incoming_pdu, pdu) = self
-		.handle_outlier_pdu(origin, room_id, event_id, pdu, &room_version, recursion_level, false)
+		.handle_outlier_pdu(
+			origin,
+			room_id,
+			event_id,
+			pdu,
+			&room_version,
+			recursion_level,
+			&held_bytes,
+			false,
+		)
 		.await?;
 
 	// 8. if not timeline event: stop
@@ -221,7 +236,7 @@ pub async fn handle_incoming_pdu<'a>(
 	// 9. Fetch any missing prev events doing all checks listed here starting at 1.
 	//    These are timeline events
 	let fetch = self
-		.fetch_prev(upgrade, incoming_pdu.prev_events())
+		.fetch_prev(upgrade, incoming_pdu.prev_events(), &held_bytes)
 		.await;
 
 	let stopping = self.services.server.is_stopping();

@@ -7,7 +7,7 @@ use ruma::{
 use serde_json::{Value, json};
 use tuwunel_core::{Result, config::Figment, utils::stream::ReadyExt};
 
-use super::super::{MAX_PROFILE_SIZE, Service};
+use super::super::{MAX_PROFILE_SIZE, Service, remote::MAX_SERVED_PROFILE_FIELDS};
 use crate::test_utils::fixture;
 
 const KEPT: &str = "com.example.kept";
@@ -81,6 +81,33 @@ async fn mirror_refuses_a_profile_a_local_user_could_not_set() -> Result {
 			.await
 			.unwrap_err();
 	}
+
+	assert_eq!(field(service, user_id, KEPT).await?, json!("old"));
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn mirror_refuses_a_profile_with_too_many_fields() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let service = &fixture.services.profile;
+	let user_id = user_id!("@nyx:remote.example");
+
+	service
+		.set_profile_keys(user_id, &[(KEPT.into(), Some(json!("old")))], None)
+		.await?;
+
+	let response: Response = (0..=MAX_SERVED_PROFILE_FIELDS)
+		.map(|i| (format!("f{i}"), json!(0)))
+		.collect();
+
+	service
+		.mirror_profile(user_id, response)
+		.await
+		.unwrap_err();
 
 	assert_eq!(field(service, user_id, KEPT).await?, json!("old"));
 
