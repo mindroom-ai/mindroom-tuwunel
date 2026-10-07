@@ -664,9 +664,15 @@ device removal delete only the token the device points at, so the other one
 stayed. A refresh already in flight could also issue tokens to a device removed
 meanwhile. `set_access_token` now takes the per-device lock that
 `remove_device` already holds and refuses a device that no longer exists, so
-concurrent refreshes rotate one after another. Upstream has the same bug. File:
-`src/service/users/device.rs`; test in
-`src/main/tests/refresh_removed_device.rs`.
+concurrent refreshes rotate one after another. Both refresh endpoints classified
+the presented token before taking that lock, so two refreshes of one token
+could still both find it current and rotate it twice; they now rotate through
+`rotate_refresh_token`, which classifies the token again under the lock, and
+the later request takes the grace path and returns the same successor.
+Upstream has the same bug. Files: `src/service/users/device.rs`,
+`src/api/client/session/refresh.rs`, `src/api/oidc/token.rs`; tests in
+`src/main/tests/refresh_removed_device.rs` and
+`src/main/tests/refresh_concurrent.rs`.
 
 ### SSO username fallback skips accounts linked to another identity
 
