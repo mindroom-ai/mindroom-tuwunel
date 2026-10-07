@@ -49,17 +49,18 @@ pub(super) async fn fetch_auth<'a, Events>(
 	events: Events,
 	room_version: &RoomVersionId,
 	recursion_level: usize,
+	held_bytes: &AtomicUsize,
 ) -> Vec<(PduEvent, Option<CanonicalJsonObject>)>
 where
 	Events: Iterator<Item = &'a EventId> + Clone + Send,
 {
 	// Every walk keeps the events it fetched until all walks have ended, so they
-	// share one bound on the bytes they hold.
-	let held_bytes = AtomicUsize::new(0);
+	// share one bound on the bytes they hold. Calls that run together share it
+	// too, through the same `held_bytes`.
 	let events_with_auth_events: Vec<_> = events
 		.stream()
 		.broad_then(|event_id| {
-			self.fetch_auth_chain(origin, room_id, event_id, room_version, &held_bytes)
+			self.fetch_auth_chain(origin, room_id, event_id, room_version, held_bytes)
 		})
 		.collect()
 		.boxed() // size firewall
@@ -107,6 +108,7 @@ where
 							value,
 							room_version,
 							expected!(recursion_level + 1),
+							held_bytes,
 							true,
 						))
 						.await
