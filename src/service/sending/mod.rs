@@ -29,7 +29,7 @@ use tuwunel_core::{
 pub use self::{
 	data::{Data, Park},
 	dest::Destination,
-	sender::{EDU_LIMIT, PDU_LIMIT},
+	sender::{EDU_LIMIT, MAX_EDU_CONTENT_BYTES, PDU_LIMIT},
 };
 use self::{queue::Control, worker::num_senders};
 use crate::rooms::timeline::RawPduId;
