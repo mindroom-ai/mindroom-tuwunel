@@ -18,7 +18,7 @@ use tuwunel_core::{
 	matrix::{
 		Event, PduEvent,
 		event::gen_event_id,
-		pdu::{MAX_PREV_EVENTS, check_room_id},
+		pdu::{MAX_PREV_EVENTS, MAX_SERVED_PDU_BYTES, check_room_id},
 	},
 	utils::{
 		BoolExt,
@@ -28,7 +28,7 @@ use tuwunel_core::{
 
 use super::handle_prev_pdu::PrevUpgrade;
 use crate::{
-	fetcher::{EventWindow, MAX_SERVED_PDU_BYTES, Op, Opts},
+	fetcher::{EventWindow, Op, Opts},
 	rooms::state_res::topological_sort,
 };
 

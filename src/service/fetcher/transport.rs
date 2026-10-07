@@ -23,10 +23,11 @@ use ruma::{
 };
 use tuwunel_core::{
 	Result, err,
+	matrix::pdu::MAX_SERVED_PDU_BYTES,
 	utils::{BoolExt, math::ruma_from_usize_saturating},
 };
 
-use super::{Op, Opts, validate::MAX_SERVED_PDU_BYTES};
+use super::{Op, Opts};
 use crate::services::OnceServices;
 
 /// Largest `/event` response read: the served PDU and the few fields around

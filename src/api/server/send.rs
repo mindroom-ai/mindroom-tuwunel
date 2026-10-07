@@ -9,8 +9,8 @@ use std::{
 use axum::extract::State;
 use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue, MilliSecondsSinceUnixEpoch, OwnedDeviceId,
-	OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, ServerName, TransactionId, UserId,
+	MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId,
+	ServerName, TransactionId, UserId,
 	api::{
 		error::ErrorKind,
 		federation::transactions::{
@@ -28,6 +28,8 @@ use ruma::{
 	to_device::DeviceIdOrAllDevices,
 	uint,
 };
+use serde::Deserialize;
+use serde_json::value::RawValue as RawJsonValue;
 use tuwunel_core::{
 	Err, Error, Result, debug,
 	debug::INFO_SPAN_LEVEL,
@@ -54,10 +56,12 @@ use tuwunel_service::{
 use crate::{ClientIp, Ruma, client::room_event_pdu_id};
 
 type ResolvedMap = BTreeMap<OwnedEventId, Result>;
-type RoomsPdus = SmallVec<[RoomPdus; 1]>;
-type RoomPdus = (OwnedRoomId, TxnPdus);
-type TxnPdus = SmallVec<[(usize, Pdu); 1]>;
-type Pdu = (OwnedRoomId, OwnedEventId, CanonicalJsonObject);
+type RoomsPdus<'a> = SmallVec<[RoomPdus<'a>; 1]>;
+type RoomPdus<'a> = (OwnedRoomId, TxnPdus<'a>);
+type TxnPdus<'a> = SmallVec<[(usize, Pdu<'a>); 1]>;
+
+/// A PDU's room and event id, with its JSON kept raw until its room's turn.
+type Pdu<'a> = (OwnedRoomId, OwnedEventId, &'a RawJsonValue);
 
 /// Recipient devices of one `AllDevices` to-device send paired with their
 /// inbox counts.
@@ -123,7 +127,7 @@ pub(crate) async fn send_transaction_message_route(
 				.event_handler
 				.parse_incoming_pdu(pdu)
 				.inspect_err(move |e| debug_warn!("Could not parse PDU[{i}]: {e}"))
-				.map_ok(move |pdu| (i, pdu))
+				.map_ok(move |(room_id, event_id, _)| (i, (room_id, event_id, &**pdu)))
 				.ok()
 		});
 
@@ -182,7 +186,7 @@ async fn handle(
 	origin: &ServerName,
 	txn_id: &TransactionId,
 	started: Instant,
-	pdus: impl Stream<Item = (usize, Pdu)> + Send,
+	pdus: impl Stream<Item = (usize, Pdu<'_>)> + Send,
 	edus: impl Stream<Item = (usize, Edu)> + Send,
 ) -> Result<ResolvedMap> {
 	let results = handle_pdus(services, client, origin, txn_id, started, pdus).await?;
@@ -198,11 +202,11 @@ async fn handle_pdus(
 	origin: &ServerName,
 	txn_id: &TransactionId,
 	started: Instant,
-	pdus: impl Stream<Item = (usize, Pdu)> + Send,
+	pdus: impl Stream<Item = (usize, Pdu<'_>)> + Send,
 ) -> Result<ResolvedMap> {
 	pdus.collect()
 		.map(Ok)
-		.map_ok(|pdus: TxnPdus| {
+		.map_ok(|pdus: TxnPdus<'_>| {
 			pdus.into_iter()
 				.sorted_by(|(_, (room_a, ..)), (_, (room_b, ..))| room_a.cmp(room_b))
 				.into_grouping_map_by(|(_, (room_id, ..))| room_id.clone())
@@ -211,7 +215,7 @@ async fn handle_pdus(
 				.try_stream()
 		})
 		.try_flatten_stream()
-		.try_collect::<RoomsPdus>()
+		.try_collect::<RoomsPdus<'_>>()
 		.map_ok(IntoIterator::into_iter)
 		.map_ok(IterStream::try_stream)
 		.try_flatten_stream()
@@ -239,7 +243,7 @@ async fn handle_room(
 	txn_id: &TransactionId,
 	txn_start_time: Instant,
 	ref room_id: OwnedRoomId,
-	pdus: TxnPdus,
+	pdus: TxnPdus<'_>,
 ) -> Result<ResolvedMap> {
 	let pdus = sort_pdus(pdus).await;
 
@@ -254,9 +258,9 @@ async fn handle_room(
 				.and_then(async |pdu| {
 					services.server.check_running().map(|()| pdu) // interruption point
 				})
-				.and_then(|(ri, (ti, (room_id, event_id, value)))| {
+				.and_then(|(ri, (ti, (room_id, event_id, pdu)))| {
 					let meta = (origin, txn_id, txn_start_time, ti);
-					let pdu = (ri, (room_id, event_id, value));
+					let pdu = (ri, (room_id, event_id, pdu));
 					handle_pdu(services, meta, pdu).map(Ok)
 				})
 				.try_collect()
@@ -269,7 +273,7 @@ async fn handle_room(
 /// it references. An already-ordered batch is returned unchanged; references to
 /// events outside the batch are non-edges. The sort is an optimization, so a
 /// failure falls back to the arrival order.
-async fn sort_pdus(mut pdus: TxnPdus) -> TxnPdus {
+async fn sort_pdus(mut pdus: TxnPdus<'_>) -> TxnPdus<'_> {
 	if already_sorted(&pdus) {
 		return pdus;
 	}
@@ -281,8 +285,8 @@ async fn sort_pdus(mut pdus: TxnPdus) -> TxnPdus {
 
 	let graph = pdus
 		.iter()
-		.map(|(_, (_, event_id, value))| {
-			let references = prev_event_ids(value)
+		.map(|(_, (_, event_id, pdu))| {
+			let references = prev_event_ids(pdu)
 				.filter_map(|prev| event_ids.get(prev).copied())
 				.map(ToOwned::to_owned)
 				.collect();
@@ -312,22 +316,26 @@ async fn sort_pdus(mut pdus: TxnPdus) -> TxnPdus {
 
 /// Whether the batch is already in causal order, in which case the sort can be
 /// skipped.
-fn already_sorted(pdus: &[(usize, Pdu)]) -> bool {
+fn already_sorted(pdus: &[(usize, Pdu<'_>)]) -> bool {
 	is_topologically_sorted_in_place(
 		pdus,
 		|(_, (_, id, _))| id.as_str(),
-		|(_, (_, _, value))| prev_event_ids(value),
+		|(_, (_, _, pdu))| prev_event_ids(pdu),
 	)
 }
 
-/// The `prev_events` of a PDU held as canonical JSON.
-fn prev_event_ids(value: &CanonicalJsonObject) -> impl Iterator<Item = &str> + '_ {
-	value
-		.get("prev_events")
-		.and_then(CanonicalJsonValue::as_array)
+/// The `prev_events` of a PDU, read from its JSON without parsing the rest.
+fn prev_event_ids(pdu: &RawJsonValue) -> impl Iterator<Item = &str> + '_ {
+	#[derive(Deserialize)]
+	struct PrevEvents<'a> {
+		#[serde(borrow, default)]
+		prev_events: Vec<&'a str>,
+	}
+
+	serde_json::from_str::<PrevEvents<'_>>(pdu.get())
+		.map(|prev| prev.prev_events)
+		.unwrap_or_default()
 		.into_iter()
-		.flatten()
-		.filter_map(CanonicalJsonValue::as_str)
 }
 
 #[tracing::instrument(
@@ -339,7 +347,7 @@ fn prev_event_ids(value: &CanonicalJsonObject) -> impl Iterator<Item = &str> + '
 async fn handle_pdu(
 	services: &Services,
 	(origin, txn_id, txn_start_time, ti): (&ServerName, &TransactionId, Instant, usize),
-	(ri, (ref room_id, event_id, value)): (usize, Pdu),
+	(ri, (ref room_id, event_id, pdu)): (usize, Pdu<'_>),
 ) -> (OwnedEventId, Result) {
 	let pdu_start_time = Instant::now();
 	let completed: AtomicBool = Default::default();
@@ -363,11 +371,17 @@ async fn handle_pdu(
 		}
 	}}
 
-	let result = services
-		.event_handler
-		.handle_incoming_pdu(origin, room_id, &event_id, value, true)
-		.map_ok(|_| ())
-		.await;
+	// Parsed only now, under the room's lock, so a PDU waiting for its turn
+	// holds no JSON tree.
+	let result = match serde_json::from_str(pdu.get()) {
+		| Ok(value) =>
+			services
+				.event_handler
+				.handle_incoming_pdu(origin, room_id, &event_id, value, true)
+				.map_ok(|_| ())
+				.await,
+		| Err(e) => Err(e.into()),
+	};
 
 	completed.store(true, Ordering::Release);
 	debug!(
@@ -876,18 +890,20 @@ async fn handle_edu_signing_key_update(
 
 #[cfg(test)]
 mod tests {
-	use ruma::{CanonicalJsonObject, OwnedEventId, event_id, room_id};
-	use serde_json::json;
+	use ruma::{OwnedEventId, event_id, room_id};
+	use serde_json::{
+		json,
+		value::{RawValue as RawJsonValue, to_raw_value},
+	};
 
 	use super::{Pdu, TxnPdus, already_sorted, prev_event_ids, sort_pdus};
 
-	fn pdu(index: usize, id: &OwnedEventId, prev: &[&OwnedEventId]) -> (usize, Pdu) {
-		let prev_events: Vec<&str> = prev.iter().map(|e| e.as_str()).collect();
-		let value: CanonicalJsonObject =
-			serde_json::from_value(json!({ "prev_events": prev_events }))
-				.expect("valid canonical json");
+	fn raw(prev: &[&OwnedEventId]) -> Box<RawJsonValue> {
+		to_raw_value(&json!({ "prev_events": prev })).expect("valid json")
+	}
 
-		(index, (room_id!("!r:example.com").to_owned(), id.clone(), value))
+	fn pdu<'a>(index: usize, id: &OwnedEventId, raw: &'a RawJsonValue) -> (usize, Pdu<'a>) {
+		(index, (room_id!("!r:example.com").to_owned(), id.clone(), raw))
 	}
 
 	fn ids() -> (OwnedEventId, OwnedEventId, OwnedEventId) {
@@ -898,7 +914,7 @@ mod tests {
 		)
 	}
 
-	fn order(pdus: &[(usize, Pdu)]) -> Vec<&str> {
+	fn order<'a>(pdus: &'a [(usize, Pdu<'_>)]) -> Vec<&'a str> {
 		pdus.iter()
 			.map(|(_, (_, id, _))| id.as_str())
 			.collect()
@@ -907,7 +923,8 @@ mod tests {
 	#[test]
 	fn sorted_when_parents_lead() {
 		let (a, b, c) = ids();
-		let pdus = [pdu(0, &a, &[]), pdu(1, &b, &[&a]), pdu(2, &c, &[&b])];
+		let (ra, rb, rc) = (raw(&[]), raw(&[&a]), raw(&[&b]));
+		let pdus = [pdu(0, &a, &ra), pdu(1, &b, &rb), pdu(2, &c, &rc)];
 
 		assert!(already_sorted(&pdus));
 	}
@@ -915,7 +932,8 @@ mod tests {
 	#[test]
 	fn unsorted_when_child_leads() {
 		let (a, b, _c) = ids();
-		let pdus = [pdu(0, &b, &[&a]), pdu(1, &a, &[])];
+		let (ra, rb) = (raw(&[]), raw(&[&a]));
+		let pdus = [pdu(0, &b, &rb), pdu(1, &a, &ra)];
 
 		assert!(!already_sorted(&pdus));
 	}
@@ -923,7 +941,8 @@ mod tests {
 	#[test]
 	fn sorted_ignores_out_of_batch_references() {
 		let (a, b, c) = ids();
-		let pdus = [pdu(0, &b, &[&c]), pdu(1, &a, &[&c])];
+		let rc = raw(&[&c]);
+		let pdus = [pdu(0, &b, &rc), pdu(1, &a, &rc)];
 
 		assert!(already_sorted(&pdus));
 	}
@@ -931,7 +950,8 @@ mod tests {
 	#[tokio::test]
 	async fn sort_orders_parents_before_children() {
 		let (a, b, c) = ids();
-		let pdus: TxnPdus = [pdu(0, &c, &[&b]), pdu(1, &b, &[&a]), pdu(2, &a, &[])]
+		let (ra, rb, rc) = (raw(&[]), raw(&[&a]), raw(&[&b]));
+		let pdus: TxnPdus<'_> = [pdu(0, &c, &rc), pdu(1, &b, &rb), pdu(2, &a, &ra)]
 			.into_iter()
 			.collect();
 
@@ -943,7 +963,8 @@ mod tests {
 	#[tokio::test]
 	async fn sort_is_noop_when_already_ordered() {
 		let (a, b, c) = ids();
-		let pdus: TxnPdus = [pdu(0, &a, &[]), pdu(1, &b, &[&a]), pdu(2, &c, &[&b])]
+		let (ra, rb, rc) = (raw(&[]), raw(&[&a]), raw(&[&b]));
+		let pdus: TxnPdus<'_> = [pdu(0, &a, &ra), pdu(1, &b, &rb), pdu(2, &c, &rc)]
 			.into_iter()
 			.collect();
 
@@ -955,7 +976,8 @@ mod tests {
 	#[tokio::test]
 	async fn sort_preserves_duplicates() {
 		let (a, b, _c) = ids();
-		let pdus: TxnPdus = [pdu(0, &b, &[&a]), pdu(1, &a, &[]), pdu(2, &b, &[&a])]
+		let (ra, rb) = (raw(&[]), raw(&[&a]));
+		let pdus: TxnPdus<'_> = [pdu(0, &b, &rb), pdu(1, &a, &ra), pdu(2, &b, &rb)]
 			.into_iter()
 			.collect();
 
@@ -967,7 +989,8 @@ mod tests {
 	#[tokio::test]
 	async fn sort_preserves_a_cycle() {
 		let (a, b, _c) = ids();
-		let pdus: TxnPdus = [pdu(0, &a, &[&b]), pdu(1, &b, &[&a])]
+		let (ra, rb) = (raw(&[&b]), raw(&[&a]));
+		let pdus: TxnPdus<'_> = [pdu(0, &a, &ra), pdu(1, &b, &rb)]
 			.into_iter()
 			.collect();
 
@@ -978,18 +1001,18 @@ mod tests {
 
 	#[test]
 	fn prev_event_ids_reads_the_array() {
-		let (a, b, _c) = ids();
-		let (_, (_, _, value)) = pdu(0, &a, &[&b]);
+		let (_a, b, _c) = ids();
+		let raw = raw(&[&b]);
 
-		let prev: Vec<&str> = prev_event_ids(&value).collect();
+		let prev: Vec<&str> = prev_event_ids(&raw).collect();
 
 		assert_eq!(prev, ["$b:example.com"]);
 	}
 
 	#[test]
 	fn prev_event_ids_empty_when_absent() {
-		let value = CanonicalJsonObject::new();
+		let raw = to_raw_value(&json!({})).expect("valid json");
 
-		assert_eq!(prev_event_ids(&value).count(), 0);
+		assert_eq!(prev_event_ids(&raw).count(), 0);
 	}
 }

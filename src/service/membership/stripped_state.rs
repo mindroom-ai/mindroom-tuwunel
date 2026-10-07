@@ -11,7 +11,10 @@ use ruma::{
 	serde::{JsonObject, Raw},
 };
 use serde::Deserialize;
-use tuwunel_core::{Event, PduEvent, Result, implement, matrix::event::gen_event_id};
+use tuwunel_core::{
+	Event, PduEvent, Result, implement,
+	matrix::{event::gen_event_id, pdu::MAX_SERVED_PDU_BYTES},
+};
 
 use super::Service;
 
@@ -216,10 +219,11 @@ pub async fn validate_stripped_create(
 	room_version_id: &RoomVersionId,
 ) -> Result<StrippedCreateVerdict> {
 	let create = state.iter().find_map(|event| match event {
-		| RawStrippedState::Pdu(raw) => serde_json::from_str::<CanonicalJsonObject>(raw.get())
-			.ok()
-			.filter(is_create),
-		| RawStrippedState::Stripped(_) => None,
+		| RawStrippedState::Pdu(raw) if raw.get().len() <= MAX_SERVED_PDU_BYTES =>
+			serde_json::from_str::<CanonicalJsonObject>(raw.get())
+				.ok()
+				.filter(is_create),
+		| RawStrippedState::Pdu(_) | RawStrippedState::Stripped(_) => None,
 	});
 
 	let Some(mut create) = create else {

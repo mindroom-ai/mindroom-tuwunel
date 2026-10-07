@@ -15,7 +15,9 @@ use serde_json::value::RawValue as RawJsonValue;
 use tuwunel_core::{
 	Err, Result, at, debug_error, err,
 	itertools::Itertools,
-	matrix::{RoomVersionRules, event::gen_event_id_canonical_json, room_version},
+	matrix::{
+		RoomVersionRules, event::gen_event_id_canonical_json, pdu::check_raw_size, room_version,
+	},
 	utils::{
 		BoolExt,
 		future::{BoolExt as _, ReadyBoolExt},
@@ -100,6 +102,7 @@ async fn create_join_event(
 	// hashes checks
 	let room_version_id = services.state.get_room_version(room_id).await?;
 
+	check_raw_size(pdu)?;
 	let Ok((event_id, mut value)) = gen_event_id_canonical_json(pdu, &room_version_id) else {
 		// Event could not be converted to canonical json
 		return Err!(Request(BadJson("Could not convert event to canonical json.")));

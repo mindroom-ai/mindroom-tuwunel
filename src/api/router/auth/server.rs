@@ -3,7 +3,7 @@ use axum_extra::{TypedHeader, headers::Authorization, typed_header::TypedHeaderR
 use http::uri::PathAndQuery;
 use ruma::{
 	CanonicalJsonName, CanonicalJsonObject, CanonicalJsonValue,
-	api::federation::authentication::XMatrix,
+	api::federation::{authentication::XMatrix, discovery::VerifyKey},
 };
 use tuwunel_core::{Err, Result, debug_error, err, warn};
 use tuwunel_service::{
@@ -22,8 +22,7 @@ pub(super) async fn auth_server(
 	type Object = CanonicalJsonObject;
 	type Value = CanonicalJsonValue;
 
-	let x_matrix = parse_x_matrix(request).await?;
-	auth_server_checks(services, &x_matrix)?;
+	let (x_matrix, key) = origin_key(services, request).await?;
 
 	let destination = services.globals.server_name();
 	let origin = &x_matrix.origin;
@@ -62,14 +61,6 @@ pub(super) async fn auth_server(
 		authorization.into()
 	};
 
-	let key = services
-		.server_keys
-		.get_verify_key(origin, &x_matrix.key)
-		.await
-		.map_err(|e| {
-			err!(Request(Forbidden(debug_warn!("Failed to fetch signing keys: {e}"))))
-		})?;
-
 	let keys: PubKeys = [(x_matrix.key.as_str().into(), key.key)].into();
 	let keys: PubKeyMap = [(origin.as_str().into(), keys)].into();
 	if let Err(e) = ruma::signatures::verify_json(&keys, &authorization) {
@@ -88,6 +79,28 @@ pub(super) async fn auth_server(
 		origin: origin.to_owned().into(),
 		..Auth::default()
 	})
+}
+
+/// Resolves the signing key named by the request's X-Matrix header.
+///
+/// Extraction awaits this before parsing the body, so a slow key fetch holds
+/// only the raw body; [`auth_server`] then finds the key cached.
+pub(in crate::router) async fn origin_key(
+	services: &Services,
+	request: &mut Request,
+) -> Result<(XMatrix, VerifyKey)> {
+	let x_matrix = parse_x_matrix(request).await?;
+	auth_server_checks(services, &x_matrix)?;
+
+	let key = services
+		.server_keys
+		.get_verify_key(&x_matrix.origin, &x_matrix.key)
+		.await
+		.map_err(|e| {
+			err!(Request(Forbidden(debug_warn!("Failed to fetch signing keys: {e}"))))
+		})?;
+
+	Ok((x_matrix, key))
 }
 
 fn auth_server_checks(services: &Services, x_matrix: &XMatrix) -> Result {
