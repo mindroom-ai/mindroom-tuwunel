@@ -97,6 +97,60 @@ async fn send_join_state_replaces_knock_state() -> Result {
 	Ok(())
 }
 
+/// A create event in a v12 send_join is stored only for its own room.
+///
+/// The joined room's create is stored under the joined room. A v11 create from
+/// another room keeps that room's stored copy, and a v12 create of another room
+/// is not stored.
+#[tokio::test]
+async fn send_join_create_keeps_its_own_room_id() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let (v11, v12) = (RoomVersionId::V11, RoomVersionId::V12);
+	let other = room_id!("!other:localhost");
+	let (other_id, other_create) = create(services, &v11, Some(other), "@bob:localhost")?;
+	let (joined_id, joined_create) = create(services, &v12, None, "@bob:localhost")?;
+	let (foreign_id, foreign_create) = create(services, &v12, None, "@carol:localhost")?;
+	let room_id = RoomId::new_v2(joined_id.localpart())?;
+
+	store_own_keys(services);
+
+	let rules = room_version::rules(&v11)?;
+	let auth_chain = [to_raw_value(&other_create)?];
+	services
+		.membership
+		.ingest_send_join_auth_chain(other, &v11, &rules, &auth_chain)
+		.await;
+
+	let rules = room_version::rules(&v12)?;
+	let auth_chain = [
+		to_raw_value(&joined_create)?,
+		to_raw_value(&other_create)?,
+		to_raw_value(&foreign_create)?,
+	];
+	services
+		.membership
+		.ingest_send_join_auth_chain(&room_id, &v12, &rules, &auth_chain)
+		.await;
+
+	let stored_room = async |event_id| {
+		services
+			.timeline
+			.get_outlier::<Value>(event_id)
+			.await
+			.map(|event| event["room_id"].clone())
+	};
+
+	assert_eq!(stored_room(&joined_id).await?, json!(room_id));
+	assert_eq!(stored_room(&other_id).await?, json!(other));
+	assert!(!services.timeline.pdu_exists(&foreign_id).await);
+
+	Ok(())
+}
+
 /// Stores this server's signing key, as the send_join path verifies only with
 /// keys already in storage.
 fn store_own_keys(services: &Services) {
@@ -139,4 +193,35 @@ fn altered(event: &Value) -> Value {
 	let mut event = event.clone();
 	event["content"]["topic"] = "altered".into();
 	event
+}
+
+/// A create event signed by this server; up to v11 it carries its room ID.
+fn create(
+	services: &Services,
+	version: &RoomVersionId,
+	room_id: Option<&RoomId>,
+	sender: &str,
+) -> Result<(OwnedEventId, Value)> {
+	let mut event: CanonicalJsonObject = serde_json::from_value(json!({
+		"type": "m.room.create",
+		"state_key": "",
+		"content": { "room_version": version },
+		"sender": sender,
+		"origin_server_ts": 1,
+		"depth": 1,
+		"prev_events": [],
+		"auth_events": [],
+	}))?;
+
+	if let Some(room_id) = room_id {
+		event.insert("room_id".into(), room_id.as_str().into());
+	}
+
+	services
+		.server_keys
+		.hash_and_sign_event(&mut event, version)?;
+
+	let event_id = gen_event_id(&event, version)?;
+
+	Ok((event_id, serde_json::to_value(event)?))
 }
