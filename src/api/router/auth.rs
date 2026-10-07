@@ -32,9 +32,11 @@ use ruma::{
 use tuwunel_core::{Err, Result, is_less_than, smallstr::SmallString};
 use tuwunel_service::{Services, appservice::RegistrationInfo};
 
-pub(super) use self::dispatch::AuthDispatch;
-use self::dispatch::Scheme;
 pub(crate) use self::uiaa::auth_uiaa;
+pub(super) use self::{
+	dispatch::{AuthDispatch, Scheme},
+	server::origin_key,
+};
 use super::request::Request;
 
 type AccessToken = SmallString<[u8; 32]>;

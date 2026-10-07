@@ -487,6 +487,32 @@ bugs. Files: `src/service/rooms/event_handler/fetch_prev.rs`,
 `src/service/rooms/event_handler/handle_incoming_pdu.rs`; tests in
 `src/main/tests/auth_chain_fetch_budget.rs`.
 
+### Federation bodies and incoming PDUs are parsed after their checks
+
+A federation request's body was parsed into a JSON tree before the request was
+authenticated, and the signature check copied that tree and then waited for the
+origin's signing key, which is fetched from the origin when it is not cached. A
+body can be up to `max_request_size` (24 MiB by default) and its tree many times
+that, so a slow key answer kept two such trees per request until the request
+timed out, and a handled request kept its tree until the handler finished,
+although no federation handler reads it. The PDUs of a `/send` transaction, an
+invite's event and the create event in its stripped state, and the events of
+`send_join`, `send_leave` and `send_knock` were parsed at any length, since the
+64 KiB PDU limit is checked only later, and a transaction parsed all of its PDUs
+before any of them waited for its room's turn. The origin's key is now resolved
+before the body is parsed, a federation request drops the parsed body once its
+typed request is built, and an incoming PDU longer than four times the PDU
+limit, the limit the fetcher already applies to fetched events, is refused
+before it is parsed. A transaction keeps each PDU's JSON raw and parses it again
+when its room's turn comes. Upstream has the same bug. Files:
+`src/api/router/{args.rs,auth.rs,auth/server.rs}`,
+`src/api/server/{send.rs,invite.rs,send_join.rs,send_leave.rs,send_knock.rs}`,
+`src/core/matrix/{pdu.rs,pdu/format/check.rs}`,
+`src/service/rooms/event_handler/parse_incoming_pdu.rs`,
+`src/service/membership/stripped_state.rs`,
+`src/service/fetcher/{validate.rs,transport.rs}`; test in
+`src/main/tests/federation_inbound_parse.rs`.
+
 ### Missing-event and state id answers are read up to a limit
 
 An incoming event whose prev events are missing asks the sending server for
