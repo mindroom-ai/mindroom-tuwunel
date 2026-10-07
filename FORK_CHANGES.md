@@ -271,9 +271,14 @@ dropped, and `auth_chain` events go through the same room and format checks as
 `state` events. An event in this server's timeline keeps its stored copy, and
 so does any stored event whose new copy had to be redacted; a copy that matches
 its hash still replaces an outlier, such as the unchecked knock state stored
-before the join. Upstream has the same bug. Files:
-`src/service/server_keys/verify.rs`, `src/service/membership/join.rs`; test in
-`src/service/membership/join/tests.rs`.
+before the join. In room version 12, where `m.room.create` has no `room_id`,
+the joined room's ID was also written into any create event of the response,
+replacing the `room_id` a v11 create carries, so another room's create could
+replace that room's stored copy. A create event now keeps its own `room_id`,
+and a v12 create is accepted only when the room ID is derived from its event
+ID. Upstream has the same bug. Files: `src/service/server_keys/verify.rs`,
+`src/service/membership/join.rs`, `src/core/matrix/pdu.rs`,
+`src/core/matrix/pdu/format.rs`; test in `src/service/membership/join/tests.rs`.
 
 ### Failed appservice requests leave the `hs_token` out of the log
 
