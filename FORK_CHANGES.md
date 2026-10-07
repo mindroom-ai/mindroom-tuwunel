@@ -76,8 +76,10 @@ request. Each returned field was stored without the field-name grammar and
 longer returned was never removed, so the cached profile kept stale fields and
 grew with every new field name a server returned. The response now replaces the
 cached profile, as `!admin users refresh-profile` already did, and a response
-with a field name outside the MSC4133 grammar or over 64 KiB is refused without
-being stored. Upstream has the same bug. Files:
+with a field name outside the MSC4133 grammar, over 64 KiB, or with more than
+100 fields is refused without being stored. The field cap bounds the work of
+one lookup, which rewrites and logs every field the server serves or drops.
+Upstream has the same bug. Files:
 `src/service/profile/{mod.rs,remote.rs}`; test in
 `src/service/profile/tests/remote/mod.rs`.
 
