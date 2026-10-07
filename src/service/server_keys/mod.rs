@@ -9,6 +9,8 @@ mod get;
 mod keypair;
 mod request;
 mod sign;
+#[cfg(test)]
+mod tests;
 mod verify;
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -24,10 +26,15 @@ use ruma::{
 };
 use serde_json::value::RawValue as RawJsonValue;
 use tuwunel_core::{
-	Result, implement,
+	Err, Result, implement,
 	utils::{IterStream, timepoint_from_now},
 };
-use tuwunel_database::{Deserialized, Json, Map};
+use tuwunel_database::{Deserialized, Handle, Map};
+
+/// Largest stored signing-key document for one server. Servers publish a
+/// handful of keys, a few hundred bytes, so this leaves ample room while
+/// keeping the parse on each key lookup small.
+const MAX_STORED_KEYS_BYTES: usize = 64 * 1024;
 
 /// Manages the local signing identity and cached remote verification keys.
 ///
@@ -119,31 +126,38 @@ pub fn active_verify_key(&self) -> (&ServerSigningKeyId, &VerifyKey) {
 /// Merges a fetched signing-key document into the local cache.
 ///
 /// Only current and old verify-key maps are retained from the incoming document;
-/// its signatures and validity timestamp are not preserved. The read, merge,
+/// its signatures and validity timestamp are not preserved. When the merged
+/// document would exceed [`MAX_STORED_KEYS_BYTES`], only the fetched maps are
+/// kept, and a fetched document over that size is not stored. The read, merge,
 /// and write sequence is not atomic.
 #[implement(Service)]
 async fn add_signing_keys(&self, new_keys: ServerSigningKeys) {
 	let origin = &new_keys.server_name;
 
 	// (timo) Not atomic, but this is not critical
-	let mut keys: ServerSigningKeys = self
-		.db
-		.server_signingkeys
-		.get(origin)
+	let mut keys = self
+		.signing_keys_for(origin)
 		.await
-		.deserialized()
 		.unwrap_or_else(|_| {
 			// Just insert "now", it doesn't matter
 			ServerSigningKeys::new(origin.to_owned(), MilliSecondsSinceUnixEpoch::now())
 		});
 
-	keys.verify_keys.extend(new_keys.verify_keys);
+	keys.verify_keys
+		.extend(new_keys.verify_keys.clone());
 	keys.old_verify_keys
-		.extend(new_keys.old_verify_keys);
+		.extend(new_keys.old_verify_keys.clone());
 
-	self.db
-		.server_signingkeys
-		.raw_put(origin, Json(&keys));
+	let mut json = serde_json::to_vec(&keys).expect("signing keys should serialize");
+	if json.len() > MAX_STORED_KEYS_BYTES {
+		keys.verify_keys = new_keys.verify_keys;
+		keys.old_verify_keys = new_keys.old_verify_keys;
+		json = serde_json::to_vec(&keys).expect("signing keys should serialize");
+	}
+
+	if json.len() <= MAX_STORED_KEYS_BYTES {
+		self.db.server_signingkeys.insert(origin, json);
+	}
 }
 
 /// Checks whether every signature key required by an event is cached.
@@ -179,9 +193,7 @@ pub async fn verify_key_exists(&self, origin: &ServerName, key_id: &ServerSignin
 	type KeysMap<'a> = BTreeMap<&'a ServerSigningKeyId, &'a RawJsonValue>;
 
 	let Ok(keys) = self
-		.db
-		.server_signingkeys
-		.get(origin)
+		.stored_signing_keys(origin)
 		.await
 		.deserialized::<Raw<ServerSigningKeys>>()
 	else {
@@ -229,11 +241,24 @@ pub async fn verify_keys_for(&self, origin: &ServerName) -> VerifyKeys {
 /// maps but not incoming document signatures or validity metadata.
 #[implement(Service)]
 pub async fn signing_keys_for(&self, origin: &ServerName) -> Result<ServerSigningKeys> {
-	self.db
-		.server_signingkeys
-		.get(origin)
+	self.stored_signing_keys(origin)
 		.await
 		.deserialized()
+}
+
+/// Reads the stored signing-key document for a server without decoding it.
+///
+/// A document over [`MAX_STORED_KEYS_BYTES`], stored before that limit existed,
+/// is treated as absent, so lookups do not parse it and the next fetch for the
+/// server replaces it.
+#[implement(Service)]
+async fn stored_signing_keys(&self, origin: &ServerName) -> Result<Handle<'_>> {
+	let keys = self.db.server_signingkeys.get(origin).await?;
+	if keys.len() > MAX_STORED_KEYS_BYTES {
+		return Err!(Request(NotFound("Stored signing keys of {origin} are too large")));
+	}
+
+	Ok(keys)
 }
 
 #[implement(Service)]
