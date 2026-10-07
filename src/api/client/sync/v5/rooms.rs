@@ -42,7 +42,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	sync::{RequiredState, Room, RoomConfig},
+	sync::{REQUIRED_STATE_MAX, RequiredState, Room, RoomConfig},
 };
 
 use self::{bump_stamp::room_bump_stamp, heroes::calculate_heroes};
@@ -295,7 +295,11 @@ pub(super) fn merged_room_details(
 		.map(|list| &list.room_details)
 		.chain(conn.subscriptions.get(room_id))
 		.fold((0_usize, HashSet::new()), |(timeline_limit, mut required_state), config| {
-			required_state.extend(config.required_state.iter().cloned());
+			let remaining = REQUIRED_STATE_MAX.saturating_sub(required_state.len());
+			let selectors = config.required_state.iter().take(remaining);
+
+			required_state.extend(selectors.cloned());
+
 			let limit = usize_from_ruma(config.timeline_limit).min(TIMELINE_LIMIT_MAX);
 
 			(timeline_limit.max(limit), required_state)
