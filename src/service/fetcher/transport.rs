@@ -31,7 +31,13 @@ use crate::services::OnceServices;
 
 /// Largest `/event` response read: the served PDU and the few fields around
 /// it. A larger body is dropped while it is read rather than buffered first.
+/// A `/get_missing_events` response is read up to this size for each event
+/// asked for.
 const MAX_EVENT_RESPONSE_BYTES: usize = MAX_SERVED_PDU_BYTES + 4096;
+
+/// Largest `/state_ids` response read. An event id takes about 50 bytes of
+/// it, which leaves room for the ids of over a million events.
+const MAX_STATE_IDS_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Abstracts the network operation for one federation fetch attempt.
 ///
@@ -64,11 +70,11 @@ impl Transport for FederationTransport {
 	)]
 	async fn fetch_raw(&self, op: Op, server: &ServerName, opts: &Opts) -> Result<Bytes> {
 		let federation = &self.services.federation;
+		let client = &self.services.client.federation;
 
 		match op {
 			| Op::Event | Op::AuthEvent => {
 				let event_id = require_event_id(opts)?;
-				let client = &self.services.client.federation;
 				let request = EventRequest { event_id };
 				let res = federation
 					.execute_on(client, server, request, MAX_EVENT_RESPONSE_BYTES)
@@ -101,8 +107,9 @@ impl Transport for FederationTransport {
 			| Op::StateIds => {
 				let event_id = require_event_id(opts)?;
 				let room_id = require_room_id(opts)?;
+				let request = StateIdsRequest { room_id, event_id };
 				let res = federation
-					.execute(server, StateIdsRequest { room_id, event_id })
+					.execute_on(client, server, request, MAX_STATE_IDS_RESPONSE_BYTES)
 					.await?;
 
 				to_bytes(&serde_json::json!({
@@ -121,7 +128,10 @@ impl Transport for FederationTransport {
 					min_depth: UInt::default(),
 				};
 
-				let res = federation.execute(server, req).await?;
+				let limit = batch_size(opts).saturating_mul(MAX_EVENT_RESPONSE_BYTES);
+				let res = federation
+					.execute_on(client, server, req, limit)
+					.await?;
 
 				to_bytes(&res.events)
 			},
@@ -171,13 +181,12 @@ fn require_latest_events(opts: &Opts) -> Result {
 		})
 }
 
+/// [`batch_size`] as the wire `UInt`, saturating an oversized cap.
+fn batch_limit(opts: &Opts) -> UInt { ruma_from_usize_saturating(batch_size(opts)) }
+
 /// Event count requested per batch op, defaulting to the federation default of
-/// 10 and saturating an oversized cap to the wire `UInt`.
-fn batch_limit(opts: &Opts) -> UInt {
-	opts.backfill_limit
-		.map(NonZeroUsize::get)
-		.map_or_else(|| UInt::from(10_u8), ruma_from_usize_saturating)
-}
+/// 10.
+fn batch_size(opts: &Opts) -> usize { opts.backfill_limit.map_or(10, NonZeroUsize::get) }
 
 fn to_bytes<T: serde::Serialize>(value: &T) -> Result<Bytes> {
 	serde_json::to_vec(value)
