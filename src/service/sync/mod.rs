@@ -5,6 +5,7 @@ mod tests;
 
 use std::{
 	collections::{BTreeMap, btree_map::Entry},
+	ops::Deref,
 	sync::Arc,
 };
 
@@ -111,6 +112,26 @@ pub type RoomConfig = (u64, RequiredState);
 /// Each selector costs a lookup and a stored fingerprint for every room it
 /// applies to, so only the first this many selectors of a longer list are kept.
 pub const REQUIRED_STATE_MAX: usize = 256;
+
+/// The most lists one connection keeps, and the most list IDs one extension
+/// filter names.
+///
+/// Each room in the window is matched against every list and every list ID of
+/// a filter, so new lists past this many are ignored and only the first this
+/// many list IDs of a filter are kept.
+const LISTS_MAX: usize = 64;
+
+/// The most ranges one list uses.
+///
+/// Each range is selected from the rooms of the window, so only the first this
+/// many ranges of a list are kept.
+const RANGES_MAX: usize = 16;
+
+/// The most rooms one extension filter names.
+///
+/// Each named room is matched against the filter's list IDs, so only the first
+/// this many rooms of a filter are kept.
+const EXTENSION_ROOMS_MAX: usize = 256;
 
 type Connections = TokioMutex<BTreeMap<ConnectionKey, ConnectionVal>>;
 pub type ConnectionVal = Arc<TokioMutex<Connection>>;
@@ -394,8 +415,10 @@ fn update_cache_lists(request: &Request, cached: &mut Self) -> bool {
 		.lists
 		.iter()
 		.fold(false, |changed, (list_id, request_list)| {
+			let full = cached.lists.len() >= LISTS_MAX;
 			let list_changed = match cached.lists.get_mut(list_id) {
 				| Some(cached_list) => Self::update_cache_list(request_list, cached_list),
+				| None if full => false,
 				| None => {
 					// A new list is merged into an empty one, so it is capped the same way.
 					let cached_list = cached.lists.entry(list_id.clone()).or_default();
@@ -412,7 +435,8 @@ fn update_cache_lists(request: &Request, cached: &mut Self) -> bool {
 
 #[implement(Connection)]
 fn update_cache_list(request: &request::List, cached: &mut request::List) -> bool {
-	let ranges_changed = request.ranges != cached.ranges;
+	let ranges = &request.ranges[..request.ranges.len().min(RANGES_MAX)];
+	let ranges_changed = ranges != cached.ranges.as_slice();
 	let timeline_limit_changed =
 		request.room_details.timeline_limit != cached.room_details.timeline_limit;
 
@@ -431,7 +455,7 @@ fn update_cache_list(request: &request::List, cached: &mut request::List) -> boo
 		ranges_changed || timeline_limit_changed || required_state_changed || filters_changed;
 
 	if ranges_changed {
-		cached.ranges.clone_from(&request.ranges);
+		cached.ranges = ranges.into();
 	}
 
 	cached.room_details.timeline_limit = request.room_details.timeline_limit;
@@ -519,22 +543,22 @@ fn update_cache_extensions(request: &Request, cached: &mut Self) -> bool {
 #[implement(Connection)]
 fn update_cache_account_data(request: &AccountData, cached: &mut AccountData) {
 	some_or_sticky(request.enabled.as_ref(), &mut cached.enabled);
-	some_or_sticky(request.lists.as_ref(), &mut cached.lists);
-	some_or_sticky(request.rooms.as_ref(), &mut cached.rooms);
+	some_or_sticky_first(request.lists.as_ref(), &mut cached.lists, LISTS_MAX);
+	some_or_sticky_first(request.rooms.as_ref(), &mut cached.rooms, EXTENSION_ROOMS_MAX);
 }
 
 #[implement(Connection)]
 fn update_cache_receipts(request: &Receipts, cached: &mut Receipts) {
 	some_or_sticky(request.enabled.as_ref(), &mut cached.enabled);
-	some_or_sticky(request.rooms.as_ref(), &mut cached.rooms);
-	some_or_sticky(request.lists.as_ref(), &mut cached.lists);
+	some_or_sticky_first(request.rooms.as_ref(), &mut cached.rooms, EXTENSION_ROOMS_MAX);
+	some_or_sticky_first(request.lists.as_ref(), &mut cached.lists, LISTS_MAX);
 }
 
 #[implement(Connection)]
 fn update_cache_typing(request: &Typing, cached: &mut Typing) {
 	some_or_sticky(request.enabled.as_ref(), &mut cached.enabled);
-	some_or_sticky(request.rooms.as_ref(), &mut cached.rooms);
-	some_or_sticky(request.lists.as_ref(), &mut cached.lists);
+	some_or_sticky_first(request.rooms.as_ref(), &mut cached.rooms, EXTENSION_ROOMS_MAX);
+	some_or_sticky_first(request.lists.as_ref(), &mut cached.lists, LISTS_MAX);
 }
 
 #[implement(Connection)]
@@ -551,8 +575,8 @@ fn update_cache_to_device(request: &ToDevice, cached: &mut ToDevice) {
 #[implement(Connection)]
 fn update_cache_profiles(request: &Profiles, cached: &mut Profiles) -> bool {
 	some_or_sticky(request.enabled.as_ref(), &mut cached.enabled);
-	some_or_sticky(request.rooms.as_ref(), &mut cached.rooms);
-	some_or_sticky(request.lists.as_ref(), &mut cached.lists);
+	some_or_sticky_first(request.rooms.as_ref(), &mut cached.rooms, EXTENSION_ROOMS_MAX);
+	some_or_sticky_first(request.lists.as_ref(), &mut cached.lists, LISTS_MAX);
 
 	let fields = request
 		.fields
@@ -600,5 +624,15 @@ fn update_cache_profiles_owed(&mut self, fields_widened: bool) {
 fn some_or_sticky<T: Clone>(target: Option<&T>, cached: &mut Option<T>) {
 	if let Some(target) = target {
 		cached.replace(target.clone());
+	}
+}
+
+/// Like [`some_or_sticky`], keeping only the first `max` entries of a filter.
+fn some_or_sticky_first<C, T>(target: Option<&C>, cached: &mut Option<C>, max: usize)
+where
+	C: Deref<Target = [T]> + for<'a> From<&'a [T]>,
+{
+	if let Some(target) = target {
+		cached.replace(C::from(&target[..target.len().min(max)]));
 	}
 }

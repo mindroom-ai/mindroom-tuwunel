@@ -164,6 +164,19 @@ the same bug. Files: `src/service/sync/mod.rs`,
 `src/api/client/sync/v5/rooms.rs`; tests in `src/service/sync/tests.rs` and
 `src/api/client/sync/v5/rooms/tests.rs`.
 
+### Sliding sync caps the lists, ranges and extension filters
+
+A sliding sync connection kept every list a request named with all of its
+ranges, and the account data, receipts, typing and profiles extensions kept
+their `lists` and `rooms` filters as sent. Each pass matched every room in the
+window against every list for each range, and every room an extension filter
+named against every list ID of that filter, without yielding, so a request
+with many lists, ranges or filter entries kept a worker busy for minutes. A
+connection now keeps at most 64 lists and the first 16 ranges of each, and an
+extension filter keeps its first 64 list IDs and its first 256 rooms. Upstream
+has the same bug. File: `src/service/sync/mod.rs`; tests in
+`src/service/sync/tests.rs`.
+
 ### EDUs sent to other servers are bounded in size
 
 Device keys and cross-signing keys a local client uploaded were stored with no
