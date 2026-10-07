@@ -400,6 +400,23 @@ federation response limit first. Upstream has the same bug. Files:
 `src/service/federation/execute.rs`; test in
 `src/main/tests/federation_event_response_limit.rs`.
 
+### An incoming event's fetches share its limits
+
+The walk over an incoming event's missing prev events queued a fetch for every
+prev event of each event it walked, up to 20 each, but counted only the walked
+events against `max_fetch_prev_events`. The queued fetches all run at once and
+keep their results, so one incoming event could start about 20 times that many.
+The walk now counts every event it queues. The `/get_missing_events` batch
+fetched before the walk asks for 10 events but stored every event the remote
+server answered with; it now stores at most 10. Each auth chain fetch started
+for the incoming event, for its own auth events, for each prev event the walk
+fetches and for each event of that batch, also had its own limit of
+`max_fetch_prev_events` times 64 KiB; they now share one. Upstream has the same
+bugs. Files: `src/service/rooms/event_handler/fetch_prev.rs`,
+`src/service/rooms/event_handler/fetch_auth.rs`,
+`src/service/rooms/event_handler/handle_incoming_pdu.rs`; tests in
+`src/main/tests/auth_chain_fetch_budget.rs`.
+
 ### `ip_range_denylist` covers IPv4-mapped IPv6 addresses
 
 An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) was matched against the denylist

@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicUsize;
+
 use futures::{StreamExt, TryFutureExt};
 use ruma::{
 	CanonicalJsonObject, EventId, RoomId, RoomVersionId, ServerName, events::TimelineEventType,
@@ -28,6 +30,7 @@ pub(super) async fn handle_outlier_pdu(
 	mut pdu_json: CanonicalJsonObject,
 	room_version: &RoomVersionId,
 	recursion_level: usize,
+	held_bytes: &AtomicUsize,
 	auth_events_known: bool,
 ) -> Result<(PduEvent, CanonicalJsonObject)> {
 	debug!(?event_id, ?auth_events_known, %recursion_level, "handle outlier");
@@ -96,6 +99,7 @@ pub(super) async fn handle_outlier_pdu(
 			event.auth_events(),
 			room_version,
 			recursion_level,
+			held_bytes,
 		))
 		.await;
 	}
