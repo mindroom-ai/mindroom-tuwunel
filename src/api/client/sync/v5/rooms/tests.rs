@@ -11,6 +11,7 @@ use ruma::{
 	room_id, uint, user_id,
 };
 use tuwunel_core::matrix::pdu::PduCount;
+use tuwunel_service::sync::REQUIRED_STATE_MAX;
 
 use super::{
 	Connection, ListIds, StateMode, TIMELINE_LIMIT_MAX, membership_allows_required_state,
@@ -189,6 +190,27 @@ fn timeline_limit_is_capped() {
 		assert_eq!(timeline_limit, expected);
 		assert_eq!(required_state, expected_state);
 	}
+}
+
+#[test]
+fn required_state_is_capped() {
+	let room_id = room_id!("!room:example.com");
+	let lists: ListIds = ["a", "b"].into_iter().map(ListId::from).collect();
+	let mut conn = Connection::default();
+
+	for list in &lists {
+		conn.lists
+			.entry(list.clone())
+			.or_default()
+			.room_details
+			.required_state = (0..REQUIRED_STATE_MAX)
+			.map(|key| (StateEventType::RoomMember, format!("{list}{key}").into()))
+			.collect();
+	}
+
+	let (_, required_state) = merged_room_details(&conn, &lists, room_id);
+
+	assert_eq!(required_state.len(), REQUIRED_STATE_MAX);
 }
 
 #[test]

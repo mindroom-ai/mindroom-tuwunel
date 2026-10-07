@@ -42,7 +42,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	sync::{RequiredState, Room, RoomConfig},
+	sync::{REQUIRED_STATE_MAX, RequiredState, Room, RoomConfig},
 };
 
 use self::{
@@ -309,9 +309,10 @@ pub(super) fn merged_room_details(
 				TIMELINE_LIMIT_MAX,
 			));
 
-			details
-				.1
-				.extend(config.required_state.iter().cloned());
+			let remaining = REQUIRED_STATE_MAX.saturating_sub(details.1.len());
+			let selectors = config.required_state.iter().take(remaining);
+
+			details.1.extend(selectors.cloned());
 
 			details
 		})
