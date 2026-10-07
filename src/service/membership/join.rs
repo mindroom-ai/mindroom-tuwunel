@@ -6,14 +6,14 @@ use std::{
 	sync::Arc,
 };
 
-use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt, future::join};
+use futures::{FutureExt, StreamExt, TryFutureExt, future::join};
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, OwnedServerName, OwnedUserId,
-	RoomId, RoomOrAliasId, RoomVersionId, UserId,
+	RoomId, RoomOrAliasId, RoomVersionId, UInt, UserId,
 	api::{error::ErrorKind, federation},
 	canonical_json::to_canonical_value,
 	events::{
-		StateEventType,
+		StateEventType, TimelineEventType,
 		room::{
 			create::RoomCreateEventContent,
 			join_rules::RoomJoinRulesEventContent,
@@ -24,14 +24,15 @@ use ruma::{
 	room_version_rules::RoomVersionRules,
 	signatures::Verified,
 };
+use serde::Deserialize;
 use serde_json::value::{RawValue as RawJsonValue, to_raw_value};
 use tuwunel_core::{
 	Err, Result, async_noinline, at, debug, debug_error, debug_info, debug_warn, err, error,
 	implement, info,
-	matrix::{event::gen_event_id_canonical_json, room_version},
+	matrix::{Event, event::gen_event_id_canonical_json, room_version},
 	pdu::{Pdu, PduBuilder, check_rules},
 	trace,
-	utils::{self, BoolExt, IterStream, ReadyExt, math::Expected, shuffle},
+	utils::{self, BoolExt, math::Expected, shuffle},
 	warn,
 };
 
@@ -331,16 +332,14 @@ async fn join_remote(
 		.await;
 
 	let state = self
-		.ingest_send_join_state(room_id, &room_version_id, &room_version_rules, &response.state)
-		.await;
-
-	self.ingest_send_join_auth_chain(
-		room_id,
-		&room_version_id,
-		&room_version_rules,
-		&response.auth_chain,
-	)
-	.await;
+		.ingest_send_join_events(
+			room_id,
+			&room_version_id,
+			&room_version_rules,
+			&response.auth_chain,
+			&response.state,
+		)
+		.await?;
 
 	debug!("Running send_join auth check...");
 	state_res::auth_check(
@@ -603,91 +602,113 @@ fn merge_restricted_signature(
 	Ok(())
 }
 
-#[implement(Service)]
-async fn ingest_send_join_state(
-	&self,
-	room_id: &RoomId,
-	room_version_id: &RoomVersionId,
-	room_version_rules: &RoomVersionRules,
-	state_pdus: &[Box<RawJsonValue>],
-) -> HashMap<u64, OwnedEventId> {
-	info!(events = state_pdus.len(), "Going through send_join response room_state...");
-	let cork = self.services.db.cork_and_flush();
-	let state = state_pdus
-		.iter()
-		.stream()
-		.then(|pdu| {
-			self.services
-				.server_keys
-				.validate_and_add_event_id_no_fetch(pdu, room_version_id)
-		})
-		.inspect_err(|e| debug_error!("Invalid send_join state event: {e:?}"))
-		.ready_filter_map(Result::ok)
-		.ready_filter_map(|(event_id, value, verified)| {
-			Pdu::from_object_federation(room_id, &event_id, value, room_version_rules)
-				.inspect_err(|error| {
-					debug_warn!(?event_id, %error, "Invalid PDU in the join response.");
-				})
-				.map(move |(pdu, value)| (event_id, verified, pdu, value))
-				.ok()
-		})
-		.fold(HashMap::new(), async |mut state, (event_id, verified, pdu, value)| {
-			self.add_send_join_outlier(&event_id, &value, verified)
-				.await;
-
-			if let Some(state_key) = &pdu.state_key {
-				let shortstatekey = self
-					.services
-					.short
-					.get_or_create_shortstatekey(&pdu.kind.to_string().into(), state_key)
-					.await;
-
-				state.insert(shortstatekey, pdu.event_id.clone());
-			}
-
-			state
-		})
-		.await;
-
-	drop(cork);
-	state
+#[derive(Deserialize)]
+struct ExtractDepth {
+	depth: UInt,
 }
 
+/// Checks the events of a send_join response and stores those it accepts.
+///
+/// Events whose signatures, content hash and format check out are authorized
+/// against their own auth events in depth order, so an event's auth events in
+/// the response are decided before it. An event that fails, or one with a
+/// rejected auth event, is rejected: it is not stored and stays out of the
+/// returned room state. A rejected create event, or one of another room
+/// version than the join's, fails the join.
 #[implement(Service)]
-async fn ingest_send_join_auth_chain(
+async fn ingest_send_join_events(
 	&self,
 	room_id: &RoomId,
 	room_version_id: &RoomVersionId,
 	room_version_rules: &RoomVersionRules,
 	auth_chain: &[Box<RawJsonValue>],
-) {
-	info!(events = auth_chain.len(), "Going through send_join response auth_chain...");
-	let cork = self.services.db.cork_and_flush();
-	auth_chain
+	state_pdus: &[Box<RawJsonValue>],
+) -> Result<HashMap<u64, OwnedEventId>> {
+	info!(
+		auth_chain = auth_chain.len(),
+		state = state_pdus.len(),
+		"Going through send_join response events..."
+	);
+	let mut pdus: Vec<_> = auth_chain
 		.iter()
-		.stream()
-		.then(|pdu| {
-			self.services
-				.server_keys
-				.validate_and_add_event_id_no_fetch(pdu, room_version_id)
-		})
-		.inspect_err(|e| debug_error!("Invalid send_join auth_chain event: {e:?}"))
-		.ready_filter_map(Result::ok)
-		.ready_filter_map(|(event_id, value, verified)| {
+		.map(|pdu| (pdu, false))
+		.chain(state_pdus.iter().map(|pdu| (pdu, true)))
+		.collect();
+
+	pdus.sort_by_cached_key(|(pdu, _)| {
+		serde_json::from_str::<ExtractDepth>(pdu.get())
+			.map(|extract| extract.depth)
+			.ok()
+	});
+
+	let cork = self.services.db.cork_and_flush();
+	let mut rejected = HashSet::new();
+	let mut state = HashMap::new();
+	for (pdu, in_state) in pdus {
+		let Ok((event_id, value, verified)) = self
+			.services
+			.server_keys
+			.validate_and_add_event_id_no_fetch(pdu, room_version_id)
+			.await
+			.inspect_err(|e| debug_error!("Invalid send_join event: {e:?}"))
+		else {
+			continue;
+		};
+
+		let Ok((pdu, value)) =
 			Pdu::from_object_federation(room_id, &event_id, value, room_version_rules)
-				.inspect_err(|e| {
-					debug_warn!("Invalid PDU {event_id:?} in send_join auth_chain: {e:?}");
+				.inspect_err(|error| {
+					debug_warn!(?event_id, %error, "Invalid PDU in the join response.");
 				})
-				.map(move |(_, value)| (event_id, value, verified))
-				.ok()
-		})
-		.for_each(async |(event_id, value, verified)| {
-			self.add_send_join_outlier(&event_id, &value, verified)
+		else {
+			continue;
+		};
+
+		let accepted = !pdu
+			.auth_events
+			.iter()
+			.any(|auth_event_id| rejected.contains(auth_event_id))
+			&& self
+				.services
+				.event_handler
+				.auth_check_by_auth_events(&pdu, room_version_rules)
+				.await
+				.inspect_err(|error| debug_warn!(?event_id, %error, "Rejected send_join event."))
+				.is_ok();
+
+		if pdu.kind == TimelineEventType::RoomCreate
+			&& !(accepted
+				&& pdu
+					.get_content::<RoomCreateEventContent>()
+					.is_ok_and(|content| content.room_version == *room_version_id))
+		{
+			return Err!(BadServerResponse(warn!(
+				?event_id,
+				"send_join create event is rejected or not of room version {room_version_id}"
+			)));
+		}
+
+		if !accepted {
+			rejected.insert(event_id);
+			continue;
+		}
+
+		self.add_send_join_outlier(&event_id, &value, verified)
+			.await;
+
+		if in_state && let Some(state_key) = &pdu.state_key {
+			let shortstatekey = self
+				.services
+				.short
+				.get_or_create_shortstatekey(&pdu.kind.to_string().into(), state_key)
 				.await;
-		})
-		.await;
+
+			state.insert(shortstatekey, event_id);
+		}
+	}
 
 	drop(cork);
+	Ok(state)
 }
 
 /// Stores a checked event of the send_join response as an outlier.
