@@ -487,6 +487,23 @@ bugs. Files: `src/service/rooms/event_handler/fetch_prev.rs`,
 `src/service/rooms/event_handler/handle_incoming_pdu.rs`; tests in
 `src/main/tests/auth_chain_fetch_budget.rs`.
 
+### Missing-event and state id answers are read up to a limit
+
+An incoming event whose prev events are missing asks the sending server for
+them with `/get_missing_events`, and the state fallback asks it for the state
+at an event with `/state_ids`. Both answers were read under the generic
+federation response limit (256 MiB by default), and each event of a
+missing-events answer was parsed in full before anything checked its size,
+although the request asks for only 10 events. A missing-events answer is now
+read up to the size of one `/event` answer for each event asked for (about
+2.5 MiB for 10), and an event in it larger than four times the PDU size limit
+is dropped before it is parsed. A `/state_ids` answer is read up to 64 MiB,
+the ids of over a million events. A larger answer is dropped while it is read,
+and neither limit exceeds `max_response_size`. Upstream has the same bug.
+Files: `src/service/fetcher/{mod.rs,transport.rs,validate.rs}`,
+`src/service/rooms/event_handler/fetch_prev.rs`; test in
+`src/main/tests/federation_event_response_limit.rs`.
+
 ### `ip_range_denylist` covers IPv4-mapped IPv6 addresses
 
 An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) was matched against the denylist
