@@ -41,7 +41,7 @@ use url::form_urlencoded::parse as parse_query;
 
 use super::{
 	args::{parse_json, record_auth_context, serialize_body},
-	auth::{Auth, AuthDispatch, Scheme, auth},
+	auth::{Auth, AuthDispatch, Scheme, auth, origin_key},
 	request::{PathParams, Request, from_parts},
 };
 
@@ -160,7 +160,7 @@ fn not_found() -> Error {
 #[tracing::instrument(level = "debug", skip_all)]
 async fn authenticate(
 	services: &Services,
-	request: Request,
+	mut request: Request,
 	root: Root,
 ) -> Result<(Request, Auth, Option<CanonicalJsonValue>)> {
 	let route = TypeId::of::<Proxied>();
@@ -173,6 +173,7 @@ async fn authenticate(
 			Ok((request, auth, None))
 		},
 		| Root::Federation => {
+			origin_key(services, &mut request).await?;
 			let signed = parse_json(&request, route, Scheme::ServerSignatures)?;
 			let (request, auth) =
 				authenticated::<ServerSignatures>(services, request, signed.as_ref(), route)
