@@ -65,8 +65,8 @@ async fn send_join_auth_chain_is_checked_before_storing() -> Result {
 
 /// A send_join state event replaces the copy knock state stored for it.
 ///
-/// Knock state is stored as the answering server sent it, unchecked, so the
-/// joined room's copy, whose content matches its hash, takes its place.
+/// Knock state stored unchecked by earlier versions is replaced by the joined
+/// room's copy, whose content matches its hash.
 #[tokio::test]
 async fn send_join_state_replaces_knock_state() -> Result {
 	let Some(fixture) = fixture(Figment::new()).await? else {
