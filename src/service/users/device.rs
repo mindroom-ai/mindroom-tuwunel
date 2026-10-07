@@ -212,17 +212,63 @@ pub async fn set_access_token(
 	expires_in: Option<Duration>,
 	refresh_token: Option<&str>,
 ) -> Result {
-	assert!(
-		access_token.len() >= TOKEN_LENGTH,
-		"Caller must supply an access_token >= {TOKEN_LENGTH} chars."
-	);
-
 	// Token issuance shares the device lock with `remove_device`: concurrent
 	// refreshes rotate one after another instead of each leaving a refresh
 	// token the device no longer points at, and a refresh already in flight
 	// cannot issue tokens to a device removed meanwhile.
 	let mutex_key = (user_id.to_owned(), device_id.to_owned());
 	let _guard = self.device_key_mutex.lock(&mutex_key).await;
+
+	self.issue_tokens(user_id, device_id, access_token, expires_in, refresh_token)
+		.await
+}
+
+/// Rotates a refresh token presented as current and replaces the access token
+/// of its device, returning the refresh token for the client to keep.
+///
+/// A concurrent refresh may have rotated the token since it was classified, so
+/// it is classified again under the device lock; inside the reuse grace window
+/// its successor is kept, as for any double-submit.
+#[implement(super::Service)]
+#[tracing::instrument(level = "debug", skip(self, presented, access_token))]
+pub async fn rotate_refresh_token(
+	&self,
+	user_id: &UserId,
+	device_id: &DeviceId,
+	presented: &str,
+	access_token: &str,
+	expires_in: Option<Duration>,
+) -> Result<String> {
+	let mutex_key = (user_id.to_owned(), device_id.to_owned());
+	let _guard = self.device_key_mutex.lock(&mutex_key).await;
+
+	let (refresh_token, rotate) = match self.classify_refresh_token(presented).await {
+		| RefreshToken::Current { .. } => (generate_refresh_token(), true),
+		| RefreshToken::Replayed { current, grace: true, .. } => (current, false),
+		| _ => return Err!(Request(Forbidden("Refresh token has already been used."))),
+	};
+
+	let rotated = rotate.then_some(refresh_token.as_str());
+	self.issue_tokens(user_id, device_id, access_token, expires_in, rotated)
+		.await?;
+
+	Ok(refresh_token)
+}
+
+/// Issues tokens to one device; the caller holds its lock.
+#[implement(super::Service)]
+async fn issue_tokens(
+	&self,
+	user_id: &UserId,
+	device_id: &DeviceId,
+	access_token: &str,
+	expires_in: Option<Duration>,
+	refresh_token: Option<&str>,
+) -> Result {
+	assert!(
+		access_token.len() >= TOKEN_LENGTH,
+		"Caller must supply an access_token >= {TOKEN_LENGTH} chars."
+	);
 
 	if !self.device_exists(user_id, device_id).await {
 		return Err!(Request(Forbidden(
