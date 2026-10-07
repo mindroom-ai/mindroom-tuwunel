@@ -22,7 +22,7 @@ use ruma::{
 };
 use serde::Deserialize;
 use tuwunel_core::{Err, Error, Result, debug_warn, err, utils, utils::hash::sha256};
-use tuwunel_matrix::{Event, PduCount, PduEvent, event::gen_event_id};
+use tuwunel_matrix::{Event, PduCount, PduEvent, event::gen_event_id, pdu::check_raw_size};
 use tuwunel_service::{
 	Services,
 	membership::{
@@ -116,6 +116,8 @@ async fn validate_request(
 	services: &Services,
 	body: &Ruma<create_invite::v2::Request>,
 ) -> Result<()> {
+	check_raw_size(&body.event)?;
+
 	services
 		.event_handler
 		.acl_check(body.origin(), &body.room_id)

@@ -23,12 +23,12 @@ use tuwunel_core::{
 use tuwunel_matrix::{
 	Event, PduEvent,
 	event::gen_event_id,
-	pdu::{MAX_PREV_EVENTS, check_room_id},
+	pdu::{MAX_PREV_EVENTS, MAX_SERVED_PDU_BYTES, check_room_id},
 	room::state::resolution::topological_sort,
 };
 
 use super::handle_prev_pdu::PrevUpgrade;
-use crate::fetcher::{EventWindow, MAX_SERVED_PDU_BYTES, Op, Opts};
+use crate::fetcher::{EventWindow, Op, Opts};
 
 pub(super) type Pdus = HashMap<OwnedEventId, (PduEvent, CanonicalJsonObject)>;
 

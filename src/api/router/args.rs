@@ -20,7 +20,7 @@ use tuwunel_core::{Error, Result, err, implement, utils::string::EMPTY};
 use tuwunel_service::{Services, appservice::RegistrationInfo};
 
 use super::{
-	auth::{Auth, AuthDispatch, admin::require_admin, auth},
+	auth::{Auth, AuthDispatch, Scheme, admin::require_admin, auth, origin_key},
 	client_ip::rate_limit_ip,
 	request::{Request, from as request_from},
 };
@@ -50,7 +50,8 @@ pub struct Args<T, const ADMIN: bool = false> {
 	/// Authenticated appservice registration, absent for other callers.
 	pub appservice_info: Option<RegistrationInfo>,
 
-	/// Parsed canonical JSON, absent for raw or noncanonical request bodies.
+	/// Parsed canonical JSON, absent for raw or noncanonical request bodies and
+	/// for federation requests.
 	pub json_body: Option<CanonicalJsonValue>,
 
 	/// Client address for password throttling, resolved independently of legacy IP hints.
@@ -129,7 +130,14 @@ where
 		services: &State,
 	) -> Result<Self, Self::Rejection> {
 		let route = TypeId::of::<T>();
-		let request = request_from(services, request).await?;
+		let mut request = request_from(services, request).await?;
+
+		// A federation request waits for its origin's key before its body is
+		// parsed, so a slow key fetch holds only the raw body.
+		if T::Authentication::SCHEME == Scheme::ServerSignatures {
+			origin_key(services, &mut request).await?;
+		}
+
 		let json_body = match ADMIN {
 			| true => parse_json(&request, route),
 			| false => Ok(parse_json(&request, route)?),
@@ -265,6 +273,10 @@ where
 	let http_request = HttpRequest::from_parts(request.parts, body);
 	let body = T::try_from_http_request(http_request, &request.path)
 		.map_err(|e| err!(Request(BadJson(debug_warn!("{e}")))))?;
+
+	// Federation handlers read only the typed body, so a server's request does
+	// not keep the parsed copy while it is handled.
+	let json_body = json_body.filter(|_| auth.origin.is_none());
 
 	Ok(Args {
 		body,
