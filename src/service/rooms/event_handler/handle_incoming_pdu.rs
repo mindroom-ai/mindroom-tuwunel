@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicUsize;
+
 use futures::{FutureExt, TryFutureExt, TryStreamExt, future::try_join4};
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, EventId, MilliSecondsSinceUnixEpoch, OwnedEventId,
@@ -303,7 +305,13 @@ async fn handle_admitted<'a>(
 		auth_events_known: false,
 	};
 
-	let (incoming_pdu, pdu) = self.handle_outlier_pdu(eval, pdu).await?;
+	// The auth chain walks started for this event, for its own auth events and
+	// for its missing prev events, share one bound on the bytes they fetch.
+	let held_bytes = AtomicUsize::new(0);
+
+	let (incoming_pdu, pdu) = self
+		.handle_outlier_pdu(eval, pdu, &held_bytes)
+		.await?;
 
 	let (incoming_pdu, pdu) = incoming_pdu.with_built_unsigned(pdu, unsigned)?;
 
@@ -367,7 +375,7 @@ async fn handle_admitted<'a>(
 	// 9. Fetch any missing prev events doing all checks listed here starting at 1.
 	//    These are timeline events
 	let fetch = self
-		.fetch_prev(eval, first_normal_ts, incoming_pdu.prev_events())
+		.fetch_prev(eval, first_normal_ts, incoming_pdu.prev_events(), &held_bytes)
 		.await;
 
 	let stopping = self.services.server.is_stopping();
