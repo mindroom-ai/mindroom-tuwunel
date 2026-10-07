@@ -466,6 +466,19 @@ still comes from the knock event this server builds. Upstream has the same
 bug. Files: `src/service/membership/knock.rs`; test in
 `src/service/membership/knock/tests.rs`.
 
+### Knock state is checked before it is stored
+
+A knock on a room this server is not in stored every `knock_room_state` event
+as an outlier under the event ID computed from it, unchecked, replacing any
+copy this server already had. A copy whose content no longer matched its hash
+kept the real event ID, so it could replace a stored event of any room, and
+events of other rooms were stored too. Knock state events are now checked as
+`send_join` events are: only a full PDU of the knocked room whose signatures and
+content hash check out is stored, if this server has no copy yet, and enters
+the room's state. The client still gets the whole knock state as stripped
+state. Upstream has the same bug. Files: `src/service/membership/knock.rs`;
+test in `src/service/membership/knock/tests.rs`.
+
 ### A pending knock does not open a room over federation
 
 The federation room access check (`/state`, `/state_ids`, `/event`,

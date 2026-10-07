@@ -1,16 +1,15 @@
-use ruma::{
-	CanonicalJsonObject, MilliSecondsSinceUnixEpoch, OwnedEventId, RoomId, RoomVersionId,
-	api::federation::discovery::ServerSigningKeys, room_id,
-};
+use ruma::{CanonicalJsonObject, OwnedEventId, RoomId, RoomVersionId, room_id};
 use serde_json::{Value, json, value::to_raw_value};
 use tuwunel_core::{
 	Result,
 	config::Figment,
 	matrix::{event::gen_event_id, room_version},
 };
-use tuwunel_database::Json;
 
-use crate::{Services, test_utils::fixture};
+use crate::{
+	Services,
+	test_utils::{fixture, store_own_keys},
+};
 
 /// Events in a send_join auth chain are checked before they are stored.
 ///
@@ -95,19 +94,6 @@ async fn send_join_state_replaces_knock_state() -> Result {
 	assert_eq!(stored["content"], json!({ "topic": "joined" }));
 
 	Ok(())
-}
-
-/// Stores this server's signing key, as the send_join path verifies only with
-/// keys already in storage.
-fn store_own_keys(services: &Services) {
-	let (key_id, verify_key) = services.server_keys.active_verify_key();
-	let server_name = services.globals.server_name();
-	let mut keys =
-		ServerSigningKeys::new(server_name.to_owned(), MilliSecondsSinceUnixEpoch::now());
-	keys.verify_keys
-		.insert(key_id.to_owned(), verify_key.clone());
-
-	services.db["server_signingkeys"].raw_put(server_name, Json(&keys));
 }
 
 /// A topic event signed by this server, as another server would relay it.
