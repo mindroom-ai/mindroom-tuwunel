@@ -49,6 +49,10 @@ pub struct Opts {
 	/// Wall-clock budget for dispatching the complete sweep.
 	pub sweep_deadline: Option<Duration>,
 
+	/// Largest response body read from each destination; `max_response_size`
+	/// when unset.
+	pub limit: Option<usize>,
+
 	/// Remove the local server before constructing a room sweep.
 	pub exclude_self: bool,
 
@@ -199,6 +203,9 @@ where
 		resolve_opts(opts, config.federation.fanout.max_width, config.federation.fanout.timeout);
 
 	let client = &self.services.client.federation;
+	let limit = opts
+		.limit
+		.unwrap_or(config.network.http.max_response_size);
 	let record = opts.record;
 
 	fanout_with(
@@ -206,10 +213,10 @@ where
 		move |dest, request| async move {
 			match record {
 				| Record::Observe =>
-					self.execute_uncounted_allow_self(client, &dest, request)
+					self.execute_uncounted_allow_self(client, &dest, request, limit)
 						.await,
 				| Record::Contribute =>
-					self.execute_on_allow_self(client, &dest, request)
+					self.execute_on_allow_self(client, &dest, request, limit)
 						.await,
 			}
 		},
