@@ -3,7 +3,7 @@ use ruma::{
 	DeviceId, UserId, api::client::keys::upload_keys, encryption::DeviceKeys, serde::Raw,
 };
 use tuwunel_core::{Err, Result, debug, err};
-use tuwunel_service::{Services, users::DeviceKeysUpdate};
+use tuwunel_service::{Services, sending::MAX_EDU_CONTENT_BYTES, users::DeviceKeysUpdate};
 
 use crate::Ruma;
 
@@ -59,6 +59,11 @@ async fn store_device_keys(
 	sender_device: &DeviceId,
 	device_keys: &Raw<DeviceKeys>,
 ) -> Result {
+	// Other servers receive the keys in device list updates.
+	if device_keys.json().get().len() > MAX_EDU_CONTENT_BYTES {
+		return Err!(Request(TooLarge("Device keys are too large.")));
+	}
+
 	let new_keys = device_keys.deserialize().map_err(|e| {
 		err!(Request(BadJson(debug_warn!(
 			?device_keys,

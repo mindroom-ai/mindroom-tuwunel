@@ -15,7 +15,9 @@ use tuwunel_core::{
 	utils,
 	utils::{BoolExt, OptionExt},
 };
-use tuwunel_service::{Services, uiaa::SESSION_ID_LENGTH, users::parse_master_key};
+use tuwunel_service::{
+	Services, sending::MAX_EDU_CONTENT_BYTES, uiaa::SESSION_ID_LENGTH, users::parse_master_key,
+};
 
 use crate::{Ruma, router::auth_uiaa};
 
@@ -140,6 +142,11 @@ fn validate_key(
 	let Some(key) = key else {
 		return Ok(());
 	};
+
+	// Other servers receive the master and self-signing keys in EDUs.
+	if key.json().get().len() > MAX_EDU_CONTENT_BYTES {
+		return Err!(Request(TooLarge("Cross-signing key is too large.")));
+	}
 
 	let key = key
 		.deserialize()
