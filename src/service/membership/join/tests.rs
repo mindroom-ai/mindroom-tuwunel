@@ -1,5 +1,10 @@
+use std::collections::HashSet;
+
 use ruma::{CanonicalJsonObject, OwnedEventId, RoomId, RoomVersionId, room_id};
-use serde_json::{Value, json, value::to_raw_value};
+use serde_json::{
+	Value, json,
+	value::{RawValue as RawJsonValue, to_raw_value},
+};
 use tuwunel_core::{
 	Result,
 	config::Figment,
@@ -26,27 +31,26 @@ async fn send_join_auth_chain_is_checked_before_storing() -> Result {
 	let room_id = room_id!("!join:localhost");
 	let version = RoomVersionId::V11;
 	let rules = room_version::rules(&version)?;
-	let (known_id, known) = topic(services, room_id, "known")?;
-	let (unknown_id, unknown) = topic(services, room_id, "unknown")?;
-	let (foreign_id, foreign) = topic(services, room_id!("!other:localhost"), "foreign")?;
+	let [(create_id, create), (join_id, join)] = room(services, room_id)?;
+	let auth_events = [&create_id, &join_id];
+	let (known_id, known) = topic(services, room_id, "known", &auth_events)?;
+	let (unknown_id, unknown) = topic(services, room_id, "unknown", &auth_events)?;
+	let (foreign_id, foreign) =
+		topic(services, room_id!("!other:localhost"), "foreign", &auth_events)?;
 
 	store_own_keys(services);
 
+	let auth_chain = raw(&[&create, &join, &known])?;
 	services
 		.membership
-		.ingest_send_join_auth_chain(room_id, &version, &rules, &[to_raw_value(&known)?])
-		.await;
+		.ingest_send_join_events(room_id, &version, &rules, &auth_chain, &[])
+		.await?;
 
-	let auth_chain = [
-		to_raw_value(&altered(&known))?,
-		to_raw_value(&altered(&unknown))?,
-		to_raw_value(&foreign)?,
-	];
-
+	let auth_chain = raw(&[&create, &join, &altered(&known), &altered(&unknown), &foreign])?;
 	services
 		.membership
-		.ingest_send_join_auth_chain(room_id, &version, &rules, &auth_chain)
-		.await;
+		.ingest_send_join_events(room_id, &version, &rules, &auth_chain, &[])
+		.await?;
 
 	let stored = async |event_id| {
 		services
@@ -77,7 +81,8 @@ async fn send_join_state_replaces_knock_state() -> Result {
 	let room_id = room_id!("!join:localhost");
 	let version = RoomVersionId::V11;
 	let rules = room_version::rules(&version)?;
-	let (event_id, event) = topic(services, room_id, "joined")?;
+	let [(create_id, create), (join_id, join)] = room(services, room_id)?;
+	let (event_id, event) = topic(services, room_id, "joined", &[&create_id, &join_id])?;
 
 	store_own_keys(services);
 
@@ -85,10 +90,11 @@ async fn send_join_state_replaces_knock_state() -> Result {
 		.timeline
 		.add_pdu_outlier(&event_id, &serde_json::from_value(altered(&event))?);
 
+	let state = raw(&[&create, &join, &event])?;
 	services
 		.membership
-		.ingest_send_join_state(room_id, &version, &rules, &[to_raw_value(&event)?])
-		.await;
+		.ingest_send_join_events(room_id, &version, &rules, &[], &state)
+		.await?;
 
 	let stored: Value = services.timeline.get_outlier(&event_id).await?;
 	assert_eq!(stored["content"], json!({ "topic": "joined" }));
@@ -118,22 +124,18 @@ async fn send_join_create_keeps_its_own_room_id() -> Result {
 	store_own_keys(services);
 
 	let rules = room_version::rules(&v11)?;
-	let auth_chain = [to_raw_value(&other_create)?];
+	let auth_chain = raw(&[&other_create])?;
 	services
 		.membership
-		.ingest_send_join_auth_chain(other, &v11, &rules, &auth_chain)
-		.await;
+		.ingest_send_join_events(other, &v11, &rules, &auth_chain, &[])
+		.await?;
 
 	let rules = room_version::rules(&v12)?;
-	let auth_chain = [
-		to_raw_value(&joined_create)?,
-		to_raw_value(&other_create)?,
-		to_raw_value(&foreign_create)?,
-	];
+	let auth_chain = raw(&[&joined_create, &other_create, &foreign_create])?;
 	services
 		.membership
-		.ingest_send_join_auth_chain(&room_id, &v12, &rules, &auth_chain)
-		.await;
+		.ingest_send_join_events(&room_id, &v12, &rules, &auth_chain, &[])
+		.await?;
 
 	let stored_room = async |event_id| {
 		services
@@ -150,28 +152,125 @@ async fn send_join_create_keeps_its_own_room_id() -> Result {
 	Ok(())
 }
 
-/// A topic event signed by this server, as another server would relay it.
-fn topic(services: &Services, room_id: &RoomId, topic: &str) -> Result<(OwnedEventId, Value)> {
+/// send_join events are checked against their own auth events.
+///
+/// A join the creator sends for another user is rejected: it is not stored and
+/// stays out of the room state, while the creator's own events are kept. So is
+/// a topic whose power levels were stored before, as knock state is, when the
+/// response leaves them out or they come after the topic and are rejected.
+#[tokio::test]
+async fn send_join_state_is_authorized() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let room_id = room_id!("!join:localhost");
 	let version = RoomVersionId::V11;
-	let mut event: CanonicalJsonObject = serde_json::from_value(json!({
-		"type": "m.room.topic",
-		"state_key": "",
-		"content": { "topic": topic },
-		"room_id": room_id,
-		"sender": "@bob:localhost",
-		"origin_server_ts": 1,
-		"depth": 1,
-		"prev_events": [],
-		"auth_events": [],
-	}))?;
+	let rules = room_version::rules(&version)?;
+	let [(create_id, create), (join_id, join)] = room(services, room_id)?;
+	let (alice_id, alice) = state_event(
+		services,
+		room_id,
+		"m.room.member",
+		"@alice:localhost",
+		&json!({ "membership": "join" }),
+		&[&create_id, &join_id],
+	)?;
+	let (power_id, power) = state_event(
+		services,
+		room_id,
+		"m.room.power_levels",
+		"",
+		&json!({ "users": { "@bob:localhost": 100 } }),
+		&[&create_id, &join_id, &alice_id],
+	)?;
+	let (powered_id, powered) =
+		topic(services, room_id, "powered", &[&create_id, &join_id, &power_id])?;
 
+	store_own_keys(services);
+
+	let mut stored = power.clone();
+	stored["event_id"] = power_id.as_str().into();
 	services
-		.server_keys
-		.hash_and_sign_event(&mut event, &version)?;
+		.timeline
+		.add_pdu_outlier(&power_id, &serde_json::from_value(stored)?);
 
-	let event_id = gen_event_id(&event, &version)?;
+	let omitted = raw(&[&create, &join, &alice, &powered])?;
+	let after = raw(&[&create, &join, &alice, &powered, &power])?;
+	for state in [omitted, after] {
+		let state: HashSet<_> = services
+			.membership
+			.ingest_send_join_events(room_id, &version, &rules, &[], &state)
+			.await?
+			.into_values()
+			.collect();
 
-	Ok((event_id, serde_json::to_value(event)?))
+		assert_eq!(state, HashSet::from([create_id.clone(), join_id.clone()]));
+		assert!(!services.timeline.pdu_exists(&alice_id).await);
+		assert!(!services.timeline.pdu_exists(&powered_id).await);
+	}
+
+	Ok(())
+}
+
+/// A send_join create event that is rejected, or that names another room
+/// version than the join's, fails the join before anything is stored.
+///
+/// A v11 create cannot belong to a room ID without a server name, as v12 rooms
+/// have, so a v11 answer for a v12 room is refused.
+#[tokio::test]
+async fn send_join_refuses_a_rejected_create() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let version = RoomVersionId::V11;
+	let rules = room_version::rules(&version)?;
+	let (v12_create_id, _) = create(services, &RoomVersionId::V12, None, "@bob:localhost")?;
+	let v12_room_id = RoomId::new_v2(v12_create_id.localpart())?;
+	let answers = [
+		(&*v12_room_id, json!({ "room_version": "11" })),
+		(room_id!("!join:localhost"), json!({ "room_version": "10" })),
+	];
+
+	store_own_keys(services);
+
+	for (room_id, content) in answers {
+		let (create_id, create) =
+			state_event(services, room_id, "m.room.create", "", &content, &[])?;
+		let (join_id, join) = state_event(
+			services,
+			room_id,
+			"m.room.member",
+			"@bob:localhost",
+			&json!({ "membership": "join" }),
+			&[&create_id],
+		)?;
+
+		let state = raw(&[&create, &join])?;
+		let result = services
+			.membership
+			.ingest_send_join_events(room_id, &version, &rules, &[], &state)
+			.await;
+
+		assert!(result.is_err(), "{room_id} create was accepted");
+		assert!(!services.timeline.pdu_exists(&create_id).await);
+		assert!(!services.timeline.pdu_exists(&join_id).await);
+	}
+
+	Ok(())
+}
+
+/// A topic event of `@bob:localhost`.
+fn topic(
+	services: &Services,
+	room_id: &RoomId,
+	topic: &str,
+	auth_events: &[&OwnedEventId],
+) -> Result<(OwnedEventId, Value)> {
+	state_event(services, room_id, "m.room.topic", "", &json!({ "topic": topic }), auth_events)
 }
 
 /// The same event with its topic changed, keeping its hashes and signatures.
@@ -210,4 +309,64 @@ fn create(
 	let event_id = gen_event_id(&event, version)?;
 
 	Ok((event_id, serde_json::to_value(event)?))
+}
+
+/// The create event of a v11 room and the join of its creator,
+/// `@bob:localhost`.
+fn room(services: &Services, room_id: &RoomId) -> Result<[(OwnedEventId, Value); 2]> {
+	let create = create(services, &RoomVersionId::V11, Some(room_id), "@bob:localhost")?;
+	let join = state_event(
+		services,
+		room_id,
+		"m.room.member",
+		"@bob:localhost",
+		&json!({ "membership": "join" }),
+		&[&create.0],
+	)?;
+
+	Ok([create, join])
+}
+
+/// A v11 state event of `@bob:localhost` signed by this server, as another
+/// server would relay it.
+///
+/// Its previous event is the last of its auth events, and its depth is one
+/// more than their number.
+fn state_event(
+	services: &Services,
+	room_id: &RoomId,
+	kind: &str,
+	state_key: &str,
+	content: &Value,
+	auth_events: &[&OwnedEventId],
+) -> Result<(OwnedEventId, Value)> {
+	let version = RoomVersionId::V11;
+	let prev_events: Vec<_> = auth_events.last().into_iter().collect();
+	let mut event: CanonicalJsonObject = serde_json::from_value(json!({
+		"type": kind,
+		"state_key": state_key,
+		"content": content,
+		"room_id": room_id,
+		"sender": "@bob:localhost",
+		"origin_server_ts": 1,
+		"depth": auth_events.len().saturating_add(1),
+		"prev_events": prev_events,
+		"auth_events": auth_events,
+	}))?;
+
+	services
+		.server_keys
+		.hash_and_sign_event(&mut event, &version)?;
+
+	let event_id = gen_event_id(&event, &version)?;
+
+	Ok((event_id, serde_json::to_value(event)?))
+}
+
+/// The events as a send_join response carries them.
+fn raw(events: &[&Value]) -> Result<Vec<Box<RawJsonValue>>> {
+	events
+		.iter()
+		.map(|event| Ok(to_raw_value(event)?))
+		.collect()
 }

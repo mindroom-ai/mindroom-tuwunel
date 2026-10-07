@@ -164,6 +164,19 @@ the same bug. Files: `src/service/sync/mod.rs`,
 `src/api/client/sync/v5/rooms.rs`; tests in `src/service/sync/tests.rs` and
 `src/api/client/sync/v5/rooms/tests.rs`.
 
+### Sliding sync caps the lists, ranges and extension filters
+
+A sliding sync connection kept every list a request named with all of its
+ranges, and the account data, receipts, typing and profiles extensions kept
+their `lists` and `rooms` filters as sent. Each pass matched every room in the
+window against every list for each range, and every room an extension filter
+named against every list ID of that filter, without yielding, so a request
+with many lists, ranges or filter entries kept a worker busy for minutes. A
+connection now keeps at most 64 lists and the first 16 ranges of each, and an
+extension filter keeps its first 64 list IDs and its first 256 rooms. Upstream
+has the same bug. File: `src/service/sync/mod.rs`; tests in
+`src/service/sync/tests.rs`.
+
 ### EDUs sent to other servers are bounded in size
 
 Device keys and cross-signing keys a local client uploaded were stored with no
@@ -299,6 +312,23 @@ and a v12 create is accepted only when the room ID is derived from its event
 ID. Upstream has the same bug. Files: `src/service/server_keys/verify.rs`,
 `src/service/membership/join.rs`, `src/core/matrix/pdu.rs`,
 `src/core/matrix/pdu/format.rs`; test in `src/service/membership/join/tests.rs`.
+
+### send_join response events pass the authorization rules
+
+Joining a room over federation installed the `state` and `auth_chain` of the
+`send_join` response after checking only their hashes, signatures and format;
+only the join event itself went through the authorization rules. A state event
+the rules reject, such as a membership event for another user of this server,
+or a create event that cannot belong to the room ID, became part of this
+server's room state. Each event of the response is now checked against its own
+auth events in depth order, and is accepted only if all of its auth events were
+accepted before it in the same response; a copy stored earlier, such as knock
+state, does not count. An event that is not accepted is not stored and stays
+out of the room state. A rejected create event, or one whose room version
+differs from the `make_join` answer, fails the join.
+Upstream has the same bug. Files: `src/service/membership/join.rs`,
+`src/service/rooms/event_handler/handle_outlier_pdu.rs`; test in
+`src/service/membership/join/tests.rs`.
 
 ### Failed appservice requests leave the `hs_token` out of the log
 
@@ -482,6 +512,23 @@ when its room's turn comes. Upstream has the same bug. Files:
 `src/service/membership/stripped_state.rs`,
 `src/service/fetcher/{validate.rs,transport.rs}`; test in
 `src/main/tests/federation_inbound_parse.rs`.
+
+### Missing-event and state id answers are read up to a limit
+
+An incoming event whose prev events are missing asks the sending server for
+them with `/get_missing_events`, and the state fallback asks it for the state
+at an event with `/state_ids`. Both answers were read under the generic
+federation response limit (256 MiB by default), and each event of a
+missing-events answer was parsed in full before anything checked its size,
+although the request asks for only 10 events. A missing-events answer is now
+read up to the size of one `/event` answer for each event asked for (about
+2.5 MiB for 10), and an event in it larger than four times the PDU size limit
+is dropped before it is parsed. A `/state_ids` answer is read up to 64 MiB,
+the ids of over a million events. A larger answer is dropped while it is read,
+and neither limit exceeds `max_response_size`. Upstream has the same bug.
+Files: `src/service/fetcher/{mod.rs,transport.rs,validate.rs}`,
+`src/service/rooms/event_handler/fetch_prev.rs`; test in
+`src/main/tests/federation_event_response_limit.rs`.
 
 ### `ip_range_denylist` covers IPv4-mapped IPv6 addresses
 
