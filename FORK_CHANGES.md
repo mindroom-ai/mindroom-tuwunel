@@ -237,6 +237,20 @@ otherwise the sign-in is treated as a new user, and
 Upstream has the same bug. Files: `src/service/oauth/{mod.rs,user_info.rs}`,
 `src/api/client/session/sso.rs`.
 
+### Knock state is checked before it is stored
+
+A knock on a room this server is not in stored every non-member
+`knock_room_state` event as an outlier under the event ID computed from it,
+unchecked, replacing any copy this server already had. A copy whose content no
+longer matched its hash kept the real event ID, so it could replace a stored
+event of any room, and events of other rooms were stored too. Knock state events
+are now checked as `send_join` events are: only a non-member full PDU of the
+knocked room whose signatures and content hash check out is stored, if this
+server has no copy yet, and enters the room's state. The knock state the client
+sees is built from that room state, so it now leaves out events that fail the
+check. Upstream has the same bug. Files: `src/service/membership/knock.rs`;
+test in `src/service/membership/knock/tests.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every

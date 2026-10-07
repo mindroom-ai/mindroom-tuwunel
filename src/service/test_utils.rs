@@ -6,6 +6,7 @@ use std::{
 	thread::current as current_thread,
 };
 
+use ruma::{MilliSecondsSinceUnixEpoch, api::federation::discovery::ServerSigningKeys};
 use tokio::{process::Command, runtime::Handle};
 use tracing::subscriber::NoSubscriber;
 use tuwunel_core::{
@@ -17,6 +18,7 @@ use tuwunel_core::{
 	metrics::Metrics,
 	utils::random_string,
 };
+use tuwunel_database::Json;
 
 use crate::Services;
 
@@ -107,6 +109,19 @@ pub(crate) fn pdu_id(count: u64) -> RawPduId {
 		count: PduCount::Normal(count),
 	}
 	.into()
+}
+
+/// Stores this server's signing key, as event checks that fetch no keys use
+/// only keys already in storage.
+pub(crate) fn store_own_keys(services: &Services) {
+	let (key_id, verify_key) = services.server_keys.active_verify_key();
+	let server_name = services.globals.server_name();
+	let mut keys =
+		ServerSigningKeys::new(server_name.to_owned(), MilliSecondsSinceUnixEpoch::now());
+	keys.verify_keys
+		.insert(key_id.to_owned(), verify_key.clone());
+
+	services.db["server_signingkeys"].raw_put(server_name, Json(&keys));
 }
 
 impl Drop for DatabasePath {
