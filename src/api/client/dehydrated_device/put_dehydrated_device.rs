@@ -1,6 +1,7 @@
 use axum::extract::State;
 use ruma::api::client::dehydrated_device::put_dehydrated_device::msc3814::{Request, Response};
-use tuwunel_core::Result;
+use tuwunel_core::{Err, Result};
+use tuwunel_service::sending::MAX_EDU_CONTENT_BYTES;
 
 use crate::{ClientIp, Ruma};
 
@@ -26,6 +27,11 @@ pub(crate) async fn put_dehydrated_device_route(
 		.sender_user
 		.as_deref()
 		.expect("AccessToken authentication required");
+
+	// Other servers receive the keys in device list updates.
+	if body.body.device_keys.json().get().len() > MAX_EDU_CONTENT_BYTES {
+		return Err!(Request(TooLarge("Device keys are too large.")));
+	}
 
 	let device_id = body.body.device_id.clone();
 

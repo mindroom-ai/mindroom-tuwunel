@@ -78,6 +78,21 @@ same redaction as their reason. Upstream redacts only the target too. Files:
 `src/service/rooms/{timeline/append.rs,pdu_metadata/bundling.rs}`; test in
 `src/main/tests/redaction_edits.rs`.
 
+### Uploaded device and cross-signing keys are bounded in size
+
+Device keys a local client uploaded, and its master and self-signing keys,
+were stored with no size limit and sent to other servers unchanged in
+`m.device_list_update` and `m.signing_key_update` EDUs. Device keys, including
+those of a dehydrated device, and each cross-signing key are now refused with
+413 `M_TOO_LARGE` over 64 KiB, the limit upstream and Synapse apply to
+to-device messages. Upstream
+bounds to-device messages, device IDs and the EDU bytes of a federation
+transaction since v1.9.4 (`ff77c2220`), but still stores and sends keys of any
+size. Files:
+`src/api/client/{dehydrated_device.rs,keys/upload_keys.rs,keys/upload_signing_keys.rs}`,
+`src/service/sending/{mod.rs,sender/mod.rs}`; test in
+`src/main/tests/edu_content_size.rs`.
+
 ### Federated read receipts need a joined user and an event of the room
 
 An `m.receipt` EDU from another server was stored for any of that server's
