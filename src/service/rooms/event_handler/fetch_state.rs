@@ -1,4 +1,7 @@
-use std::collections::{HashMap, hash_map};
+use std::{
+	collections::{HashMap, hash_map},
+	sync::atomic::AtomicUsize,
+};
 
 use futures::FutureExt;
 use ruma::{OwnedEventId, RoomId, ServerName, events::StateEventType};
@@ -73,8 +76,9 @@ async fn assemble_state(
 
 	debug!("Fetching state events");
 	let state_ids = pdu_ids.iter().map(AsRef::as_ref);
+	let held_bytes = AtomicUsize::new(0);
 	let state_vec = self
-		.fetch_auth(eval, state_ids)
+		.fetch_auth(eval, state_ids, &held_bytes)
 		.boxed() // cold arm: federation fallback
 		.await;
 

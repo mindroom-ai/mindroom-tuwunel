@@ -1,4 +1,9 @@
-use std::{fmt::Debug, iter::once, sync::Arc, time::Duration};
+use std::{
+	fmt::Debug,
+	iter::once,
+	sync::{Arc, atomic::AtomicUsize},
+	time::Duration,
+};
 
 use ruma::{
 	CanonicalJsonObject, EventId, OwnedEventId, RoomId, RoomVersionId, ServerName,
@@ -484,9 +489,11 @@ async fn admit(
 		auth_events_known: true,
 	};
 
+	let held_bytes = AtomicUsize::new(0);
+
 	services
 		.event_handler
-		.handle_outlier_pdu(eval, from_value(event)?)
+		.handle_outlier_pdu(eval, from_value(event)?, &held_bytes)
 		.await
 }
 

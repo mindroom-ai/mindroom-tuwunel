@@ -1,4 +1,7 @@
-use std::{collections::HashMap, iter::once, time::Duration};
+use std::{
+	collections::HashMap, iter::once, num::NonZeroUsize, sync::atomic::AtomicUsize,
+	time::Duration,
+};
 
 use futures::{
 	FutureExt, StreamExt, TryStreamExt,
@@ -29,13 +32,16 @@ use crate::fetcher::{EventWindow, Op, Opts};
 
 pub(super) type Pdus = HashMap<OwnedEventId, (PduEvent, CanonicalJsonObject)>;
 
+/// Events requested by the `/get_missing_events` batch before the walk.
+const MISSING_EVENTS_LIMIT: NonZeroUsize = NonZeroUsize::new(10).unwrap();
+
 /// An incoming event's missing previous events, walked backwards.
 ///
 /// The incoming event's handler upgrades the walked events and records
 /// `capped` in the prev-walk counters.
 pub(super) struct PrevFetch {
 	/// Walked event ids in topological order, including placeholders for events
-	/// that failed to fetch or fell past the cap.
+	/// that failed to fetch.
 	pub(super) sorted: Vec<OwnedEventId>,
 
 	/// Fetched PDUs of the walked events.
@@ -48,7 +54,7 @@ pub(super) struct PrevFetch {
 /// Walk an incoming event's missing previous events backwards.
 ///
 /// Each fetched event queues its own missing previous events in turn, until
-/// they reach the timeline, predate the room, or exceed the
+/// they reach the timeline, predate the room, or the queued events reach the
 /// `max_fetch_prev_events` cap.
 #[implement(super::Service)]
 #[tracing::instrument(
@@ -64,6 +70,7 @@ pub(super) async fn fetch_prev<'a, Events>(
 	eval @ Eval { origin, room_id, .. }: Eval<'_>,
 	first_normal_ts: MilliSecondsSinceUnixEpoch,
 	initial_set: Events,
+	held_bytes: &AtomicUsize,
 ) -> Result<PrevFetch>
 where
 	Events: Iterator<Item = &'a EventId> + Clone + Send,
@@ -88,7 +95,7 @@ where
 		.unwrap_or(has_gap);
 
 	has_gap
-		.then_async(|| self.prefetch_missing_events(eval))
+		.then_async(|| self.prefetch_missing_events(eval, held_bytes))
 		.await;
 
 	let mut todo_outlier_stack: FuturesOrdered<_> = initial_set
@@ -109,7 +116,7 @@ where
 		})
 		.map_ok(async |event_id| {
 			let events = once(event_id.as_ref());
-			let auth = self.fetch_auth(eval, events).await;
+			let auth = self.fetch_auth(eval, events, held_bytes).await;
 
 			(event_id, auth)
 		})
@@ -117,6 +124,8 @@ where
 		.try_collect()
 		.await?;
 
+	// Queued fetches all run at once and hold their results until they are
+	// popped, so the cap counts every queued event, not only the walked ones.
 	let limit: usize = self
 		.services
 		.server
@@ -125,8 +134,8 @@ where
 		.history
 		.max_fetch_prev_events
 		.into();
-
-	let mut amount = 0_usize;
+	let mut queued = todo_outlier_stack.len();
+	let mut capped = false;
 	let mut pdus = HashMap::new();
 	let mut graph: HashMap<OwnedEventId, _> = HashMap::with_capacity(todo_outlier_stack.len());
 
@@ -140,13 +149,6 @@ where
 		};
 
 		check_room_id(&pdu, room_id)?;
-
-		if amount > limit {
-			// keep counting so the capped check below sees the cut
-			amount = amount.saturating_add(1);
-			graph.insert(prev_event_id.clone(), Default::default());
-			continue;
-		}
 
 		if json_opt.is_none() {
 			json_opt = self
@@ -166,7 +168,6 @@ where
 		// handle_prev_pdu upgrades events this old too, so their prev events must be
 		// walked and room-checked as well.
 		if pdu.origin_server_ts() >= first_normal_ts {
-			amount = amount.saturating_add(1);
 			debug_assert!(
 				pdu.prev_events().count() <= MAX_PREV_EVENTS,
 				"PduEvent {prev_event_id} has too many prev_events"
@@ -177,10 +178,16 @@ where
 					continue;
 				}
 
+				if queued > limit {
+					capped = true;
+					break;
+				}
+
+				queued = queued.saturating_add(1);
 				let prev_prev = prev_prev.to_owned();
 				let fetch = async move {
 					let fetch = self
-						.fetch_auth(eval, once(prev_prev.as_ref()))
+						.fetch_auth(eval, once(prev_prev.as_ref()), held_bytes)
 						.await;
 
 					(prev_prev, fetch)
@@ -227,9 +234,6 @@ where
 		sorted.len() >= pdus.len(),
 		"returned topologically sorted events differ from pdus"
 	);
-
-	// at most limit + 1 events are admitted, so more means one was cut
-	let capped = amount > limit.saturating_add(1);
 
 	Ok(PrevFetch { sorted, pdus, capped })
 }
@@ -280,6 +284,7 @@ async fn prefetch_missing_events(
 		room_version,
 		..
 	}: Eval<'_>,
+	held_bytes: &AtomicUsize,
 ) {
 	let boundary: EventWindow = self
 		.services
@@ -295,6 +300,7 @@ async fn prefetch_missing_events(
 		.hint(origin.to_owned())
 		.room_version(room_version.to_owned())
 		.attempt_limit(super::EVENT_FETCH_ATTEMPT_LIMIT)
+		.backfill_limit(MISSING_EVENTS_LIMIT)
 		.fanout_for_op();
 
 	let Ok(outcome) = self.services.fetcher.fetch(opts).await else {
@@ -305,11 +311,13 @@ async fn prefetch_missing_events(
 		return;
 	};
 
+	// A server may answer with more events than were asked for.
 	events
 		.into_iter()
+		.take(MISSING_EVENTS_LIMIT.get())
 		.stream()
 		.for_each_concurrent(automatic_width(), async |pdu| {
-			self.land_missing_event(eval, &pdu)
+			self.land_missing_event(eval, &pdu, held_bytes)
 				.map(Result::ok)
 				.await;
 		})
@@ -324,6 +332,7 @@ async fn land_missing_event(
 	&self,
 	eval @ Eval { room_id, room_version, .. }: Eval<'_>,
 	pdu: &RawJsonValue,
+	held_bytes: &AtomicUsize,
 ) -> Result {
 	let value: CanonicalJsonObject = serde_json::from_str(pdu.get())
 		.map_err(|e| err!(BadServerResponse("missing-events pdu is not canonical json: {e}")))?;
@@ -345,7 +354,7 @@ async fn land_missing_event(
 	};
 
 	// cold arm: missing events
-	Box::pin(self.handle_outlier_pdu(missing, value))
+	Box::pin(self.handle_outlier_pdu(missing, value, held_bytes))
 		.await
 		.map(|_| ())
 }
