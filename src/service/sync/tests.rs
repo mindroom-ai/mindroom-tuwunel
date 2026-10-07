@@ -4,8 +4,8 @@ use minicbor_serde::{from_slice, to_vec};
 use ruma::{
 	OwnedRoomId, RoomId, UInt,
 	api::client::sync::sync_events::v5::{
-		ListId, Ranges, Request,
-		request::{self, List, ListConfig, ListFilters},
+		ListId, ListIds, Ranges, Request,
+		request::{self, ExtensionRoomConfig, List, ListConfig, ListFilters},
 	},
 	directory::RoomTypeFilter,
 	events::StateEventType,
@@ -14,7 +14,10 @@ use ruma::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{Connection, Lists, MAX_SYNC_FIELDS, REQUIRED_STATE_MAX, Room, Subscriptions};
+use super::{
+	Connection, EXTENSION_ROOMS_MAX, LISTS_MAX, Lists, MAX_SYNC_FIELDS, RANGES_MAX,
+	REQUIRED_STATE_MAX, Room, Subscriptions,
+};
 
 const LIST_ID: &str = "main";
 
@@ -342,6 +345,66 @@ fn update_cache_keeps_only_the_first_required_state_selectors() {
 
 	for config in configs {
 		assert_eq!(config.required_state, &required_state[..REQUIRED_STATE_MAX]);
+	}
+}
+
+#[test]
+fn update_cache_keeps_only_the_first_lists_and_ranges() {
+	let ranges: Vec<_> = (0..)
+		.take(RANGES_MAX + 1)
+		.map(|start| (start, start))
+		.collect();
+
+	let mut request = Request::new();
+
+	request.lists = (0..=LISTS_MAX)
+		.map(|i| (i.to_string().as_str().into(), list_with_ranges(&ranges)))
+		.collect();
+
+	let mut conn = Connection::default();
+
+	assert!(conn.update_cache(&request));
+	assert!(!conn.update_cache(&request));
+	assert_eq!(conn.lists.len(), LISTS_MAX);
+
+	for list in conn.lists.values() {
+		assert_eq!(list.ranges, ranges_from_u64(&ranges[..RANGES_MAX]));
+	}
+}
+
+#[test]
+fn update_cache_keeps_only_the_first_extension_filters() {
+	let room_id = room_id!("!extension:example.com");
+	let lists = ListIds::from_elem(list_id(), LISTS_MAX + 1);
+	let rooms = vec![ExtensionRoomConfig::Room(room_id.to_owned()); EXTENSION_ROOMS_MAX + 1];
+
+	let mut request = Request::new();
+	let extensions = &mut request.extensions;
+
+	extensions.account_data.lists = Some(lists.clone());
+	extensions.account_data.rooms = Some(rooms.clone());
+	extensions.receipts.lists = Some(lists.clone());
+	extensions.receipts.rooms = Some(rooms.clone());
+	extensions.typing.lists = Some(lists.clone());
+	extensions.typing.rooms = Some(rooms.clone());
+	extensions.profiles.lists = Some(lists.clone());
+	extensions.profiles.rooms = Some(rooms.clone());
+
+	let mut conn = Connection::default();
+
+	conn.update_cache(&request);
+
+	let cached = &conn.extensions;
+	let filters = [
+		(&cached.account_data.lists, &cached.account_data.rooms),
+		(&cached.receipts.lists, &cached.receipts.rooms),
+		(&cached.typing.lists, &cached.typing.rooms),
+		(&cached.profiles.lists, &cached.profiles.rooms),
+	];
+
+	for (cached_lists, cached_rooms) in filters {
+		assert_eq!(cached_lists.as_deref(), Some(&lists[..LISTS_MAX]));
+		assert_eq!(cached_rooms.as_deref(), Some(&rooms[..EXTENSION_ROOMS_MAX]));
 	}
 }
 
