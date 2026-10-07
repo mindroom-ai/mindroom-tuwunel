@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicUsize;
 use futures::{StreamExt, TryFutureExt};
 use ruma::{
 	CanonicalJsonObject, EventId, RoomId, RoomVersionId, ServerName, events::TimelineEventType,
+	room_version_rules::RoomVersionRules,
 };
 use tuwunel_core::{
 	Err, Result, debug, debug_info, implement,
@@ -107,7 +108,31 @@ pub(super) async fn handle_outlier_pdu(
 	// 6. Reject "due to auth events" if the event doesn't pass auth based on the
 	//    auth events
 	debug!("Checking based on auth events");
+	self.auth_check_by_auth_events(&event, &room_rules)
+		.await?;
 
+	trace!("Validation successful.");
+
+	// 7. Persist the event as an outlier.
+	self.services
+		.timeline
+		.add_pdu_outlier(event.event_id(), &pdu_json);
+
+	trace!("Added pdu as outlier.");
+
+	Ok((event, pdu_json))
+}
+
+/// Checks an event against the stored auth events it names.
+///
+/// In room versions that derive the room ID from the create event, the create
+/// event is also taken as an auth event. A missing auth event fails the check.
+#[implement(super::Service)]
+pub async fn auth_check_by_auth_events(
+	&self,
+	event: &PduEvent,
+	room_rules: &RoomVersionRules,
+) -> Result {
 	let is_hydra = !room_rules
 		.event_format
 		.allow_room_create_in_auth_events;
@@ -135,18 +160,7 @@ pub(super) async fn handle_outlier_pdu(
 		.collect()
 		.await;
 
-	auth_check(&room_rules, &event, &*self.services.timeline, auth_events.as_slice())
+	auth_check(room_rules, event, &*self.services.timeline, auth_events.as_slice())
 		.await?
-		.into_result()?;
-
-	trace!("Validation successful.");
-
-	// 7. Persist the event as an outlier.
-	self.services
-		.timeline
-		.add_pdu_outlier(event.event_id(), &pdu_json);
-
-	trace!("Added pdu as outlier.");
-
-	Ok((event, pdu_json))
+		.into_result()
 }
