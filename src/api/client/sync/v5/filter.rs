@@ -1,4 +1,3 @@
-use futures::StreamExt;
 use ruma::{
 	RoomId, UserId,
 	api::client::sync::sync_events::v5::request::ListFilters,
@@ -10,9 +9,10 @@ use serde::{Deserialize, de::IgnoredAny};
 use tuwunel_core::{
 	is_equal_to, is_true,
 	utils::{
-		BoolExt, FutureBoolExt, IterStream, ReadyExt,
+		BoolExt, FutureBoolExt, IterStream,
 		future::{self, OptionFutureExt, ReadyBoolExt, ReadyEqExt},
 		option::OptionExt,
+		stream::BroadbandExt,
 	},
 	warn,
 };
@@ -76,8 +76,17 @@ pub(super) async fn filter_room(
 				.spaces
 				.iter()
 				.stream()
-				.flat_map(|room_id| services.spaces.get_space_children(room_id))
-				.ready_any(is_equal_to!(room_id))
+				.broad_any(async |space_id| {
+					services
+						.state_accessor
+						.room_state_get_id(
+							space_id,
+							&StateEventType::SpaceChild,
+							room_id.as_str(),
+						)
+						.await
+						.is_ok()
+				})
 				.await
 		});
 
