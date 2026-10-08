@@ -1,8 +1,8 @@
 use std::{collections::HashMap, iter::once, slice::from_ref};
 
 use ruma::{
-	EventId, OwnedEventId, RoomId, RoomVersionId, events::StateEventType, room_id, server_name,
-	user_id,
+	EventId, OwnedEventId, RoomId, RoomVersionId, UserId, events::StateEventType, room_id,
+	server_name, user_id,
 };
 use serde_json::{Value, from_value, json, to_vec, value::to_raw_value};
 use tuwunel_core::{Error, Result, config::Figment};
@@ -434,7 +434,9 @@ async fn a_repeated_event_is_checked_again_after_a_stored_copy_is_replaced() -> 
 	let auth_chain = [room.as_slice(), &[altered, dave_join.clone(), invite.clone()]].concat();
 	let listed = [room.as_slice(), &[levels, dave_join, invite]].concat();
 
-	let state = ingest_as(services, room_id, &version, &auth_chain, &listed).await?;
+	let state =
+		ingest_as(services, room_id, user_id!("@dave:localhost"), &version, &auth_chain, &listed)
+			.await?;
 
 	assert!(state.values().any(|id| id == &levels_id));
 	assert!(state.values().any(|id| id == &dave_id));
@@ -499,11 +501,13 @@ async fn a_v12_send_join_event_waits_for_the_implied_create() -> Result {
 
 	let (name_id, name) = signed(services, &version, name)?;
 
-	ingest_as(services, &room_id, &version, &[], from_ref(&name)).await?;
+	let bob = user_id!("@bob:localhost");
+
+	ingest_as(services, &room_id, bob, &version, &[], from_ref(&name)).await?;
 
 	assert!(!services.timeline.pdu_exists(&name_id).await);
 
-	let state = ingest_as(services, &room_id, &version, &[], &[name, join, create]).await?;
+	let state = ingest_as(services, &room_id, bob, &version, &[], &[name, join, create]).await?;
 
 	assert!(state.values().any(|id| id == &name_id));
 	assert!(state.values().any(|id| id == &create_id));
@@ -925,12 +929,14 @@ async fn ingest_response(
 	auth_chain: &[Value],
 	state: &[Value],
 ) -> Result<HashMap<u64, OwnedEventId>> {
-	ingest_as(services, room_id, &RoomVersionId::V11, auth_chain, state).await
+	let bob = user_id!("@bob:localhost");
+	ingest_as(services, room_id, bob, &RoomVersionId::V11, auth_chain, state).await
 }
 
 async fn ingest_as(
 	services: &Services,
 	room_id: &RoomId,
+	joining: &UserId,
 	version: &RoomVersionId,
 	auth_chain: &[Value],
 	state: &[Value],
@@ -948,7 +954,7 @@ async fn ingest_as(
 
 	services
 		.membership
-		.ingest_send_join_events(room_id, version, &room_version_rules(version)?, events)
+		.ingest_send_join_events(room_id, joining, version, &room_version_rules(version)?, events)
 		.await
 }
 

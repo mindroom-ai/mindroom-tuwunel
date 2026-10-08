@@ -43,7 +43,10 @@ use tuwunel_core::{
 use tuwunel_matrix::{
 	event::gen_event_id_canonical_json,
 	pdu::{Pdu, PduBuilder, check_rules},
-	room::state::resolution::{self as state_res, AuthCheckOutcome, events::RoomCreateEvent},
+	room::state::resolution::{
+		self as state_res, AuthCheckOutcome,
+		events::{RoomCreateEvent, RoomMemberEvent},
+	},
 	room_version,
 };
 
@@ -458,7 +461,13 @@ async fn join_remote(
 	};
 
 	let state = self
-		.ingest_send_join_events(room_id, &room_version_id, &room_version_rules, events)
+		.ingest_send_join_events(
+			room_id,
+			sender_user,
+			&room_version_id,
+			&room_version_rules,
+			events,
+		)
 		.await?;
 
 	debug!("Running send_join auth check...");
@@ -753,6 +762,7 @@ fn merge_restricted_signature(
 async fn ingest_send_join_events(
 	&self,
 	room_id: &RoomId,
+	joining: &UserId,
 	room_version_id: &RoomVersionId,
 	room_version_rules: &RoomVersionRules,
 	SendJoinEvents { auth_chain, state }: SendJoinEvents<'_>,
@@ -821,8 +831,25 @@ async fn ingest_send_join_events(
 		Ok(Some((admitted, admission)))
 	})
 	.ready_try_filter_map(|admitted| {
-		let Some((event_id, Pdu { kind, state_key: Some(state_key), .. }, true)) = admitted
-		else {
+		let Some((event_id, pdu, true)) = admitted else {
+			return Ok(None);
+		};
+
+		let Some(state_key) = pdu.state_key.as_deref() else {
+			return Ok(None);
+		};
+
+		let other_local = pdu.kind == TimelineEventType::RoomMember
+			&& state_key != joining.as_str()
+			&& <&UserId>::try_from(state_key)
+				.is_ok_and(|user| self.services.globals.user_is_local(user));
+
+		if other_local && RoomMemberEvent::new(&pdu).membership()? == MembershipState::Join {
+			// Keep the outlier for authorization, not as a new local membership.
+			return Ok(None);
+		}
+
+		let Pdu { kind, state_key: Some(state_key), .. } = pdu else {
 			return Ok(None);
 		};
 
