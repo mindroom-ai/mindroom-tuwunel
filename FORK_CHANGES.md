@@ -540,18 +540,21 @@ invite's event and the create event in its stripped state, and the events of
 `send_join`, `send_leave` and `send_knock` were parsed at any length, since the
 64 KiB PDU limit is checked only later, and a transaction parsed all of its PDUs
 before any of them waited for its room's turn. The origin's key is now resolved
-before the body is parsed, a federation request drops the parsed body once its
-typed request is built, and an incoming PDU longer than four times the PDU
-limit, the limit the fetcher already applies to fetched events, is refused
-before it is parsed. A transaction keeps each PDU's JSON raw and parses it again
-when its room's turn comes. Upstream has the same bug. Files:
-`src/api/router/{args.rs,auth.rs,auth/server.rs}`,
+before the body is parsed, and the signature check uses that key rather than
+looking it up again, which would fetch a key document too large to store a
+second time. A federation request drops the parsed body once its typed request
+is built, and an incoming PDU longer than four times the PDU limit, the limit
+the fetcher already applies to fetched events, is refused before it is parsed.
+A transaction keeps each PDU's JSON raw and parses it again when its room's turn
+comes. Upstream has the same bug. Files:
+`src/api/router/{args.rs,auth.rs,auth/dispatch.rs,auth/server.rs}`,
 `src/api/server/{send.rs,invite.rs,send_join.rs,send_leave.rs,send_knock.rs}`,
 `src/core/matrix/{pdu.rs,pdu/format/check.rs}`,
 `src/service/rooms/event_handler/parse_incoming_pdu.rs`,
 `src/service/membership/stripped_state.rs`,
-`src/service/fetcher/{validate.rs,transport.rs}`; test in
-`src/main/tests/federation_inbound_parse.rs`.
+`src/service/fetcher/{validate.rs,transport.rs}`; tests in
+`src/main/tests/federation_inbound_parse.rs` and
+`src/main/tests/federation_origin_key_fetch.rs`.
 
 ### Missing-event and state id answers are read up to a limit
 
