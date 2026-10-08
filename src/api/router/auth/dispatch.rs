@@ -226,7 +226,7 @@ impl AuthDispatch for ServerSignatures {
 			| Token::Expired => expired_token(),
 			| Token::Appservice(_) | Token::User(_) =>
 				Err!(Request(Unauthorized("Server signatures must be used on this endpoint."))),
-			| Token::None => Ok(auth_server(services, request, json_body).await?),
+			| Token::None => auth_server(services, request, json_body),
 		}
 	}
 }
