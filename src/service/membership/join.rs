@@ -334,6 +334,7 @@ async fn join_remote(
 	let state = self
 		.ingest_send_join_events(
 			room_id,
+			sender_user,
 			&room_version_id,
 			&room_version_rules,
 			&response.auth_chain,
@@ -614,12 +615,14 @@ struct ExtractDepth {
 /// the response are decided before it. An event is accepted only if it passes
 /// and all of its auth events were accepted before it; a stored copy of an
 /// auth event does not count. A rejected event is not stored and stays out of
-/// the returned room state. A rejected create event, or one of another room
-/// version than the join's, fails the join.
+/// the returned room state, and so does an accepted join of a local user other
+/// than `sender_user`. A rejected create event, or one of another room version
+/// than the join's, fails the join.
 #[implement(Service)]
 async fn ingest_send_join_events(
 	&self,
 	room_id: &RoomId,
+	sender_user: &UserId,
 	room_version_id: &RoomVersionId,
 	room_version_rules: &RoomVersionRules,
 	auth_chain: &[Box<RawJsonValue>],
@@ -698,7 +701,23 @@ async fn ingest_send_join_events(
 
 		accepted.insert(event_id.clone());
 
-		if in_state && let Some(state_key) = &pdu.state_key {
+		// Forcing this state replays its memberships, which the answering server
+		// picks, so it must not join other local users. Their joins are still
+		// stored above, as other events may name them as auth events.
+		let other_local_join = pdu.kind == TimelineEventType::RoomMember
+			&& pdu.state_key.as_deref().is_some_and(|state_key| {
+				state_key != sender_user.as_str()
+					&& UserId::parse(state_key)
+						.is_ok_and(|user_id| self.services.globals.user_is_local(&user_id))
+			})
+			&& pdu
+				.get_content::<RoomMemberEventContent>()
+				.is_ok_and(|content| content.membership == MembershipState::Join);
+
+		if in_state
+			&& !other_local_join
+			&& let Some(state_key) = &pdu.state_key
+		{
 			let shortstatekey = self
 				.services
 				.short
