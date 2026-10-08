@@ -40,10 +40,10 @@ const SETTLE: Duration = Duration::from_millis(300);
 
 /// Drives the sliding-sync list filters over a direct and a plain room.
 ///
-/// One sync carries five lists whose filters sort the two rooms by `m.direct`
-/// and by room tag, so each room must come back naming exactly the lists it
-/// belongs to. The room payload's own `is_dm` is asserted alongside, since it
-/// answers from the same source.
+/// One sync carries six lists whose filters sort the two rooms by `m.direct`,
+/// by room tag and by space, so each room must come back naming exactly the
+/// lists it belongs to. The room payload's own `is_dm` is asserted alongside,
+/// since it answers from the same source.
 #[test]
 fn list_filters_partition_rooms_by_dm_and_tag() -> Result {
 	let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -114,6 +114,17 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let direct = alice.create_room(&direct_body).await?;
 	let plain = alice.create_room(&plain_body).await?;
 
+	let space_body = json!({
+		"creation_content": { "type": "m.space" },
+		"initial_state": [{
+			"type": "m.space.child",
+			"state_key": &plain,
+			"content": { "via": [alice_id.server_name()] },
+		}],
+	});
+
+	let space = alice.create_room(&space_body).await?;
+
 	bob.join(&direct).await?;
 	bob.join(&plain).await?;
 
@@ -126,7 +137,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	bob.tag_room(&bob_id, &direct, LOW_PRIORITY)
 		.await?;
 
-	let response = bob.sync_lists(None).await?;
+	let response = bob.sync_lists(&space, None).await?;
 
 	let matched = |room_id: &RoomId, want: &[&str]| {
 		let got = matched_lists(&response, room_id);
@@ -137,7 +148,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	};
 
 	matched(&direct, &["directs", "untagged"])?;
-	matched(&plain, &["favourites", "others", "priority"])?;
+	matched(&plain, &["favourites", "others", "priority", "spaced"])?;
 
 	is_dm(&response, &direct)
 		.unwrap_or_default()
@@ -150,7 +161,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.into_option()
 		.ok_or_else(|| err!("a plain room's payload reports itself a direct chat"))?;
 
-	woken_poll_sees_the_change(&bob, &bob_id, &alice_id, &response, &direct, &plain).await
+	woken_poll_sees_the_change(&bob, &bob_id, &alice_id, &response, &direct, &plain, &space).await
 }
 
 /// A poll already parked must answer from `m.direct` as it stands on waking.
@@ -165,10 +176,11 @@ async fn woken_poll_sees_the_change(
 	response: &Value,
 	direct: &RoomId,
 	plain: &RoomId,
+	space: &RoomId,
 ) -> Result {
 	let pos = field(response, "pos")?;
 
-	let polling = bob.sync_lists(Some(pos));
+	let polling = bob.sync_lists(space, Some(pos));
 	let flipping = async {
 		sleep(SETTLE).await;
 
@@ -252,9 +264,10 @@ async fn tag_room(&self, user_id: &UserId, room_id: &RoomId, tag: &str) -> Resul
 ///
 /// The first four come in complementary pairs, so an omission is as visible as
 /// a spurious match. The fifth names a tag in both `tags` and `not_tags`, which
-/// the proposal resolves in favour of `not_tags`.
+/// the proposal resolves in favour of `not_tags`. The sixth names a space whose
+/// only child is the plain room.
 #[implement(Client, params = "<'_>")]
-async fn sync_lists(&self, since: Option<&str>) -> Result<Value> {
+async fn sync_lists(&self, space: &RoomId, since: Option<&str>) -> Result<Value> {
 	let list = |filters: Value| {
 		json!({
 			"ranges": [[0, 99]],
@@ -276,6 +289,7 @@ async fn sync_lists(&self, since: Option<&str>) -> Result<Value> {
 			"favourites": list(json!({ "tags": [FAVOURITE] })),
 			"untagged": list(json!({ "not_tags": [FAVOURITE] })),
 			"priority": list(priority),
+			"spaced": list(json!({ "spaces": [space] })),
 		},
 	});
 
