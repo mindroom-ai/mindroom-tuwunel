@@ -358,6 +358,18 @@ Upstream has the same bug. Files: `src/service/membership/join.rs`,
 `src/service/rooms/event_handler/handle_outlier_pdu.rs`; test in
 `src/service/membership/join/tests.rs`.
 
+### send_join state leaves other local users' joins out
+
+Forcing the `send_join` state replays each `m.room.member` event in it, so a
+join the authorization rules accept for another user of this server marked
+that user as joined. Up to room version 10 such a join passes from any sender
+when its only previous event is a create naming that user as creator, and an
+old join of a user who has since left passes too. A join of a local user other
+than the joining user is still stored, as other events may name it, but is now
+left out of the room state, as member events are on the knock path. Upstream
+has the same bug. Files: `src/service/membership/join.rs`; test in
+`src/service/membership/join/tests.rs`.
+
 ### Failed appservice requests leave the `hs_token` out of the log
 
 An appservice request also sends the `hs_token` as the legacy `access_token`
