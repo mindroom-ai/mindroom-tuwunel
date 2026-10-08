@@ -143,10 +143,13 @@ where
 		let mut request = request_from(services, request).await?;
 
 		// A federation request waits for its origin's key before its body is
-		// parsed, so a slow key fetch holds only the raw body.
+		// parsed, so a slow key fetch holds only the raw body. The signature
+		// check uses this key rather than looking it up again.
 		if scheme == Scheme::ServerSignatures {
-			origin_key(services, &mut request).await?;
+			let origin_key = origin_key(services, &mut request).await?;
+			request.parts.extensions.insert(origin_key);
 		}
+
 		let json_body = match ADMIN {
 			| true => parse_json(&request, route, scheme),
 			| false => Ok(parse_json(&request, route, scheme)?),
