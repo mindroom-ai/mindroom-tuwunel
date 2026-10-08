@@ -26,7 +26,7 @@ use tuwunel_core::{
 	Err, Event, Result, implement,
 	utils::{
 		future::{BoolExt, TryExtExt},
-		stream::{BroadbandExt, IterStream, ReadyExt, TryReadyExt},
+		stream::{BroadbandExt, IterStream, ReadyExt},
 	},
 };
 use tuwunel_database::Map;
@@ -112,19 +112,6 @@ pub async fn get_summary_and_children(
 					.await,
 		})
 		.await
-}
-
-/// Simply returns the stripped m.space.child events of a room
-#[implement(Service)]
-pub fn get_space_children<'a>(
-	&'a self,
-	room_id: &'a RoomId,
-) -> impl Stream<Item = OwnedRoomId> + Send + 'a {
-	self.services
-		.state_accessor
-		.room_state_keys(room_id, &StateEventType::SpaceChild)
-		.ready_and_then(|state_key| OwnedRoomId::parse(state_key.as_str()).map_err(Into::into))
-		.ready_filter_map(Result::ok)
 }
 
 /// Simply returns the stripped m.space.child events of a room
