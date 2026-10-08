@@ -13,7 +13,7 @@ use tuwunel_service::{
 
 use super::{Auth, Request};
 
-pub(super) async fn auth_server(
+pub(super) fn auth_server(
 	services: &Services,
 	request: &mut Request,
 	body: Option<&CanonicalJsonValue>,
@@ -22,7 +22,11 @@ pub(super) async fn auth_server(
 	type Object = CanonicalJsonObject;
 	type Value = CanonicalJsonValue;
 
-	let (x_matrix, key) = origin_key(services, request).await?;
+	let (x_matrix, key): (XMatrix, VerifyKey) = request
+		.parts
+		.extensions
+		.remove()
+		.expect("origin key resolved before the body was parsed");
 
 	let destination = services.globals.server_name();
 	let origin = &x_matrix.origin;
@@ -84,7 +88,7 @@ pub(super) async fn auth_server(
 /// Resolves the signing key named by the request's X-Matrix header.
 ///
 /// Extraction awaits this before parsing the body, so a slow key fetch holds
-/// only the raw body; [`auth_server`] then finds the key cached.
+/// only the raw body, and keeps the result for [`auth_server`].
 pub(in crate::router) async fn origin_key(
 	services: &Services,
 	request: &mut Request,

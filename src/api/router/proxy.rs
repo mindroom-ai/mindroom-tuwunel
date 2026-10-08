@@ -173,7 +173,8 @@ async fn authenticate(
 			Ok((request, auth, None))
 		},
 		| Root::Federation => {
-			origin_key(services, &mut request).await?;
+			let origin_key = origin_key(services, &mut request).await?;
+			request.parts.extensions.insert(origin_key);
 			let signed = parse_json(&request, route, Scheme::ServerSignatures)?;
 			let (request, auth) =
 				authenticated::<ServerSignatures>(services, request, signed.as_ref(), route)
