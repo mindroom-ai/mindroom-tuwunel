@@ -178,6 +178,18 @@ membership event to that join. Upstream has the same bug. File:
 `src/service/rooms/state_accessor/user_can.rs`; test in
 `src/main/tests/knock_withdrawal_history.rs`.
 
+### send_join state leaves other local users' joins out
+
+Forcing the `send_join` state replays each `m.room.member` event in it, so a
+join the authorization rules accept for another user of this server marked
+that user as joined. Up to room version 10 such a join passes from any sender
+when its only previous event is a create naming that user as creator, and an
+old join of a user who has since left passes too. A join of a local user other
+than the joining user is still stored, as other events may name it, but is now
+left out of the room state, as member events are on the knock path. Upstream
+has the same bug. Files: `src/service/membership/join.rs`; test in
+`src/service/membership/join/tests/send_join/mod.rs`.
+
 ### Deleting an alias by power level takes room membership
 
 `DELETE /directory/room/{alias}` let anyone holding the room's
