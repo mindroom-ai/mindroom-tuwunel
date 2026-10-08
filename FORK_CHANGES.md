@@ -191,6 +191,20 @@ extension filter keeps its first 64 list IDs and its first 256 rooms. Upstream
 has the same bug. File: `src/service/sync/mod.rs`; tests in
 `src/service/sync/tests.rs`.
 
+### Sliding sync caps list IDs and list filters
+
+A sliding sync list ID had no length limit, and a list kept its `spaces`,
+`tags`, `not_tags`, `room_types` and `not_room_types` filters as sent. Each
+pass copied a room with the IDs of the lists it matched for every range it was
+selected in, and matched every room against every filter entry, where each
+`spaces` entry read the whole state of the named room. A connection now ignores
+lists with an ID longer than 64 bytes, the limit Synapse documents, and drops
+such IDs from extension filters. Each list keeps the first 16 distinct entries
+of each filter, and a `spaces` entry looks up the one `m.space.child` event
+naming the room. Upstream has the same bug. Files: `src/service/sync/mod.rs`,
+`src/api/client/sync/v5/filter.rs`; tests in `src/service/sync/tests.rs` and
+`src/main/tests/sync_v5_list_filters.rs`.
+
 ### EDUs sent to other servers are bounded in size
 
 Device keys and cross-signing keys a local client uploaded were stored with no

@@ -13,7 +13,7 @@ use futures::{FutureExt, Stream};
 use ruma::{
 	DeviceId, OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId, UserId,
 	api::client::sync::sync_events::v5::{
-		ConnId as ConnectionId, ListId, Request, request,
+		ConnId as ConnectionId, ListId, ListIds, Request, request,
 		request::{AccountData, E2EE, Profiles, Receipts, ToDevice, Typing},
 	},
 	events::{StateEventType, StateKey},
@@ -120,6 +120,19 @@ pub const REQUIRED_STATE_MAX: usize = 256;
 /// a filter, so new lists past this many are ignored and only the first this
 /// many list IDs of a filter are kept.
 const LISTS_MAX: usize = 64;
+
+/// The longest list ID one connection keeps, in bytes, as in Synapse.
+///
+/// Each room in the window carries the IDs of the lists it matched and is
+/// copied with them for every range it is selected in, so a list with a longer
+/// ID is ignored, and so is such an ID in an extension filter.
+const LIST_ID_MAX: usize = 64;
+
+/// The most entries one list filter keeps of its spaces, tags and room types.
+///
+/// Each room is matched against every entry of every list's filters, so only
+/// the first this many distinct entries of each are kept.
+const LIST_FILTER_MAX: usize = 16;
 
 /// The most ranges one list uses.
 ///
@@ -414,6 +427,7 @@ fn update_cache_lists(request: &Request, cached: &mut Self) -> bool {
 	request
 		.lists
 		.iter()
+		.filter(|(list_id, _)| list_id.len() <= LIST_ID_MAX)
 		.fold(false, |changed, (list_id, request_list)| {
 			let full = cached.lists.len() >= LISTS_MAX;
 			let list_changed = match cached.lists.get_mut(list_id) {
@@ -444,7 +458,8 @@ fn update_cache_list(request: &request::List, cached: &mut request::List) -> boo
 	let required_state_changed =
 		!required_state.is_empty() && required_state != cached.room_details.required_state;
 
-	let filters_changed = request.filters.as_ref().is_some_and(|request| {
+	let filters = request.filters.as_ref().map(kept_list_filters);
+	let filters_changed = filters.as_ref().is_some_and(|request| {
 		cached
 			.filters
 			.as_ref()
@@ -465,7 +480,7 @@ fn update_cache_list(request: &request::List, cached: &mut request::List) -> boo
 	}
 
 	if filters_changed {
-		cached.filters.clone_from(&request.filters);
+		cached.filters = filters;
 	}
 
 	changed
@@ -511,6 +526,33 @@ fn kept_required_state(config: &request::ListConfig) -> &[(StateEventType, State
 	&required_state[..required_state.len().min(REQUIRED_STATE_MAX)]
 }
 
+/// The filters a connection keeps of a list: the first [`LIST_FILTER_MAX`]
+/// distinct entries of each of its vectors.
+fn kept_list_filters(filters: &request::ListFilters) -> request::ListFilters {
+	request::ListFilters {
+		is_dm: filters.is_dm,
+		is_encrypted: filters.is_encrypted,
+		is_invite: filters.is_invite,
+		room_types: first_distinct(&filters.room_types),
+		not_room_types: first_distinct(&filters.not_room_types),
+		tags: first_distinct(&filters.tags),
+		not_tags: first_distinct(&filters.not_tags),
+		spaces: first_distinct(&filters.spaces),
+	}
+}
+
+fn first_distinct<T: Clone + PartialEq>(entries: &[T]) -> Vec<T> {
+	entries
+		.iter()
+		.fold(Vec::new(), |mut kept, entry| {
+			if kept.len() < LIST_FILTER_MAX && !kept.contains(entry) {
+				kept.push(entry.clone());
+			}
+
+			kept
+		})
+}
+
 fn list_filters_are_equal(request: &request::ListFilters, cached: &request::ListFilters) -> bool {
 	request.is_dm == cached.is_dm
 		&& request.is_encrypted == cached.is_encrypted
@@ -543,7 +585,7 @@ fn update_cache_extensions(request: &Request, cached: &mut Self) -> bool {
 #[implement(Connection)]
 fn update_cache_account_data(request: &AccountData, cached: &mut AccountData) {
 	some_or_sticky(request.enabled.as_ref(), &mut cached.enabled);
-	some_or_sticky_first(request.lists.as_ref(), &mut cached.lists, LISTS_MAX);
+	some_or_sticky_lists(request.lists.as_ref(), &mut cached.lists);
 	some_or_sticky_first(request.rooms.as_ref(), &mut cached.rooms, EXTENSION_ROOMS_MAX);
 }
 
@@ -551,14 +593,14 @@ fn update_cache_account_data(request: &AccountData, cached: &mut AccountData) {
 fn update_cache_receipts(request: &Receipts, cached: &mut Receipts) {
 	some_or_sticky(request.enabled.as_ref(), &mut cached.enabled);
 	some_or_sticky_first(request.rooms.as_ref(), &mut cached.rooms, EXTENSION_ROOMS_MAX);
-	some_or_sticky_first(request.lists.as_ref(), &mut cached.lists, LISTS_MAX);
+	some_or_sticky_lists(request.lists.as_ref(), &mut cached.lists);
 }
 
 #[implement(Connection)]
 fn update_cache_typing(request: &Typing, cached: &mut Typing) {
 	some_or_sticky(request.enabled.as_ref(), &mut cached.enabled);
 	some_or_sticky_first(request.rooms.as_ref(), &mut cached.rooms, EXTENSION_ROOMS_MAX);
-	some_or_sticky_first(request.lists.as_ref(), &mut cached.lists, LISTS_MAX);
+	some_or_sticky_lists(request.lists.as_ref(), &mut cached.lists);
 }
 
 #[implement(Connection)]
@@ -576,7 +618,7 @@ fn update_cache_to_device(request: &ToDevice, cached: &mut ToDevice) {
 fn update_cache_profiles(request: &Profiles, cached: &mut Profiles) -> bool {
 	some_or_sticky(request.enabled.as_ref(), &mut cached.enabled);
 	some_or_sticky_first(request.rooms.as_ref(), &mut cached.rooms, EXTENSION_ROOMS_MAX);
-	some_or_sticky_first(request.lists.as_ref(), &mut cached.lists, LISTS_MAX);
+	some_or_sticky_lists(request.lists.as_ref(), &mut cached.lists);
 
 	let fields = request
 		.fields
@@ -634,5 +676,20 @@ where
 {
 	if let Some(target) = target {
 		cached.replace(C::from(&target[..target.len().min(max)]));
+	}
+}
+
+/// Like [`some_or_sticky_first`] for the list IDs of an extension filter,
+/// ignoring IDs longer than [`LIST_ID_MAX`], which name no list.
+fn some_or_sticky_lists(target: Option<&ListIds>, cached: &mut Option<ListIds>) {
+	if let Some(target) = target {
+		let lists = target
+			.iter()
+			.filter(|list_id| list_id.len() <= LIST_ID_MAX)
+			.take(LISTS_MAX)
+			.cloned()
+			.collect();
+
+		cached.replace(lists);
 	}
 }

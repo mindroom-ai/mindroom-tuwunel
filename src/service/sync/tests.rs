@@ -15,8 +15,8 @@ use ruma::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-	Connection, EXTENSION_ROOMS_MAX, LISTS_MAX, Lists, MAX_SYNC_FIELDS, RANGES_MAX,
-	REQUIRED_STATE_MAX, Room, Subscriptions,
+	Connection, EXTENSION_ROOMS_MAX, LIST_FILTER_MAX, LIST_ID_MAX, LISTS_MAX, Lists,
+	MAX_SYNC_FIELDS, RANGES_MAX, REQUIRED_STATE_MAX, Room, Subscriptions,
 };
 
 const LIST_ID: &str = "main";
@@ -406,6 +406,51 @@ fn update_cache_keeps_only_the_first_extension_filters() {
 		assert_eq!(cached_lists.as_deref(), Some(&lists[..LISTS_MAX]));
 		assert_eq!(cached_rooms.as_deref(), Some(&rooms[..EXTENSION_ROOMS_MAX]));
 	}
+}
+
+#[test]
+fn update_cache_ignores_overlong_list_ids() {
+	let kept = ListId::from("k".repeat(LIST_ID_MAX).as_str());
+	let ignored = ListId::from("i".repeat(LIST_ID_MAX + 1).as_str());
+
+	let mut request = Request::new();
+
+	request.lists = [&kept, &ignored]
+		.map(|list_id| (list_id.clone(), List::default()))
+		.into();
+
+	request.extensions.receipts.lists = Some([kept.clone(), ignored].into_iter().collect());
+
+	let mut conn = Connection::default();
+
+	conn.update_cache(&request);
+
+	assert_eq!(conn.lists.keys().collect::<Vec<_>>(), [&kept]);
+	assert_eq!(conn.extensions.receipts.lists.as_deref(), Some(&[kept][..]));
+}
+
+#[test]
+fn update_cache_keeps_only_the_first_distinct_list_filter_entries() {
+	let spaces: Vec<OwnedRoomId> = once(0)
+		.chain(0..=LIST_FILTER_MAX)
+		.map(|i| {
+			format!("!space{i}:example.com")
+				.try_into()
+				.expect("room ID must be valid")
+		})
+		.collect();
+
+	let filters = ListFilters {
+		spaces: spaces.clone(),
+		..Default::default()
+	};
+
+	let request = request_with_list(list_with_filters(filters));
+	let mut conn = Connection::default();
+
+	assert!(conn.update_cache(&request));
+	assert!(!conn.update_cache(&request));
+	assert_eq!(cached_filters(&conn).spaces, &spaces[1..=LIST_FILTER_MAX]);
 }
 
 #[test]
