@@ -460,6 +460,19 @@ has the same bug. Files:
 `src/service/rooms/event_handler/{fetch_state,state_at_incoming,state_local_build}.rs`;
 test in `src/main/tests/federation_prev_event_room.rs`.
 
+### A room keeps its one create event
+
+In room versions 1 to 11, an `m.room.create` event for a room this server is
+in, other than the room's own create, passed the authorization rules when it
+came from the server named in the room ID, since a create event has no rules
+that depend on the room state. It was added to the timeline and resolved into
+the current state, where it could take the place of the room's create. Such an
+event is now refused before it reaches the timeline or the room state, whether
+it arrives in a transaction or as a fetched prev event. The authorization rules
+are unchanged. Upstream has the same bug.
+File: `src/service/rooms/event_handler/upgrade_outlier_pdu.rs`; test in
+`src/main/tests/federation_second_create.rs`.
+
 ### Deleting an alias by power level takes room membership
 
 `DELETE /directory/room/{alias}` let anyone holding the room's

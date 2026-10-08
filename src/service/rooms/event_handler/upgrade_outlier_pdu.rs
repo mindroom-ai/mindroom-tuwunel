@@ -3,10 +3,10 @@ use std::{borrow::Borrow, collections::HashMap, iter::once, sync::Arc, time::Ins
 use futures::{FutureExt, StreamExt};
 use ruma::{
 	CanonicalJsonObject, EventId, OwnedEventId, RoomId, RoomVersionId, ServerName,
-	room_version_rules::RoomVersionRules,
+	events::TimelineEventType, room_version_rules::RoomVersionRules,
 };
 use tuwunel_core::{
-	Result, debug, debug_info, debug_warn, implement, is_equal_to,
+	Err, Result, debug, debug_info, debug_warn, implement, is_equal_to,
 	matrix::{Event, PduEvent, pdu::check_rules, room_version},
 	trace,
 	utils::{
@@ -86,6 +86,8 @@ pub(super) async fn upgrade_outlier_to_timeline_pdu(
 		debug!(?pdu_id, "Exists.");
 		return Ok(Some((pdu_id, false)));
 	}
+
+	check_create_event_id(&incoming_pdu, create_event_id)?;
 
 	trace!("Upgrading to timeline pdu");
 
@@ -266,6 +268,18 @@ pub(super) async fn upgrade_outlier_to_timeline_pdu(
 	);
 
 	Ok(pdu_id.zip(Some(true)))
+}
+
+/// A room has exactly one create event: refuse any other before it can reach
+/// the timeline or be resolved into the room state.
+fn check_create_event_id(incoming_pdu: &PduEvent, create_event_id: &EventId) -> Result {
+	if *incoming_pdu.kind() == TimelineEventType::RoomCreate
+		&& incoming_pdu.event_id() != create_event_id
+	{
+		return Err!(Request(Forbidden("The room already has a different create event.")));
+	}
+
+	Ok(())
 }
 
 #[implement(super::Service)]
