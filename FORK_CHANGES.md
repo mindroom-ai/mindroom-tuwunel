@@ -261,7 +261,7 @@ Upstream has the same bug. Files: `src/service/membership/join.rs`,
 `src/service/rooms/event_handler/handle_outlier_pdu.rs`; test in
 `src/service/membership/join/tests.rs`.
 
-### send_join state leaves other local users' joins out
+### send_join state keeps other local users' memberships
 
 Forcing the `send_join` state replays each `m.room.member` event in it, so a
 join the authorization rules accept for another user of this server marked
@@ -269,9 +269,16 @@ that user as joined. Up to room version 10 such a join passes from any sender
 when its only previous event is a create naming that user as creator, and an
 old join of a user who has since left passes too. A join of a local user other
 than the joining user is still stored, as other events may name it, but is now
-left out of the room state, as member events are on the knock path. Upstream
-has the same bug. Files: `src/service/membership/join.rs`; test in
-`src/service/membership/join/tests.rs`.
+left out of the room state, as member events are on the knock path. The forced
+state also replaced the room's, so a local user the answer left out lost their
+leave from it while still recorded as left, and a later event whose state had
+their old join joined them again. The member event the room's state has for a
+local user other than the joining user now stays, unless the answer has later
+ones for them that follow it through their auth events, such as an unban and
+then a new invite. Knock state, which leaves member events out, likewise keeps
+the member events the room's state has for other local users. Upstream has the
+same bug. Files: `src/service/membership/{join.rs,knock.rs}`; tests in
+`src/service/membership/{join,knock}/tests.rs`.
 
 ### The state before an incoming event comes only from its room
 

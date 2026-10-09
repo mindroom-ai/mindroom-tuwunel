@@ -351,7 +351,7 @@ async fn knock_room_helper_remote(
 		.map_err(|e| err!(BadServerResponse("Invalid knock event PDU: {e:?}")))?;
 
 	let state_map = self
-		.ingest_send_knock_state(room_id, &send_knock_response, &room_version_id)
+		.ingest_send_knock_state(room_id, sender_user, &send_knock_response, &room_version_id)
 		.await?;
 
 	self.apply_send_knock_state(room_id, &state_map, state_lock)
@@ -517,6 +517,7 @@ async fn execute_send_knock(
 async fn ingest_send_knock_state(
 	&self,
 	room_id: &RoomId,
+	sender_user: &UserId,
 	send_knock_response: &SendKnockResponse,
 	room_version_id: &RoomVersionId,
 ) -> Result<HashMap<u64, OwnedEventId>> {
@@ -619,6 +620,12 @@ async fn ingest_send_knock_state(
 
 		state_map.insert(shortstatekey, event_id.clone());
 	}
+
+	// Other local users keep the member events the room's state has for them.
+	state_map.extend(
+		self.local_member_state(room_id, sender_user)
+			.await,
+	);
 
 	Ok(state_map)
 }
