@@ -232,16 +232,19 @@ Files:
 `src/main/tests/edu_content_size.rs`, `src/service/sending/sender/tests.rs` and
 `src/service/sending/sender/dispatch/federation/tests.rs`.
 
-### Federated read receipts need a joined user and an event of the room
+### Federated read receipts need a joined user
 
 An `m.receipt` EDU from another server was stored for any of that server's
 users once it had a member in the room, whether or not the named user was
-joined, and for any event id and `thread_id` it named. Users outside the room
-then showed up as readers, and each new user or `thread_id` string stored
-another receipt row, kept until the room is deleted. A federated receipt is now
-stored only for a user joined to the room, as typing notifications already
-require, at an event of the room's timeline, and with no `thread_id`, `main`, or
-a thread root that is an event of the room. Upstream has the same bug. Files:
+joined, and for any `thread_id` it named. Users outside the room then showed up
+as readers, and each new user or `thread_id` string stored another receipt row,
+kept until the room is deleted. A federated receipt is now stored only for a
+user joined to the room, as typing notifications already require, and with no
+`thread_id`, `main`, or a thread root that is an event of the room. Its event id
+is not checked, because a receipt can arrive before its event or from a server
+other than the event's; a receipt for an event this server does not have yet
+replaces the user's receipt for that thread like any other. Upstream has the
+same bug. Files:
 `src/api/server/send.rs`, `src/api/client/read_marker/mod.rs`; test in
 `src/main/tests/federation_receipt_edu.rs`.
 
