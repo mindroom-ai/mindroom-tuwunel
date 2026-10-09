@@ -13,9 +13,7 @@ use ruma::{
 use tuwunel_core::Result;
 use tuwunel_service::presence::Ping;
 
-use super::{
-	check_public_receipt, ensure_receipt_visible, reset_and_refresh_badge, set_private_marker,
-};
+use super::{ensure_receipt_visible, reset_and_refresh_badge, set_private_marker};
 use crate::{ClientIp, Ruma};
 
 /// # `POST /_matrix/client/r0/rooms/{roomId}/read_markers`
@@ -73,8 +71,6 @@ pub(crate) async fn set_read_marker_route(
 	let public_advanced = match &body.read_receipt {
 		| None => false,
 		| Some(event) => {
-			check_public_receipt(&services, &body.room_id, sender_user, event).await?;
-
 			let receipt_content = BTreeMap::from_iter([(
 				event.to_owned(),
 				BTreeMap::from_iter([(

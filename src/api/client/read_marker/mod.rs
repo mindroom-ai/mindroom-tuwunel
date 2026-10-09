@@ -68,29 +68,6 @@ async fn set_private_marker(
 	Ok(advanced)
 }
 
-/// Checks that `user_id` may publish a read receipt for `event` in `room_id`.
-///
-/// The user must be joined to the room and the event must be one of its
-/// timeline events.
-async fn check_public_receipt(
-	services: &Services,
-	room_id: &RoomId,
-	user_id: &UserId,
-	event: &EventId,
-) -> Result {
-	if !services
-		.state_cache
-		.is_joined(user_id, room_id)
-		.await
-	{
-		return Err!(Request(Forbidden("You are not in this room.")));
-	}
-
-	room_event_pdu_id(services, room_id, event)
-		.await
-		.map(|_| ())
-}
-
 /// Resolves `event` to its PDU id, failing unless it is a timeline event of
 /// `room_id`.
 pub(crate) async fn room_event_pdu_id(

@@ -20,7 +20,7 @@ const MEMBER_TOKEN: &str = "public-receipt-room-member-token";
 const OUTSIDER_TOKEN: &str = "public-receipt-room-outsider-token";
 
 #[test]
-fn public_receipts_require_membership_and_a_room_event() -> Result {
+fn public_receipts_require_a_visible_room_event() -> Result {
 	let listener = TcpListener::bind(("127.0.0.1", 0))?;
 	let port = listener.local_addr()?.port();
 	let args = Args::default_test(&["fresh", "cleanup"])
@@ -59,13 +59,13 @@ fn public_receipts_require_membership_and_a_room_event() -> Result {
 async fn public_receipts(services: &Services, base: &str) -> Result {
 	wait_until_ready(services, base).await?;
 	let member = register(services, "receiptmember", MEMBER_TOKEN).await?;
-	register(services, "receiptoutsider", OUTSIDER_TOKEN).await?;
+	let outsider = register(services, "receiptoutsider", OUTSIDER_TOKEN).await?;
 	let member_client = Client { services, base, token: MEMBER_TOKEN };
 	let outsider_client = Client { services, base, token: OUTSIDER_TOKEN };
 	let room = member_client.create_room(&json!({})).await?;
-	let event = message(&member_client, &room).await?;
+	let event = message(&member_client, &room, "receipt-room").await?;
 
-	assert_receipt_status(&outsider_client, &room, &event, None, 403).await?;
+	assert_receipt_status(&outsider_client, &room, &event, None, 404).await?;
 	assert!(receipt_users(services, &room).await.is_empty());
 
 	let unknown = event_id!("$unknown:localhost");
@@ -75,16 +75,30 @@ async fn public_receipts(services: &Services, base: &str) -> Result {
 
 	assert_receipt_status(&member_client, &room, &event, None, 200).await?;
 	assert_eq!(receipt_users(services, &room).await, [member]);
+
+	let readable = member_client
+		.create_room(&json!({
+			"initial_state": [{
+				"type": "m.room.history_visibility",
+				"state_key": "",
+				"content": {"history_visibility": "world_readable"},
+			}],
+		}))
+		.await?;
+	let readable_event = message(&member_client, &readable, "receipt-readable-room").await?;
+
+	assert_receipt_status(&outsider_client, &readable, &readable_event, None, 200).await?;
+	assert_eq!(receipt_users(services, &readable).await, [outsider]);
 	Ok(())
 }
 
-async fn message(client: &Client<'_>, room: &RoomId) -> Result<OwnedEventId> {
+async fn message(client: &Client<'_>, room: &RoomId, txn: &str) -> Result<OwnedEventId> {
 	let response: Value = client
 		.services
 		.client
 		.clients
 		.default
-		.put(client.url(&format!("rooms/{room}/send/m.room.message/receipt-room")))
+		.put(client.url(&format!("rooms/{room}/send/m.room.message/{txn}")))
 		.bearer_auth(client.token)
 		.json(&json!({"msgtype": "m.text", "body": "public receipt room check"}))
 		.send()
