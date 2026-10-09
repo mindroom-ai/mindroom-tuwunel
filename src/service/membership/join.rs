@@ -622,9 +622,10 @@ struct ExtractDepth {
 /// auth event does not count. A rejected event is not stored and stays out of
 /// the returned room state, and so does an accepted join of a local user other
 /// than `sender_user`. Such a user's member event in the room's current state
-/// stays in the returned state, unless the response has one naming it as an
-/// auth event. A rejected create event, or one of another room version than the
-/// join's, fails the join.
+/// stays in the returned state, unless an accepted member event of the response
+/// for that user follows it, naming it as an auth event directly or through
+/// earlier ones. A rejected create event, or one of another room version than
+/// the join's, fails the join.
 #[implement(Service)]
 async fn ingest_send_join_events(
 	&self,
@@ -652,7 +653,7 @@ async fn ingest_send_join_events(
 			.ok()
 	});
 
-	let local_members = self
+	let mut local_members = self
 		.local_member_state(room_id, sender_user)
 		.await;
 
@@ -712,20 +713,22 @@ async fn ingest_send_join_events(
 
 		accepted.insert(event_id.clone());
 
-		// Forcing this state replays its memberships, which the answering server
-		// picks, so it must not join other local users. Their joins are still
-		// stored above, as other events may name them as auth events.
-		let other_local_join = pdu.kind == TimelineEventType::RoomMember
+		let other_local_member = pdu.kind == TimelineEventType::RoomMember
 			&& pdu.state_key.as_deref().is_some_and(|state_key| {
 				state_key != sender_user.as_str()
 					&& UserId::parse(state_key)
 						.is_ok_and(|user_id| self.services.globals.user_is_local(&user_id))
-			})
+			});
+
+		// Forcing this state replays its memberships, which the answering server
+		// picks, so it must not join other local users. Their joins are still
+		// stored above, as other events may name them as auth events.
+		let other_local_join = other_local_member
 			&& pdu
 				.get_content::<RoomMemberEventContent>()
 				.is_ok_and(|content| content.membership == MembershipState::Join);
 
-		if in_state
+		if (in_state || other_local_member)
 			&& !other_local_join
 			&& let Some(state_key) = &pdu.state_key
 		{
@@ -736,20 +739,20 @@ async fn ingest_send_join_events(
 				.await;
 
 			// The member event this server has for another of its users gives
-			// way only to one naming it as an auth event, such as a new invite.
-			if local_members
-				.get(&shortstatekey)
-				.is_none_or(|kept| pdu.auth_events.contains(kept))
-			{
+			// way only to one naming it as an auth event, which gives way in
+			// turn, so a ban follows through an unban to a new invite.
+			if let Some(kept) = local_members.get_mut(&shortstatekey) {
+				if pdu.auth_events.contains(kept) {
+					*kept = event_id;
+				}
+			} else if in_state {
 				state.insert(shortstatekey, event_id);
 			}
 		}
 	}
 
 	// A key the response leaves out would otherwise drop out of the room's state.
-	for (shortstatekey, event_id) in local_members {
-		state.entry(shortstatekey).or_insert(event_id);
-	}
+	state.extend(local_members);
 
 	drop(cork);
 	Ok(state)

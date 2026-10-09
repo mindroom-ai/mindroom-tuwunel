@@ -394,6 +394,66 @@ async fn send_join_state_keeps_other_local_members() -> Result {
 	Ok(())
 }
 
+/// A send_join answer's later membership of another local user applies.
+///
+/// The room's state has the ban of `@alice:localhost`. The answer to the join
+/// of `@carol:localhost` has her unbanned and invited again, and its state has
+/// the invite, which names the unban rather than the ban.
+#[tokio::test]
+async fn send_join_state_follows_other_local_members() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let room_id = room_id!("!join:localhost");
+	let version = RoomVersionId::V11;
+	let rules = room_version::rules(&version)?;
+	let (alice, bob) = (user_id!("@alice:localhost"), user_id!("@bob:localhost"));
+	let carol = user_id!("@carol:localhost");
+	let [(create_id, create), (join_id, join)] = room(services, room_id)?;
+	let member = |membership, auth_events: &[&OwnedEventId]| {
+		let content = json!({ "membership": membership });
+		let kind = "m.room.member";
+		state_event(services, &version, room_id, kind, alice.as_str(), &content, auth_events)
+	};
+
+	let (ban_id, ban) = member("ban", &[&create_id, &join_id])?;
+	let (unban_id, unban) = member("leave", &[&create_id, &join_id, &ban_id])?;
+	let (invite_id, invite) = member("invite", &[&create_id, &join_id, &unban_id])?;
+	let state_lock = services.state.mutex.lock(room_id).await;
+
+	store_own_keys(services);
+	services
+		.short
+		.get_or_create_shortroomid(room_id)
+		.await;
+
+	let state = raw(&[&create, &join, &ban])?;
+	let state = services
+		.membership
+		.ingest_send_join_events(room_id, bob, &version, &rules, &[], &state)
+		.await?;
+
+	services
+		.membership
+		.apply_send_join_state(room_id, &state, &state_lock)
+		.await?;
+
+	let auth_chain = raw(&[&ban, &unban])?;
+	let state = raw(&[&create, &join, &invite])?;
+	let state: HashSet<_> = services
+		.membership
+		.ingest_send_join_events(room_id, carol, &version, &rules, &auth_chain, &state)
+		.await?
+		.into_values()
+		.collect();
+
+	assert_eq!(state, HashSet::from([create_id, join_id, invite_id]));
+
+	Ok(())
+}
+
 /// A send_join create event that is rejected, or that names another room
 /// version than the join's, fails the join before anything is stored.
 ///

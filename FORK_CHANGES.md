@@ -370,9 +370,10 @@ left out of the room state, as member events are on the knock path. The forced
 state also replaced the room's, so a local user the answer left out lost their
 leave from it while still recorded as left, and a later event whose state had
 their old join joined them again. The member event the room's state has for a
-local user other than the joining user now stays, unless the answer has one
-naming it as an auth event, such as a new invite. Upstream has the same bug.
-Files: `src/service/membership/join.rs`; test in
+local user other than the joining user now stays, unless the answer has later
+ones for them that follow it through their auth events, such as an unban and
+then a new invite. Upstream has the same bug. Files:
+`src/service/membership/join.rs`; tests in
 `src/service/membership/join/tests.rs`.
 
 ### Failed appservice requests leave the `hs_token` out of the log
