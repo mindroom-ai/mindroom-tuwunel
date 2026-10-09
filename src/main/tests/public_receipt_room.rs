@@ -63,7 +63,7 @@ async fn public_receipts(services: &Services, base: &str) -> Result {
 	let member_client = Client { services, base, token: MEMBER_TOKEN };
 	let outsider_client = Client { services, base, token: OUTSIDER_TOKEN };
 	let room = member_client.create_room(&json!({})).await?;
-	let event = message(&member_client, &room, "receipt-room").await?;
+	let event = message(&member_client, &room).await?;
 
 	assert_receipt_status(&outsider_client, &room, &event, None, 404).await?;
 	assert!(receipt_users(services, &room).await.is_empty());
@@ -85,20 +85,20 @@ async fn public_receipts(services: &Services, base: &str) -> Result {
 			}],
 		}))
 		.await?;
-	let readable_event = message(&member_client, &readable, "receipt-readable-room").await?;
+	let readable_event = message(&member_client, &readable).await?;
 
 	assert_receipt_status(&outsider_client, &readable, &readable_event, None, 200).await?;
 	assert_eq!(receipt_users(services, &readable).await, [outsider]);
 	Ok(())
 }
 
-async fn message(client: &Client<'_>, room: &RoomId, txn: &str) -> Result<OwnedEventId> {
+async fn message(client: &Client<'_>, room: &RoomId) -> Result<OwnedEventId> {
 	let response: Value = client
 		.services
 		.client
 		.clients
 		.default
-		.put(client.url(&format!("rooms/{room}/send/m.room.message/{txn}")))
+		.put(client.url(&format!("rooms/{room}/send/m.room.message/receipt-room")))
 		.bearer_auth(client.token)
 		.json(&json!({"msgtype": "m.text", "body": "public receipt room check"}))
 		.send()

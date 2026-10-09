@@ -61,8 +61,9 @@ The history keeps the v1.9.1 ownership layout of eight commits (shared test
 infrastructure, five runtime features with their tests and compatibility
 changes, CI, and docs), followed by the squash-merged fork PRs #15, #17, #18
 and #22-#24 in their original order, the fork PRs #26-#59 and #61-#67 in merge
-order, the v1.9.3 rebase record, and this rebase's documentation. No upstream
-backports are carried.
+order, the v1.9.3 rebase record, and this rebase's documentation. That rebase
+carried no upstream backports; upstream `a3b9554b8` from `dev` is carried since
+(see "Read receipts need an event the user can see").
 See the [current ownership and rebase procedure](docs/rebase-upstream-main-2026-10-06.md).
 Earlier rebase records remain historical snapshots.
 
