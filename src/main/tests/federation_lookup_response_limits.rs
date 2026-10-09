@@ -36,7 +36,7 @@ const PRIVATE_KEY: &str = "../../nix/pkgs/complement/private_key.key";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Size of the start of every answer the peer sends.
-const OVERSIZED: usize = 4 * 1024 * 1024;
+const OVERSIZED: usize = 16 * 1024 * 1024;
 
 /// Hierarchy requests the peer answered.
 static HIERARCHY_ASKED: AtomicUsize = AtomicUsize::new(0);
