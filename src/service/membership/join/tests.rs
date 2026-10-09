@@ -1,6 +1,15 @@
 use std::collections::HashSet;
 
-use ruma::{CanonicalJsonObject, OwnedEventId, RoomId, RoomVersionId, room_id, user_id};
+use ruma::{
+	CanonicalJsonObject, MilliSecondsSinceUnixEpoch, OwnedEventId, RoomId, RoomVersionId, UserId,
+	events::room::{
+		create::RoomCreateEventContent,
+		join_rules::RoomJoinRulesEventContent,
+		member::{MembershipState, RoomMemberEventContent},
+	},
+	room::JoinRule,
+	room_id, user_id,
+};
 use serde_json::{
 	Value, json,
 	value::{RawValue as RawJsonValue, to_raw_value},
@@ -8,7 +17,8 @@ use serde_json::{
 use tuwunel_core::{
 	Result,
 	config::Figment,
-	matrix::{event::gen_event_id, room_version},
+	matrix::{event::gen_event_id, pdu::into_outgoing_federation, room_version},
+	pdu::PduBuilder,
 };
 
 use crate::{
@@ -278,6 +288,108 @@ async fn send_join_state_leaves_other_local_users_alone() -> Result {
 			.await
 	);
 	assert!(services.state_cache.is_joined(bob, room_id).await);
+
+	Ok(())
+}
+
+/// A local user who left a room stays out of it when another one joins.
+///
+/// `@alice:localhost` joined the room and left. The answer to the join of
+/// `@carol:localhost` leaves her out, yet her leave stays in the room's state,
+/// so an event whose only previous event is her old join does not join her
+/// again.
+#[tokio::test]
+async fn send_join_state_keeps_other_local_members() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let room_id = room_id!("!join:localhost");
+	let version = RoomVersionId::V11;
+	let rules = room_version::rules(&version)?;
+	let (alice, bob) = (user_id!("@alice:localhost"), user_id!("@bob:localhost"));
+	let carol = user_id!("@carol:localhost");
+	let create = RoomCreateEventContent {
+		room_version: version.clone(),
+		..RoomCreateEventContent::new_v11()
+	};
+	let join_rules = RoomJoinRulesEventContent::new(JoinRule::Public);
+	let member = |user_id: &UserId, membership| {
+		PduBuilder::state(user_id.as_str(), &RoomMemberEventContent::new(membership))
+	};
+
+	store_own_keys(services);
+	services
+		.short
+		.get_or_create_shortroomid(room_id)
+		.await;
+
+	let state_lock = services.state.mutex.lock(room_id).await;
+	let append = async |sender, builder| {
+		services
+			.timeline
+			.build_and_append_pdu(builder, sender, room_id, &state_lock)
+			.await
+	};
+
+	let create_id = append(bob, PduBuilder::state(String::new(), &create)).await?;
+	let bob_join_id = append(bob, member(bob, MembershipState::Join)).await?;
+	let join_rules_id = append(bob, PduBuilder::state(String::new(), &join_rules)).await?;
+	let alice_join_id = append(alice, member(alice, MembershipState::Join)).await?;
+	append(alice, member(alice, MembershipState::Leave)).await?;
+
+	let mut answer = Vec::new();
+	for event_id in [&create_id, &bob_join_id, &join_rules_id] {
+		let event = services.timeline.get_pdu_json(event_id).await?;
+		answer.push(to_raw_value(&into_outgoing_federation(event, &version))?);
+	}
+
+	let state = services
+		.membership
+		.ingest_send_join_events(room_id, carol, &version, &rules, &[], &answer)
+		.await?;
+
+	services
+		.membership
+		.apply_send_join_state(room_id, &state, &state_lock)
+		.await?;
+
+	drop(state_lock);
+
+	let mut update: CanonicalJsonObject = serde_json::from_value(json!({
+		"type": "m.room.member",
+		"state_key": bob,
+		"content": { "membership": "join", "displayname": "Bob" },
+		"room_id": room_id,
+		"sender": bob,
+		"origin_server_ts": MilliSecondsSinceUnixEpoch::now(),
+		"depth": 5,
+		"prev_events": [alice_join_id],
+		"auth_events": [create_id, bob_join_id, join_rules_id],
+	}))?;
+
+	services
+		.server_keys
+		.hash_and_sign_event(&mut update, &version)?;
+
+	let update_id = gen_event_id(&update, &version)?;
+	services
+		.event_handler
+		.handle_incoming_pdu(services.globals.server_name(), room_id, &update_id, update, true)
+		.await?;
+
+	services
+		.timeline
+		.non_outlier_pdu_exists(&update_id)
+		.await?;
+
+	assert!(
+		!services
+			.state_cache
+			.is_joined(alice, room_id)
+			.await
+	);
 
 	Ok(())
 }

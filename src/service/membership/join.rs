@@ -32,7 +32,12 @@ use tuwunel_core::{
 	matrix::{Event, event::gen_event_id_canonical_json, room_version},
 	pdu::{Pdu, PduBuilder, check_rules},
 	trace,
-	utils::{self, BoolExt, math::Expected, shuffle},
+	utils::{
+		self, BoolExt,
+		math::Expected,
+		shuffle,
+		stream::{BroadbandExt, ReadyExt},
+	},
 	warn,
 };
 
@@ -616,8 +621,10 @@ struct ExtractDepth {
 /// and all of its auth events were accepted before it; a stored copy of an
 /// auth event does not count. A rejected event is not stored and stays out of
 /// the returned room state, and so does an accepted join of a local user other
-/// than `sender_user`. A rejected create event, or one of another room version
-/// than the join's, fails the join.
+/// than `sender_user`. Such a user's member event in the room's current state
+/// stays in the returned state, unless the response has one naming it as an
+/// auth event. A rejected create event, or one of another room version than the
+/// join's, fails the join.
 #[implement(Service)]
 async fn ingest_send_join_events(
 	&self,
@@ -644,6 +651,10 @@ async fn ingest_send_join_events(
 			.map(|extract| extract.depth)
 			.ok()
 	});
+
+	let local_members = self
+		.local_member_state(room_id, sender_user)
+		.await;
 
 	let cork = self.services.db.cork_and_flush();
 	let mut accepted = HashSet::new();
@@ -724,12 +735,55 @@ async fn ingest_send_join_events(
 				.get_or_create_shortstatekey(&pdu.kind.to_string().into(), state_key)
 				.await;
 
-			state.insert(shortstatekey, event_id);
+			// The member event this server has for another of its users gives
+			// way only to one naming it as an auth event, such as a new invite.
+			if local_members
+				.get(&shortstatekey)
+				.is_none_or(|kept| pdu.auth_events.contains(kept))
+			{
+				state.insert(shortstatekey, event_id);
+			}
 		}
+	}
+
+	// A key the response leaves out would otherwise drop out of the room's state.
+	for (shortstatekey, event_id) in local_members {
+		state.entry(shortstatekey).or_insert(event_id);
 	}
 
 	drop(cork);
 	Ok(state)
+}
+
+/// The member events of local users other than `user_id` in the room's current
+/// state.
+///
+/// The state a remote server answers a join or knock with replaces the room's
+/// state, so these are kept in it.
+#[implement(Service)]
+pub(super) async fn local_member_state(
+	&self,
+	room_id: &RoomId,
+	user_id: &UserId,
+) -> HashMap<u64, OwnedEventId> {
+	self.services
+		.state_accessor
+		.room_state_keys_with_ids(room_id, &StateEventType::RoomMember)
+		.ready_filter_map(Result::ok)
+		.ready_filter(|(state_key, _)| {
+			state_key.as_str() != user_id.as_str()
+				&& UserId::parse(state_key.as_str())
+					.is_ok_and(|user_id| self.services.globals.user_is_local(&user_id))
+		})
+		.broad_then(async |(state_key, event_id)| {
+			self.services
+				.short
+				.get_or_create_shortstatekey(&StateEventType::RoomMember, &state_key)
+				.map(move |shortstatekey| (shortstatekey, event_id))
+				.await
+		})
+		.collect()
+		.await
 }
 
 /// Stores a checked event of the send_join response as an outlier.
