@@ -49,10 +49,11 @@ static ASKED: AtomicUsize = AtomicUsize::new(0);
 /// Event fetches stop reading a response once it is too large for what they
 /// asked for.
 ///
-/// The peer sends the start of an `/event` and a `/get_missing_events` answer
-/// far larger than any it could serve and then nothing more. Each fetch gives
-/// up on it as soon as it passes the limit for its request, rather than reading
-/// on towards `max_response_size` and waiting for the rest.
+/// The peer sends the start of an `/event`, `/get_missing_events` and
+/// `/state_ids` answer far larger than any it could serve and then nothing
+/// more. Each fetch gives up on it as soon as it passes the limit for its
+/// request, rather than reading on towards `max_response_size` and waiting for
+/// the rest.
 #[test]
 fn oversized_fetch_responses_are_dropped_while_read() -> Result {
 	let options = ["ip_range_denylist=[]", "allow_invalid_tls_certificates=true"];
@@ -81,17 +82,20 @@ async fn exercise(services: &Services, _base: &str) -> Result {
 	};
 
 	let event = gave_up(Opts::unscoped(Op::Event).event_id(event_id.clone())).await;
-	let missing_events = Opts::new(Op::MissingEvents, room_id).latest_events([event_id]);
+	let missing_events =
+		Opts::new(Op::MissingEvents, room_id.clone()).latest_events([event_id.clone()]);
 	let missing_events = gave_up(missing_events).await;
+	let state_ids = gave_up(Opts::new(Op::StateIds, room_id).event_id(event_id)).await;
 
 	peer.abort();
 
-	let waited: Vec<_> = [("event", event), ("missing events", missing_events)]
-		.into_iter()
-		.filter_map(|(fetch, gave_up)| (!gave_up).then_some(fetch))
-		.collect();
+	let waited: Vec<_> =
+		[("event", event), ("missing events", missing_events), ("state ids", state_ids)]
+			.into_iter()
+			.filter_map(|(fetch, gave_up)| (!gave_up).then_some(fetch))
+			.collect();
 
-	assert_eq!(ASKED.load(Ordering::Relaxed), 2, "the peer was not asked for each fetch");
+	assert_eq!(ASKED.load(Ordering::Relaxed), 3, "the peer was not asked for each fetch");
 	assert!(waited.is_empty(), "waited for the rest of an oversized response: {waited:?}");
 
 	Ok(())
@@ -104,7 +108,8 @@ async fn serve_peer(listener: TcpListener) -> Result {
 			.await?;
 
 	// Each answer starts past its request's limit: larger than one served event,
-	// and than the ten served events a missing-events batch asks for.
+	// than the ten served events a missing-events batch asks for, and than
+	// 64 MiB of event ids.
 	let app = Router::new()
 		.route(
 			"/_matrix/federation/v1/event/{event_id}",
@@ -113,6 +118,10 @@ async fn serve_peer(listener: TcpListener) -> Result {
 		.route(
 			"/_matrix/federation/v1/get_missing_events/{room_id}",
 			post(async || oversized(64 * MAX_PDU_BYTES)),
+		)
+		.route(
+			"/_matrix/federation/v1/state_ids/{room_id}",
+			get(async || oversized(65 * 1024 * 1024)),
 		);
 
 	from_tcp_rustls(listener, config)?
