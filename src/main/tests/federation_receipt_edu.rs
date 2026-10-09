@@ -29,11 +29,11 @@ mod fixture;
 const MEMBER_TOKEN: &str = "federation-receipt-edu-member-token";
 const OUTSIDER_TOKEN: &str = "federation-receipt-edu-outsider-token";
 
-/// A federated read receipt is stored only for a user joined to the room, at
-/// one of its timeline events, and for no thread other than one rooted at
-/// such an event.
+/// A federated read receipt is stored only for a user joined to the room, and
+/// for no thread other than one rooted at one of its timeline events. The
+/// event it names need not have reached this server yet.
 #[test]
-fn federated_receipts_need_a_joined_user_and_a_room_event() -> Result {
+fn federated_receipts_need_a_joined_user_and_a_room_thread() -> Result {
 	let options: [&str; 0] = [];
 
 	boot("federation-receipt-edu", options, exercise)
@@ -46,17 +46,21 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let room = member_client.create_room(&json!({})).await?;
 	let event = message(&member_client, &room).await?;
 	let unknown = "$unknown:localhost";
+	let unreceived = "$unreceived:localhost";
 
 	let edus = [
 		receipt(&room, &outsider, &event, None),
-		receipt(&room, &member, unknown, Some("main")),
+		receipt(&room, &member, unreceived, Some("main")),
 		receipt(&room, &member, &event, Some(unknown)),
 		receipt(&room, &member, &event, Some("custom")),
 		receipt(&room, &member, &event, None),
 	];
 
+	let mut expected = [(member.clone(), event), (member, unreceived.to_owned())];
+	expected.sort();
+
 	assert_eq!(send_transaction(services, base, &edus).await?, 200);
-	assert_eq!(receipt_users(services, &room).await, [member]);
+	assert_eq!(stored_receipts(services, &room).await, expected);
 
 	Ok(())
 }
@@ -125,13 +129,25 @@ async fn send_transaction(services: &Services, base: &str, edus: &[Value]) -> Re
 	Ok(response.status().as_u16())
 }
 
-async fn receipt_users(services: &Services, room: &RoomId) -> Vec<OwnedUserId> {
-	services
+/// The user and event id of each receipt stored in `room`, sorted.
+async fn stored_receipts(services: &Services, room: &RoomId) -> Vec<(OwnedUserId, String)> {
+	let mut receipts = services
 		.read_receipt
 		.readreceipts_since(room, 0, None)
-		.ready_fold(Vec::new(), |mut users, (user, ..)| {
-			users.push(user.to_owned());
-			users
+		.ready_fold(Vec::new(), |mut receipts, (user, _, event)| {
+			let event: Value = serde_json::from_str(event.json().get()).expect("stored receipt");
+			let event_ids = event["content"]
+				.as_object()
+				.expect("receipt content");
+			receipts.extend(
+				event_ids
+					.keys()
+					.map(|id| (user.to_owned(), id.clone())),
+			);
+			receipts
 		})
-		.await
+		.await;
+
+	receipts.sort();
+	receipts
 }
