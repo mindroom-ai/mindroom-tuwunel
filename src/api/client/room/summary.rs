@@ -25,8 +25,9 @@ use crate::{ClientIp, Ruma, RumaResponse};
 /// Most servers a remote room's summary is requested from.
 const MAX_SUMMARY_SERVERS: usize = 8;
 
-/// Largest hierarchy response read from each of them.
-const MAX_HIERARCHY_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Largest hierarchy response read from each of them, which holds the summaries
+/// of several thousand child rooms.
+const MAX_HIERARCHY_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// # `GET /_matrix/client/unstable/im.nheko.summary/rooms/{roomIdOrAlias}/summary`
 ///
