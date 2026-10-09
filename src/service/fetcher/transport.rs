@@ -36,10 +36,6 @@ use crate::services::OnceServices;
 /// asked for.
 const MAX_EVENT_RESPONSE_BYTES: usize = MAX_SERVED_PDU_BYTES + 4096;
 
-/// Largest `/state_ids` response read. An event id takes about 50 bytes of
-/// it, which leaves room for the ids of over a million events.
-const MAX_STATE_IDS_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
-
 /// Abstracts the network operation for one federation fetch attempt.
 ///
 /// The production implementation routes through federation execution while
@@ -108,9 +104,8 @@ impl Transport for FederationTransport {
 			| Op::StateIds => {
 				let event_id = require_event_id(opts)?;
 				let room_id = require_room_id(opts)?;
-				let request = StateIdsRequest { room_id, event_id };
 				let res = federation
-					.execute_on(client, server, request, MAX_STATE_IDS_RESPONSE_BYTES)
+					.execute(server, StateIdsRequest { room_id, event_id })
 					.await?;
 
 				to_bytes(&serde_json::json!({
