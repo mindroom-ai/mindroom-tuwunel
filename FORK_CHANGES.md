@@ -89,13 +89,14 @@ A room summary, a remote alias lookup and a remote profile lookup, which a
 client can make without an account, and the signing-key fetch for the origin
 of an incoming federation request read the answer of the server the request
 names under the generic federation response limit (256 MiB by default). Those
-answers are a few kilobytes, but a slow answer kept up to 256 MiB buffered per
-request until the read timed out, and a large one was decoded in full before
-anything checked it. A room summary also asked every server in its `via` list,
-even one named many times, 32 at a time. The room summary now asks each of the
-first 8 distinct servers once and reads at most 1 MiB from each, alias answers
-and signing-key documents (from the origin or from a notary for one server)
-are read up to 1 MiB, and profiles up to four times the 64 KiB profile limit.
+answers are small (the summary of a large space can reach several megabytes),
+but a slow answer kept up to 256 MiB buffered per request until the read timed
+out, and a large one was decoded in full before anything checked it. A room
+summary also asked every server in its `via` list, even one named many times,
+32 at a time. The room summary now asks each of the first 8 distinct servers
+once and reads at most 8 MiB from each, alias answers and signing-key
+documents (from the origin or from a notary for one server) are read up to
+1 MiB, and profiles up to four times the 64 KiB profile limit.
 A larger answer is dropped while it is read, and no limit exceeds
 `max_response_size`. Upstream has the same bug. Files:
 `src/service/federation/{execute.rs,feds.rs}`,
