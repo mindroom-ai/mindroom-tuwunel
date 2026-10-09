@@ -3,10 +3,35 @@ mod receipt;
 
 use futures::future::try_join;
 use ruma::{EventId, MilliSecondsSinceUnixEpoch, RoomId, UserId, events::receipt::ReceiptThread};
-use tuwunel_core::{Err, PduCount, PduId, Result, debug, err, utils::result::LogErr};
+use tuwunel_core::{Err, Event, PduCount, PduId, Result, debug, err, utils::result::LogErr};
 use tuwunel_service::{Services, rooms::read_receipt::PrivateRead};
 
 pub(crate) use self::{read_markers::set_read_marker_route, receipt::create_receipt_route};
+
+#[tracing::instrument(level = "trace", skip_all)]
+async fn ensure_receipt_visible(
+	services: &Services,
+	room_id: &RoomId,
+	user_id: &UserId,
+	event_id: &EventId,
+) -> Result {
+	let event = services
+		.timeline
+		.get_pdu(event_id)
+		.await
+		.map_err(|_| err!(Request(NotFound("Event not found."))))?;
+
+	if event.room_id() != room_id
+		|| !services
+			.state_accessor
+			.user_can_see_event(user_id, &event)
+			.await
+	{
+		return Err!(Request(NotFound("Event not found.")));
+	}
+
+	Ok(())
+}
 
 /// Resolves `event` to its timeline position and stores the private read
 /// marker for `thread` there.
@@ -41,29 +66,6 @@ async fn set_private_marker(
 		.await;
 
 	Ok(advanced)
-}
-
-/// Checks that `user_id` may publish a read receipt for `event` in `room_id`.
-///
-/// The user must be joined to the room and the event must be one of its
-/// timeline events.
-async fn check_public_receipt(
-	services: &Services,
-	room_id: &RoomId,
-	user_id: &UserId,
-	event: &EventId,
-) -> Result {
-	if !services
-		.state_cache
-		.is_joined(user_id, room_id)
-		.await
-	{
-		return Err!(Request(Forbidden("You are not in this room.")));
-	}
-
-	room_event_pdu_id(services, room_id, event)
-		.await
-		.map(|_| ())
 }
 
 /// Resolves `event` to its PDU id, failing unless it is a timeline event of

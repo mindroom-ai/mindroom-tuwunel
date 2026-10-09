@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ruma::{
 	CanonicalJsonObject, OwnedEventId, RoomId, RoomVersionId,
 	api::federation::membership::{
@@ -27,7 +29,7 @@ async fn knock_state_does_not_set_local_memberships() -> Result {
 
 	let services = &fixture.services;
 	let room_id = room_id!("!knock:remote.invalid");
-	let alice = user_id!("@alice:localhost");
+	let (alice, carol) = (user_id!("@alice:localhost"), user_id!("@carol:localhost"));
 	let (_, name) = pdu(services, room_id, "m.room.name", "", &json!({ "name": "Knock" }))?;
 	let (_, join) = pdu(
 		services,
@@ -47,7 +49,7 @@ async fn knock_state_does_not_set_local_memberships() -> Result {
 
 	let state_map = services
 		.membership
-		.ingest_send_knock_state(room_id, &response, &RoomVersionId::V11)
+		.ingest_send_knock_state(room_id, carol, &response, &RoomVersionId::V11)
 		.await?;
 
 	services
@@ -70,6 +72,67 @@ async fn knock_state_does_not_set_local_memberships() -> Result {
 	Ok(())
 }
 
+/// Knock state keeps the member events of this server's other users.
+///
+/// The room's state has the leave of `@alice:localhost`. The knock state of
+/// `@carol:localhost` leaves member events out, yet her leave stays in the
+/// room's state.
+#[tokio::test]
+async fn knock_state_keeps_other_local_members() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let room_id = room_id!("!knock:remote.invalid");
+	let (alice, carol) = (user_id!("@alice:localhost"), user_id!("@carol:localhost"));
+	let content = json!({ "membership": "leave" });
+	let (leave_id, leave) = pdu(services, room_id, "m.room.member", alice.as_str(), &content)?;
+	let (_, name) = pdu(services, room_id, "m.room.name", "", &json!({ "name": "Knock" }))?;
+	let response = SendKnockResponse::new(vec![knock_state(&name)?]);
+	let state_lock = services.state.mutex.lock(room_id).await;
+
+	store_own_keys(services);
+	services
+		.short
+		.get_or_create_shortroomid(room_id)
+		.await;
+
+	services
+		.timeline
+		.add_pdu_outlier(&leave_id, &serde_json::from_value(leave)?);
+
+	let shortstatekey = services
+		.short
+		.get_or_create_shortstatekey(&StateEventType::RoomMember, alice.as_str())
+		.await;
+
+	let state_map = HashMap::from([(shortstatekey, leave_id.clone())]);
+	services
+		.membership
+		.apply_send_knock_state(room_id, &state_map, &state_lock)
+		.await?;
+
+	let state_map = services
+		.membership
+		.ingest_send_knock_state(room_id, carol, &response, &RoomVersionId::V11)
+		.await?;
+
+	services
+		.membership
+		.apply_send_knock_state(room_id, &state_map, &state_lock)
+		.await?;
+
+	let member_id = services
+		.state_accessor
+		.room_state_get_id(room_id, &StateEventType::RoomMember, alice.as_str())
+		.await?;
+
+	assert_eq!(member_id, leave_id);
+
+	Ok(())
+}
+
 /// Knock state events are checked before they are stored.
 ///
 /// A copy whose content no longer matches its hash leaves the stored event
@@ -83,6 +146,7 @@ async fn knock_state_is_checked_before_storing() -> Result {
 
 	let services = &fixture.services;
 	let room_id = room_id!("!knock:remote.invalid");
+	let carol = user_id!("@carol:localhost");
 	let other_room_id = room_id!("!other:remote.invalid");
 	let content = json!({ "topic": "known" });
 	let (topic_id, topic) = pdu(services, room_id, "m.room.topic", "", &content)?;
@@ -98,7 +162,7 @@ async fn knock_state_is_checked_before_storing() -> Result {
 	let response = SendKnockResponse::new(vec![knock_state(&altered)?, knock_state(&foreign)?]);
 	let state_map = services
 		.membership
-		.ingest_send_knock_state(room_id, &response, &RoomVersionId::V11)
+		.ingest_send_knock_state(room_id, carol, &response, &RoomVersionId::V11)
 		.await?;
 
 	let stored: Value = services.timeline.get_outlier(&topic_id).await?;

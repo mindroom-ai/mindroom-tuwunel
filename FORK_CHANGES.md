@@ -61,8 +61,9 @@ The history keeps the v1.9.1 ownership layout of eight commits (shared test
 infrastructure, five runtime features with their tests and compatibility
 changes, CI, and docs), followed by the squash-merged fork PRs #15, #17, #18
 and #22-#24 in their original order, the fork PRs #26-#59 and #61-#67 in merge
-order, the v1.9.3 rebase record, and this rebase's documentation. No upstream
-backports are carried.
+order, the v1.9.3 rebase record, and this rebase's documentation. That rebase
+carried no upstream backports; upstream `a3b9554b8` from `dev` is carried since
+(see "Read receipts need an event the user can see").
 See the [current ownership and rebase procedure](docs/rebase-upstream-main-2026-10-06.md).
 Earlier rebase records remain historical snapshots.
 
@@ -233,16 +234,19 @@ Files:
 `src/main/tests/edu_content_size.rs`, `src/service/sending/sender/tests.rs` and
 `src/service/sending/sender/dispatch/federation/tests.rs`.
 
-### Federated read receipts need a joined user and an event of the room
+### Federated read receipts need a joined user
 
 An `m.receipt` EDU from another server was stored for any of that server's
 users once it had a member in the room, whether or not the named user was
-joined, and for any event id and `thread_id` it named. Users outside the room
-then showed up as readers, and each new user or `thread_id` string stored
-another receipt row, kept until the room is deleted. A federated receipt is now
-stored only for a user joined to the room, as typing notifications already
-require, at an event of the room's timeline, and with no `thread_id`, `main`, or
-a thread root that is an event of the room. Upstream has the same bug. Files:
+joined, and for any `thread_id` it named. Users outside the room then showed up
+as readers, and each new user or `thread_id` string stored another receipt row,
+kept until the room is deleted. A federated receipt is now stored only for a
+user joined to the room, as typing notifications already require, and with no
+`thread_id`, `main`, or a thread root that is an event of the room. Its event id
+is not checked, because a receipt can arrive before its event or from a server
+other than the event's; a receipt for an event this server does not have yet
+replaces the user's receipt for that thread like any other. Upstream has the
+same bug. Files:
 `src/api/server/send.rs`, `src/api/client/read_marker/mod.rs`; test in
 `src/main/tests/federation_receipt_edu.rs`.
 
@@ -359,7 +363,7 @@ Upstream has the same bug. Files: `src/service/membership/join.rs`,
 `src/service/rooms/event_handler/handle_outlier_pdu.rs`; test in
 `src/service/membership/join/tests.rs`.
 
-### send_join state leaves other local users' joins out
+### send_join state keeps other local users' memberships
 
 Forcing the `send_join` state replays each `m.room.member` event in it, so a
 join the authorization rules accept for another user of this server marked
@@ -367,8 +371,14 @@ that user as joined. Up to room version 10 such a join passes from any sender
 when its only previous event is a create naming that user as creator, and an
 old join of a user who has since left passes too. A join of a local user other
 than the joining user is still stored, as other events may name it, but is now
-left out of the room state, as member events are on the knock path. Upstream
-has the same bug. Files: `src/service/membership/join.rs`; test in
+left out of the room state, as member events are on the knock path. The forced
+state also replaced the room's, so a local user the answer left out lost their
+leave from it while still recorded as left, and a later event whose state had
+their old join joined them again. The member event the room's state has for a
+local user other than the joining user now stays, unless the answer has later
+ones for them that follow it through their auth events, such as an unban and
+then a new invite. Upstream has the same bug. Files:
+`src/service/membership/join.rs`; tests in
 `src/service/membership/join/tests.rs`.
 
 ### Failed appservice requests leave the `hs_token` out of the log
@@ -415,19 +425,21 @@ user ID, as the per-user state scans already did. Upstream has the same bug.
 Files: `src/service/rooms/state_cache/mod.rs`; test in
 `src/service/rooms/state_cache/tests.rs`.
 
-### Public read receipts need a joined user and an event of the room
+### Read receipts need an event the user can see
 
 `POST /rooms/{roomId}/receipt/m.read/{eventId}` and the `m.read` field of
-`/read_markers` stored a public read receipt without checking that the sender
-is joined to the room or that the event belongs to it. A user outside the room
-then showed up as a reader to its members and to other servers, and a receipt
-whose `thread_id` named the same unknown event passed the MSC3771 thread check,
-so each new event id stored another receipt row, kept until the room is
-deleted. Both endpoints now answer 403 to a user who is not joined and 404 for
-an event that is not in the room's timeline, as private read markers already
-do. Upstream has the same bug. Files:
-`src/api/client/read_marker/{mod.rs,receipt.rs,read_markers.rs}`; test in
-`src/main/tests/public_receipt_room.rs`.
+`/read_markers` stored a public read receipt without checking that the event
+belongs to the room or that the sender can see it. A user who could not see the
+room then showed up as a reader to its members and to other servers, and a
+receipt whose `thread_id` named the same unknown event passed the MSC3771
+thread check, so each new event id stored another receipt row, kept until the
+room is deleted. Both endpoints now answer 404 to a public or private read
+receipt for an event that is not in the room or that the sender cannot see. A
+user who can see the room without being joined, for example while previewing a
+`world_readable` room, can still send receipts. The check is upstream
+`a3b9554b8` from `dev`, carried as a cherry-pick until the fork's base contains
+it. Files: `src/api/client/read_marker/{mod.rs,receipt.rs,read_markers.rs}`;
+test in `src/main/tests/public_receipt_room.rs`.
 
 ### Prev events from another room are rejected
 
@@ -649,7 +661,8 @@ A knock on a room this server is not in installs the answering server's
 replayed each `m.room.member` event in it into the membership cache, so it
 could mark other local users as joined, invited, or no longer invited. Member
 events are now left out of knock state; the knocking user's own membership
-still comes from the knock event this server builds. Upstream has the same
+still comes from the knock event this server builds, and other local users
+keep the member events the room's state has for them. Upstream has the same
 bug. Files: `src/service/membership/knock.rs`; test in
 `src/service/membership/knock/tests.rs`.
 
