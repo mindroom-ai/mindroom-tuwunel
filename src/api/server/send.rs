@@ -591,17 +591,6 @@ async fn handle_edu_receipt_room_user(
 		.into_iter()
 		.stream()
 		.for_each_concurrent(automatic_width(), async |event_id| {
-			if room_event_pdu_id(services, room_id, &event_id)
-				.await
-				.is_err()
-			{
-				debug_warn!(
-					%user_id, %room_id, %event_id, %origin,
-					"received read receipt EDU for event not in room"
-				);
-				return;
-			}
-
 			let user_data = [(user_id.to_owned(), data.clone())];
 			let receipts = [(ReceiptType::Read, BTreeMap::from(user_data))];
 			let content = [(event_id.clone(), BTreeMap::from(receipts))];
