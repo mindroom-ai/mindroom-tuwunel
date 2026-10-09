@@ -32,7 +32,12 @@ use tuwunel_core::{
 	matrix::{Event, event::gen_event_id_canonical_json, room_version},
 	pdu::{Pdu, PduBuilder, check_rules},
 	trace,
-	utils::{self, BoolExt, math::Expected, shuffle},
+	utils::{
+		self, BoolExt,
+		math::Expected,
+		shuffle,
+		stream::{BroadbandExt, ReadyExt},
+	},
 	warn,
 };
 
@@ -616,8 +621,11 @@ struct ExtractDepth {
 /// and all of its auth events were accepted before it; a stored copy of an
 /// auth event does not count. A rejected event is not stored and stays out of
 /// the returned room state, and so does an accepted join of a local user other
-/// than `sender_user`. A rejected create event, or one of another room version
-/// than the join's, fails the join.
+/// than `sender_user`. Such a user's member event in the room's current state
+/// stays in the returned state, unless an accepted member event of the response
+/// for that user follows it, naming it as an auth event directly or through
+/// earlier ones. A rejected create event, or one of another room version than
+/// the join's, fails the join.
 #[implement(Service)]
 async fn ingest_send_join_events(
 	&self,
@@ -644,6 +652,10 @@ async fn ingest_send_join_events(
 			.map(|extract| extract.depth)
 			.ok()
 	});
+
+	let mut local_members = self
+		.local_member_state(room_id, sender_user)
+		.await;
 
 	let cork = self.services.db.cork_and_flush();
 	let mut accepted = HashSet::new();
@@ -701,20 +713,22 @@ async fn ingest_send_join_events(
 
 		accepted.insert(event_id.clone());
 
-		// Forcing this state replays its memberships, which the answering server
-		// picks, so it must not join other local users. Their joins are still
-		// stored above, as other events may name them as auth events.
-		let other_local_join = pdu.kind == TimelineEventType::RoomMember
+		let other_local_member = pdu.kind == TimelineEventType::RoomMember
 			&& pdu.state_key.as_deref().is_some_and(|state_key| {
 				state_key != sender_user.as_str()
 					&& UserId::parse(state_key)
 						.is_ok_and(|user_id| self.services.globals.user_is_local(&user_id))
-			})
+			});
+
+		// Forcing this state replays its memberships, which the answering server
+		// picks, so it must not join other local users. Their joins are still
+		// stored above, as other events may name them as auth events.
+		let other_local_join = other_local_member
 			&& pdu
 				.get_content::<RoomMemberEventContent>()
 				.is_ok_and(|content| content.membership == MembershipState::Join);
 
-		if in_state
+		if (in_state || other_local_member)
 			&& !other_local_join
 			&& let Some(state_key) = &pdu.state_key
 		{
@@ -724,12 +738,55 @@ async fn ingest_send_join_events(
 				.get_or_create_shortstatekey(&pdu.kind.to_string().into(), state_key)
 				.await;
 
-			state.insert(shortstatekey, event_id);
+			// The member event this server has for another of its users gives
+			// way only to one naming it as an auth event, which gives way in
+			// turn, so a ban follows through an unban to a new invite.
+			if let Some(kept) = local_members.get_mut(&shortstatekey) {
+				if pdu.auth_events.contains(kept) {
+					*kept = event_id;
+				}
+			} else if in_state {
+				state.insert(shortstatekey, event_id);
+			}
 		}
 	}
 
+	// A key the response leaves out would otherwise drop out of the room's state.
+	state.extend(local_members);
+
 	drop(cork);
 	Ok(state)
+}
+
+/// The member events of local users other than `user_id` in the room's current
+/// state.
+///
+/// The state a remote server answers a join or knock with replaces the room's
+/// state, so these are kept in it.
+#[implement(Service)]
+pub(super) async fn local_member_state(
+	&self,
+	room_id: &RoomId,
+	user_id: &UserId,
+) -> HashMap<u64, OwnedEventId> {
+	self.services
+		.state_accessor
+		.room_state_keys_with_ids(room_id, &StateEventType::RoomMember)
+		.ready_filter_map(Result::ok)
+		.ready_filter(|(state_key, _)| {
+			state_key.as_str() != user_id.as_str()
+				&& UserId::parse(state_key.as_str())
+					.is_ok_and(|user_id| self.services.globals.user_is_local(&user_id))
+		})
+		.broad_then(async |(state_key, event_id)| {
+			self.services
+				.short
+				.get_or_create_shortstatekey(&StateEventType::RoomMember, &state_key)
+				.map(move |shortstatekey| (shortstatekey, event_id))
+				.await
+		})
+		.collect()
+		.await
 }
 
 /// Stores a checked event of the send_join response as an outlier.
