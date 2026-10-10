@@ -86,12 +86,12 @@ mod tests {
 		assert_userinfo(router, &no_body, None, StatusCode::OK).await;
 
 		// A repeated audience is not read as either value.
-		let query = form_urlencoded::Serializer::new(String::new())
-			.append_pair("access_token", &unbound)
-			.append_pair("io.mindroom.audience", AUDIENCE)
-			.append_pair("io.mindroom.audience", AUDIENCE)
-			.finish();
-		let (status, body) = send(router, get(&userinfo_uri(&query))).await;
+		let uri = userinfo_uri(&[
+			("access_token", &unbound),
+			("io.mindroom.audience", AUDIENCE),
+			("io.mindroom.audience", AUDIENCE),
+		]);
+		let (status, body) = send(router, get(&uri)).await;
 		assert_eq!(status, StatusCode::BAD_REQUEST, "repeated audience: {body}");
 		assert_eq!(body["errcode"], "M_INVALID_PARAM", "repeated audience: {body}");
 
@@ -219,13 +219,10 @@ mod tests {
 		audience: Option<&str>,
 		expected: StatusCode,
 	) {
-		let mut query = form_urlencoded::Serializer::new(String::new());
-		query.append_pair("access_token", token);
-		if let Some(audience) = audience {
-			query.append_pair("io.mindroom.audience", audience);
-		}
+		let mut pairs = vec![("access_token", token)];
+		pairs.extend(audience.map(|audience| ("io.mindroom.audience", audience)));
 
-		let (status, body) = send(router, get(&userinfo_uri(&query.finish()))).await;
+		let (status, body) = send(router, get(&userinfo_uri(&pairs))).await;
 		assert_eq!(status, expected, "userinfo with audience {audience:?}: {body}");
 		if expected == StatusCode::OK {
 			assert_eq!(body["sub"], USER, "userinfo subject: {body}");
@@ -234,7 +231,11 @@ mod tests {
 		}
 	}
 
-	fn userinfo_uri(query: &str) -> String {
+	fn userinfo_uri(pairs: &[(&str, &str)]) -> String {
+		let query = form_urlencoded::Serializer::new(String::new())
+			.extend_pairs(pairs)
+			.finish();
+
 		format!("/_matrix/federation/v1/openid/userinfo?{query}")
 	}
 
