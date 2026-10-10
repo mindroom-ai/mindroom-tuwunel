@@ -1169,6 +1169,11 @@ Behavior:
   never occurs in UTF-8, so rows written before this change parse as unbound.
 - `/_matrix/client/versions` lists `io.mindroom.openid_audience` in
   `unstable_features`, so relying parties know when to send the query audience.
+- The binding also works in the other direction.
+  A client that requests a bound token can only use it at relying parties that send the matching query audience.
+  A relying party that sends no audience gets 401 `M_UNAUTHORIZED` for a bound token.
+  Released MindRoom backends verify Computers OpenID tokens without an audience, so they reject bound tokens until they carry the audience support (mindroom-ai/mindroom#2775).
+  Roll out in this order: MindRoom backends with audience support first, MindRoom Chat at any time (it only adds a body field that stock homeservers ignore), and this release last.
 
 ## Operational Changes
 
@@ -1277,6 +1282,8 @@ native_client_ids = ["chat.mindroom.app"]
   unchanged. A relying party that sends `io.mindroom.audience` to userinfo
   accepts only tokens bound to that audience, so its clients must request bound
   tokens.
+  Conversely, a client that requests a bound token can only use it at relying parties that send the matching audience.
+  Relying parties that send none get 401, so upgrade MindRoom backends before clients start requesting bound tokens against this release.
 - Upstream v1.9.1 `/messages` treats `from` and `to` as directional
   stream-position bounds and
   rejects malformed pagination tokens with `M_INVALID_PARAM`.
