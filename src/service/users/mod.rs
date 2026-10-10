@@ -44,6 +44,11 @@ pub use self::{
 pub const PASSWORD_SENTINEL: &str = "*";
 pub const PASSWORD_DISABLED: &str = "";
 
+/// Separates the user ID from the bound audience in `openidtoken_expiresatuserid`
+/// values. It never occurs in UTF-8, so rows written without an audience parse as
+/// unbound.
+const OPENID_AUDIENCE_SEPARATOR: u8 = 0xFF;
+
 /// Forensic record for a moderation action (MSC3823 suspend, MSC3939 lock).
 /// Presence of the row is the load-bearing fact; this body is written but
 /// never read on the hot path.
@@ -572,7 +577,15 @@ impl Service {
 
 	/// Creates an OpenID token, which can be used to prove that a user has
 	/// access to an account (primarily for integrations)
-	pub fn create_openid_token(&self, user_id: &UserId, token: &str) -> Result<u64> {
+	///
+	/// A token with an `audience` (`io.mindroom.openid_audience`) verifies only
+	/// for a relying party that presents the same audience.
+	pub fn create_openid_token(
+		&self,
+		user_id: &UserId,
+		token: &str,
+		audience: Option<&str>,
+	) -> Result<u64> {
 		use std::num::Saturating as Sat;
 
 		let expires_in = self.services.server.config.openid_token_ttl;
@@ -580,6 +593,10 @@ impl Service {
 
 		let mut value = expires_at.0.to_be_bytes().to_vec();
 		value.extend_from_slice(user_id.as_bytes());
+		if let Some(audience) = audience {
+			value.push(OPENID_AUDIENCE_SEPARATOR);
+			value.extend_from_slice(audience.as_bytes());
+		}
 
 		self.db
 			.openidtoken_expiresatuserid
@@ -589,7 +606,14 @@ impl Service {
 	}
 
 	/// Find out which user an OpenID access token belongs to.
-	pub async fn find_from_openid_token(&self, token: &str) -> Result<OwnedUserId> {
+	///
+	/// The relying party's `audience` must equal the one the token is bound to;
+	/// an unbound token verifies only when no audience is presented.
+	pub async fn find_from_openid_token(
+		&self,
+		token: &str,
+		audience: Option<&str>,
+	) -> Result<OwnedUserId> {
 		let Ok(value) = self
 			.db
 			.openidtoken_expiresatuserid
@@ -612,6 +636,20 @@ impl Service {
 				.remove(token.as_bytes());
 
 			return Err!(Request(Unauthorized("OpenID token is expired")));
+		}
+
+		let mut user_and_audience =
+			user_bytes.splitn(2, |&byte| byte == OPENID_AUDIENCE_SEPARATOR);
+		let user_bytes = user_and_audience.next().unwrap_or_default();
+		match (user_and_audience.next(), audience) {
+			| (None, None) => {},
+			| (Some(bound), Some(audience)) if bound == audience.as_bytes() => {},
+			| (Some(_), _) => {
+				return Err!(Request(Unauthorized("OpenID token is bound to another audience")));
+			},
+			| (None, Some(_)) => {
+				return Err!(Request(Unauthorized("OpenID token is not bound to an audience")));
+			},
 		}
 
 		let user_string = utils::string_from_bytes(user_bytes)
