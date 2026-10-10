@@ -1173,7 +1173,8 @@ Behavior:
   A client that requests a bound token can only use it at relying parties that send the matching query audience.
   A relying party that sends no audience gets 401 `M_UNAUTHORIZED` for a bound token.
   Released MindRoom backends verify Computers OpenID tokens without an audience, so they reject bound tokens until they carry the audience support (mindroom-ai/mindroom#2775).
-  Roll out in this order: MindRoom backends with audience support first, MindRoom Chat at any time (it only adds a body field that stock homeservers ignore), and this release last.
+  Roll out in this order: MindRoom backends with audience support first, then MindRoom Chat clients including the iOS app (they only add a body field that stock homeservers ignore), and this release last.
+  Chat clients that have not updated, such as an iOS app whose update still waits for App Store review, send unbound tokens that updated backends reject with 401 once this release binds.
 
 ## Operational Changes
 
@@ -1284,6 +1285,7 @@ native_client_ids = ["chat.mindroom.app"]
   tokens.
   Conversely, a client that requests a bound token can only use it at relying parties that send the matching audience.
   Relying parties that send none get 401, so upgrade MindRoom backends before clients start requesting bound tokens against this release.
+  Release this homeserver only after MindRoom backends, MindRoom Chat clients, and the MindRoom Chat iOS app update are all live, because older clients send unbound tokens that updated backends reject with 401.
 - Upstream v1.9.1 `/messages` treats `from` and `to` as directional
   stream-position bounds and
   rejects malformed pagination tokens with `M_INVALID_PARAM`.
