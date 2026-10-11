@@ -525,6 +525,56 @@ Upstream has the same bug. Files: `src/service/users/device.rs`,
 `src/main/tests/refresh_removed_device.rs` and
 `src/main/tests/refresh_concurrent.rs`.
 
+### OpenID tokens can be bound to a relying party audience
+
+Files:
+- `src/api/client/openid.rs`, `src/api/server/openid.rs`
+- `src/api/client/versions.rs`, `src/service/users/mod.rs`
+- `src/core/config/mod.rs`, `tuwunel-example.toml`
+- `src/mindroom-tests/tests/openid_audience.rs`,
+  `src/mindroom-tests/tests/openid_audience_disabled.rs`,
+  `src/mindroom-tests/tests/support/openid.rs`
+
+Behavior:
+- Everything below applies only with `mindroom_openid_audience = true`.
+  The option defaults to `false`, and then the server behaves as upstream.
+  `request_token` ignores `io.mindroom.audience` and issues unbound tokens.
+  `/openid/userinfo` ignores the query audience, so any valid token verifies.
+  A token bound while the option was on verifies like an unbound one.
+  `/_matrix/client/versions` does not list `io.mindroom.openid_audience`.
+- `POST /_matrix/client/v3/user/{userId}/openid/request_token` accepts an
+  optional body field `io.mindroom.audience` naming the relying party (MindRoom
+  sends its backend origin). The token is bound to that audience; the response
+  is unchanged. Without the field (`{}` or an empty body) the token is unbound,
+  as upstream. An audience that is not a string, is empty, is longer than 255
+  characters, or contains control characters is rejected with 400
+  `M_INVALID_PARAM`. A body that is valid JSON but not canonical JSON (for
+  example one containing a float, or an integer outside +/-2^53) is rejected
+  with 400 `M_BAD_JSON` instead of issuing an unbound token; with the option
+  off such a body still gets an unbound token, as upstream.
+- `GET /_matrix/federation/v1/openid/userinfo` reads an optional
+  `io.mindroom.audience` query parameter. A bound token verifies only when the
+  query names its audience; an unbound token verifies only when the query names
+  none. Every other combination is 401 `M_UNAUTHORIZED`, so a relying party
+  cannot replay a token bound to it at a deployment with a different audience,
+  and a relying party that asks for an audience never accepts an unbound token.
+  A repeated query audience is 400 `M_INVALID_PARAM`. Rejected attempts leave
+  the token in place; expired tokens are removed as before.
+- The `openidtoken_expiresatuserid` value of a bound token is the expiry (8
+  bytes big-endian ms), the user ID, a `0xFF` byte, and the audience. `0xFF`
+  never occurs in UTF-8, so rows written before this change parse as unbound.
+- `/_matrix/client/versions` lists `io.mindroom.openid_audience` in
+  `unstable_features`, so relying parties know when to send the query audience.
+- The binding also works in the other direction.
+  A client that requests a bound token can only use it at relying parties that send the matching query audience.
+  A relying party that sends no audience gets 401 `M_UNAUTHORIZED` for a bound token.
+  Released MindRoom backends verify Computers OpenID tokens without an audience, so they reject bound tokens until they carry the audience support (mindroom-ai/mindroom#2775).
+  Chat clients that have not updated send unbound tokens, which backends that send an audience reject with 401.
+- Rollout: deploy this release freely, since the option is off by default and nothing changes.
+  Backends and clients that already send audiences keep working while the option is off, because the server ignores both fields.
+  Turn the option on only after MindRoom backends with audience support (mindroom-ai/mindroom#2775) and MindRoom Chat clients that send audiences, including the iOS app (mindroom-ai/mindroom-chat#442), are live.
+  Turning it off again restores upstream behavior, including for tokens issued bound.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
@@ -798,7 +848,9 @@ departure, edit-purge/bundling composition, the orphaned long-text sidecar
 sweep command and its retry after a storage failure
 (`orphaned_sidecar_sweep.rs`, `orphaned_sidecar_delete_retry.rs`),
 device-key immutability/cleanup/
-concurrency, and real gateway stream/invite notifications. Stream classification
+concurrency, real gateway stream/invite notifications, and audience-bound
+OpenID tokens with the option on and off (`openid_audience.rs`,
+`openid_audience_disabled.rs`). Stream classification
 also has unit tests in `src/service/pusher/tests.rs`.
 
 The v1.9.3 rebase adds pins for its semantic overlaps:
@@ -837,6 +889,13 @@ mindroom_edit_purge_dry_run = false
 # bundle_edit_relations defaults to true in the fork; set false only to opt out.
 ```
 
+### OpenID audience binding
+```toml
+[global]
+# Off by default; enable only after backends and clients send audiences.
+mindroom_openid_audience = true
+```
+
 ### Native Sign in with Apple
 ```toml
 [[global.identity_provider]]
@@ -864,6 +923,11 @@ native_client_ids = ["chat.mindroom.app"]
 - Non-terminal `io.mindroom.stream_status` events do not push; terminal events
   use ordinary recipient push rules. The classifier does not deduplicate
   multiple distinct terminal events for the same stream.
+- OpenID audience binding is off unless `mindroom_openid_audience = true`.
+  With it on, tokens requested without `io.mindroom.audience` stay unbound and keep verifying at userinfo calls without the query audience, so Element Call, LiveKit, the hosted provisioning service, and stock relying parties work unchanged.
+  A relying party that sends `io.mindroom.audience` to userinfo accepts only tokens bound to that audience, so its clients must request bound tokens.
+  Conversely, a client that requests a bound token can only use it at relying parties that send the matching audience; relying parties that send none get 401.
+  Enable the option only after MindRoom backends and MindRoom Chat clients, including the iOS app, send audiences.
 - Upstream v1.9.1 `/messages` treats `from` and `to` as directional
   stream-position bounds and
   rejects malformed pagination tokens with `M_INVALID_PARAM`.
