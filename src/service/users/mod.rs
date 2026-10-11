@@ -653,8 +653,11 @@ impl Service {
 			| _ if !audience_checked => {},
 			| (None, None) => {},
 			| (Some(bound), Some(audience)) if bound == audience.as_bytes() => {},
-			| (Some(_), _) => {
+			| (Some(_), Some(_)) => {
 				return Err!(Request(Unauthorized("OpenID token is bound to another audience")));
+			},
+			| (Some(_), None) => {
+				return Err!(Request(Unauthorized("OpenID token is bound to an audience")));
 			},
 			| (None, Some(_)) => {
 				return Err!(Request(Unauthorized("OpenID token is not bound to an audience")));

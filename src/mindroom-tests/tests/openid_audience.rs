@@ -33,6 +33,7 @@ mod tests {
 			advertises_the_capability(&router).await;
 			verifies_per_audience_table(&router).await;
 			rejects_invalid_audiences(&router).await;
+			rejects_non_canonical_bodies(&router).await;
 			stored_rows_keep_their_format(&services).await
 		})
 	}
@@ -100,6 +101,23 @@ mod tests {
 			let (status, body) = send(router, request).await;
 			assert_eq!(status, StatusCode::BAD_REQUEST, "audience {audience}: {body}");
 			assert_eq!(body["errcode"], "M_INVALID_PARAM", "audience {audience}: {body}");
+		}
+	}
+
+	async fn rejects_non_canonical_bodies(router: &Router) {
+		// Valid JSON that is not canonical JSON leaves the audience unreadable,
+		// so no token is issued rather than an unbound one.
+		let bodies = [
+			json!({"io.mindroom.audience": 1.5}),
+			json!({"io.mindroom.audience": 9_007_199_254_740_992_u64}),
+			json!({"io.mindroom.audience": AUDIENCE, "extra": 1.5}),
+		];
+
+		for request_body in bodies {
+			let (status, body) =
+				send(router, post(REQUEST_TOKEN_PATH, Some(request_body.clone()))).await;
+			assert_eq!(status, StatusCode::BAD_REQUEST, "body {request_body}: {body}");
+			assert_eq!(body["errcode"], "M_BAD_JSON", "body {request_body}: {body}");
 		}
 	}
 

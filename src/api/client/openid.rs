@@ -54,8 +54,16 @@ pub(crate) async fn create_openid_token_route(
 }
 
 /// Reads the optional audience from the request body; absent means unbound.
+///
+/// The router leaves `json_body` empty for a body that is valid JSON but not
+/// canonical JSON (a float, or an integer outside +/-2^53). Its audience cannot
+/// be read, so it is rejected instead of issuing an unbound token.
 fn requested_audience(json_body: Option<&CanonicalJsonValue>) -> Result<Option<&str>> {
-	let Some(CanonicalJsonValue::Object(body)) = json_body else {
+	let Some(json_body) = json_body else {
+		return Err!(Request(BadJson("Request body is not canonical JSON")));
+	};
+
+	let CanonicalJsonValue::Object(body) = json_body else {
 		return Ok(None);
 	};
 

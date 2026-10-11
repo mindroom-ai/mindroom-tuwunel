@@ -52,6 +52,12 @@ mod tests {
 		// Values the option would reject are not validated either.
 		let token = request_token(router, Some(json!({"io.mindroom.audience": 1}))).await;
 		assert_userinfo(router, &token, None, StatusCode::OK).await;
+
+		// A body that is not canonical JSON still gets an unbound token.
+		let token =
+			request_token(router, Some(json!({"io.mindroom.audience": AUDIENCE, "extra": 1.5})))
+				.await;
+		assert_userinfo(router, &token, None, StatusCode::OK).await;
 	}
 
 	async fn ignores_the_query_audience(router: &Router) {
