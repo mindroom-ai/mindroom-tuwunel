@@ -5541,6 +5541,7 @@ dependencies = [
  "rand 0.10.3",
  "ruma",
  "serde",
+ "serde_html_form",
  "serde_json",
  "tokio",
  "tracing",

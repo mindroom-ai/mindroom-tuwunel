@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub(crate) mod openid;
+
 use std::sync::Arc;
 
 use axum::Router;

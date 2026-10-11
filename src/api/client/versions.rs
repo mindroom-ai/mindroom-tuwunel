@@ -50,6 +50,12 @@ pub(crate) async fn get_supported_versions_route(
 				.into_iter()
 				.flatten(),
 		)
+		.chain(
+			services
+				.config
+				.mindroom_openid_audience
+				.then_some("io.mindroom.openid_audience"),
+		)
 		.map(Into::into)
 		.zip(once(true).cycle())
 		.collect();
