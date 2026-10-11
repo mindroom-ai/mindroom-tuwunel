@@ -43,6 +43,12 @@ pub(crate) async fn get_supported_versions_route(
 					.rendezvous_enabled
 					.then_some("org.matrix.msc4108"),
 			)
+			.chain(
+				services
+					.config
+					.mindroom_openid_audience
+					.then_some("io.mindroom.openid_audience"),
+			)
 			.map(Into::into)
 			.zip(once(true).cycle())
 			.collect(),
@@ -81,7 +87,7 @@ static VERSIONS: [&str; 27] = [
 	"v1.19",  /* mutual rooms (MSC2666) */
 ];
 
-static UNSTABLE_FEATURES: [&str; 42] = [
+static UNSTABLE_FEATURES: [&str; 41] = [
 	"org.matrix.e2e_cross_signing",
 	// private read receipts (https://github.com/matrix-org/matrix-spec-proposals/pull/2285)
 	"org.matrix.msc2285.stable",
@@ -159,6 +165,4 @@ static UNSTABLE_FEATURES: [&str; 42] = [
 	"org.matrix.msc3440.stable",
 	// state_after on /sync (https://github.com/matrix-org/matrix-spec-proposals/pull/4222)
 	"org.matrix.msc4222",
-	// MindRoom fork: OpenID tokens bound to a relying party via `io.mindroom.audience`
-	"io.mindroom.openid_audience",
 ];

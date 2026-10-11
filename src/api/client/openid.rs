@@ -19,8 +19,9 @@ const AUDIENCE_MAX_CHARS: usize = 255;
 /// Request an OpenID token to verify identity with third-party services.
 ///
 /// - The token generated is only valid for the OpenID API
-/// - A token requested with `io.mindroom.audience` verifies only for a relying
-///   party that presents the same audience
+/// - With `mindroom_openid_audience`, a token requested with
+///   `io.mindroom.audience` verifies only for a relying party that presents
+///   the same audience; without it the field is ignored
 pub(crate) async fn create_openid_token_route(
 	State(services): State<crate::State>,
 	body: Ruma<account::request_openid_token::v3::Request>,
@@ -33,7 +34,11 @@ pub(crate) async fn create_openid_token_route(
 		)));
 	}
 
-	let audience = requested_audience(body.json_body.as_ref())?;
+	let audience = if services.config.mindroom_openid_audience {
+		requested_audience(body.json_body.as_ref())?
+	} else {
+		None
+	};
 	let access_token = utils::random_string(TOKEN_LENGTH);
 	let expires_in =
 		services

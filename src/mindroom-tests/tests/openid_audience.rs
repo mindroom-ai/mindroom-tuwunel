@@ -4,52 +4,31 @@ mod support;
 mod tests {
 	use std::sync::Arc;
 
-	use axum::{Router, body::Body};
+	use axum::Router;
 	use serde_json::{Value, json};
-	use tower::ServiceExt;
-	use tuwunel_core::{
-		Result,
-		http::{Request, StatusCode, header},
-		ruma::{device_id, user_id},
-		utils::millis_since_unix_epoch,
-	};
+	use tuwunel_core::{Result, http::StatusCode, ruma::user_id, utils::millis_since_unix_epoch};
 	use tuwunel_service::Services;
-	use url::form_urlencoded;
 
-	use super::support::Harness;
+	use super::support::{
+		Harness,
+		openid::{
+			REQUEST_TOKEN_PATH, USER, assert_userinfo, get, post, request_token, send, setup,
+			userinfo_uri,
+		},
+	};
 
-	const USER: &str = "@alice:localhost";
-	const ACCESS_TOKEN: &str = "openid-audience-access-token-0123456789";
 	const AUDIENCE: &str = "https://mindroom.example.test";
 	const OTHER_AUDIENCE: &str = "https://other.example.test";
-	const REQUEST_TOKEN_PATH: &str =
-		"/_matrix/client/v3/user/%40alice%3Alocalhost/openid/request_token";
 	const STORED_TOKENS: &str = "openidtoken_expiresatuserid";
 
 	#[test]
 	fn openid_tokens_bind_to_the_requested_audience() -> Result {
-		let harness = Harness::new("mindroom_openid_audience", [])?;
+		let harness = Harness::new("mindroom_openid_audience", [
+			"mindroom_openid_audience=true".to_owned(),
+		])?;
 
 		harness.with_services(async |services| {
-			services
-				.users
-				.create(user_id!("@alice:localhost"), Some("password"), None)
-				.await?;
-			services
-				.users
-				.create_device(
-					user_id!("@alice:localhost"),
-					Some(device_id!("OPENID")),
-					(Some(ACCESS_TOKEN), None),
-					None,
-					None,
-					None,
-				)
-				.await?;
-
-			let (state, _guard) = tuwunel_api::router::state::create(services.clone());
-			let router =
-				tuwunel_api::router::build(Router::new(), &services.server).with_state(state);
+			let (router, _guard) = setup(&services).await?;
 
 			advertises_the_capability(&router).await;
 			verifies_per_audience_table(&router).await;
@@ -201,78 +180,5 @@ mod tests {
 		);
 
 		Ok(())
-	}
-
-	async fn request_token(router: &Router, body: Option<Value>) -> String {
-		let (status, body) = send(router, post(REQUEST_TOKEN_PATH, body)).await;
-		assert_eq!(status, StatusCode::OK, "request_token: {body}");
-		assert_eq!(body["token_type"], "Bearer", "request_token: {body}");
-		body["access_token"]
-			.as_str()
-			.expect("request_token returns an access token")
-			.to_owned()
-	}
-
-	async fn assert_userinfo(
-		router: &Router,
-		token: &str,
-		audience: Option<&str>,
-		expected: StatusCode,
-	) {
-		let mut pairs = vec![("access_token", token)];
-		pairs.extend(audience.map(|audience| ("io.mindroom.audience", audience)));
-
-		let (status, body) = send(router, get(&userinfo_uri(&pairs))).await;
-		assert_eq!(status, expected, "userinfo with audience {audience:?}: {body}");
-		if expected == StatusCode::OK {
-			assert_eq!(body["sub"], USER, "userinfo subject: {body}");
-		} else {
-			assert_eq!(body["errcode"], "M_UNAUTHORIZED", "userinfo error: {body}");
-		}
-	}
-
-	fn userinfo_uri(pairs: &[(&str, &str)]) -> String {
-		let query = form_urlencoded::Serializer::new(String::new())
-			.extend_pairs(pairs)
-			.finish();
-
-		format!("/_matrix/federation/v1/openid/userinfo?{query}")
-	}
-
-	fn get(uri: &str) -> Request<Body> {
-		Request::builder()
-			.method("GET")
-			.uri(uri)
-			.header("X-Forwarded-For", "127.0.0.1")
-			.body(Body::empty())
-			.expect("valid request")
-	}
-
-	fn post(uri: &str, body: Option<Value>) -> Request<Body> {
-		let body = body.map_or_else(Body::empty, |body| Body::from(body.to_string()));
-
-		Request::builder()
-			.method("POST")
-			.uri(uri)
-			.header(header::AUTHORIZATION, format!("Bearer {ACCESS_TOKEN}"))
-			.header(header::CONTENT_TYPE, "application/json")
-			.header("X-Forwarded-For", "127.0.0.1")
-			.body(body)
-			.expect("valid request")
-	}
-
-	async fn send(router: &Router, request: Request<Body>) -> (StatusCode, Value) {
-		let response = router
-			.clone()
-			.oneshot(request)
-			.await
-			.expect("router response");
-		let status = response.status();
-		let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
-			.await
-			.expect("readable response body");
-		let body = serde_json::from_slice(&bytes).expect("JSON response body");
-
-		(status, body)
 	}
 }

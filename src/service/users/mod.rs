@@ -607,8 +607,10 @@ impl Service {
 
 	/// Find out which user an OpenID access token belongs to.
 	///
-	/// The relying party's `audience` must equal the one the token is bound to;
-	/// an unbound token verifies only when no audience is presented.
+	/// With `mindroom_openid_audience`, the relying party's `audience` must
+	/// equal the one the token is bound to, and an unbound token verifies only
+	/// when no audience is presented. Without it, the audience is not checked,
+	/// so tokens bound while the option was on verify like unbound ones.
 	pub async fn find_from_openid_token(
 		&self,
 		token: &str,
@@ -641,7 +643,14 @@ impl Service {
 		let mut user_and_audience =
 			user_bytes.splitn(2, |&byte| byte == OPENID_AUDIENCE_SEPARATOR);
 		let user_bytes = user_and_audience.next().unwrap_or_default();
-		match (user_and_audience.next(), audience) {
+		let bound = user_and_audience.next();
+		let audience_checked = self
+			.services
+			.server
+			.config
+			.mindroom_openid_audience;
+		match (bound, audience) {
+			| _ if !audience_checked => {},
 			| (None, None) => {},
 			| (Some(bound), Some(audience)) if bound == audience.as_bytes() => {},
 			| (Some(_), _) => {

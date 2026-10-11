@@ -18,16 +18,23 @@ struct AudienceQuery {
 ///
 /// Get information about the user that generated the OpenID token.
 ///
-/// - With `io.mindroom.audience`, only a token bound to that audience verifies;
-///   without it, only an unbound token does
+/// - With `mindroom_openid_audience` and `io.mindroom.audience`, only a token
+///   bound to that audience verifies; without the parameter, only an unbound
+///   token does. Without `mindroom_openid_audience` the parameter is ignored.
 pub(crate) async fn get_openid_userinfo_route(
 	State(services): State<crate::State>,
 	uri: Uri,
 	body: Ruma<get_openid_userinfo::v1::Request>,
 ) -> Result<get_openid_userinfo::v1::Response> {
-	let query = uri.query().unwrap_or_default();
-	let AudienceQuery { audience } = serde_html_form::from_str(query)
-		.map_err(|_| err!(Request(InvalidParam("Invalid `io.mindroom.audience` parameter"))))?;
+	let audience = if services.config.mindroom_openid_audience {
+		let query = uri.query().unwrap_or_default();
+		let AudienceQuery { audience } = serde_html_form::from_str(query).map_err(|_| {
+			err!(Request(InvalidParam("Invalid `io.mindroom.audience` parameter")))
+		})?;
+		audience
+	} else {
+		None
+	};
 
 	Ok(get_openid_userinfo::v1::Response::new(
 		services
