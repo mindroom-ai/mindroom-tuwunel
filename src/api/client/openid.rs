@@ -1,17 +1,27 @@
 use std::time::Duration;
 
 use axum::extract::State;
-use ruma::{api::client::account, authentication::TokenType};
+use ruma::{CanonicalJsonValue, api::client::account, authentication::TokenType};
 use tuwunel_core::{Err, Result, utils};
 
 use super::TOKEN_LENGTH;
 use crate::Ruma;
+
+/// Request body field naming the relying party a token is bound to
+/// (`io.mindroom.openid_audience`).
+const AUDIENCE_FIELD: &str = "io.mindroom.audience";
+
+/// Longest accepted audience, in characters.
+const AUDIENCE_MAX_CHARS: usize = 255;
 
 /// # `POST /_matrix/client/v3/user/{userId}/openid/request_token`
 ///
 /// Request an OpenID token to verify identity with third-party services.
 ///
 /// - The token generated is only valid for the OpenID API
+/// - With `mindroom_openid_audience`, a token requested with
+///   `io.mindroom.audience` verifies only for a relying party that presents
+///   the same audience; without it the field is ignored
 pub(crate) async fn create_openid_token_route(
 	State(services): State<crate::State>,
 	body: Ruma<account::request_openid_token::v3::Request>,
@@ -24,10 +34,16 @@ pub(crate) async fn create_openid_token_route(
 		)));
 	}
 
+	let audience = if services.config.mindroom_openid_audience {
+		requested_audience(body.json_body.as_ref())?
+	} else {
+		None
+	};
 	let access_token = utils::random_string(TOKEN_LENGTH);
-	let expires_in = services
-		.users
-		.create_openid_token(&body.user_id, &access_token)?;
+	let expires_in =
+		services
+			.users
+			.create_openid_token(&body.user_id, &access_token, audience)?;
 
 	Ok(account::request_openid_token::v3::Response {
 		access_token,
@@ -35,4 +51,38 @@ pub(crate) async fn create_openid_token_route(
 		matrix_server_name: services.server.name.clone(),
 		expires_in: Duration::from_secs(expires_in),
 	})
+}
+
+/// Reads the optional audience from the request body; absent means unbound.
+///
+/// The router leaves `json_body` empty for a body that is valid JSON but not
+/// canonical JSON (a float, or an integer outside +/-2^53). Its audience cannot
+/// be read, so it is rejected instead of issuing an unbound token.
+fn requested_audience(json_body: Option<&CanonicalJsonValue>) -> Result<Option<&str>> {
+	let Some(json_body) = json_body else {
+		return Err!(Request(BadJson("Request body is not canonical JSON")));
+	};
+
+	let CanonicalJsonValue::Object(body) = json_body else {
+		return Ok(None);
+	};
+
+	let Some(audience) = body.get(AUDIENCE_FIELD) else {
+		return Ok(None);
+	};
+
+	let CanonicalJsonValue::String(audience) = audience else {
+		return Err!(Request(InvalidParam("`io.mindroom.audience` must be a string")));
+	};
+
+	if audience.is_empty()
+		|| audience.chars().count() > AUDIENCE_MAX_CHARS
+		|| audience.chars().any(char::is_control)
+	{
+		return Err!(Request(InvalidParam(
+			"`io.mindroom.audience` must be 1 to 255 characters without control characters",
+		)));
+	}
+
+	Ok(Some(audience))
 }

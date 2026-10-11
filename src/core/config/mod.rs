@@ -3945,6 +3945,26 @@ pub struct Config {
 	#[serde(default)]
 	pub mindroom_edit_purge_dry_run: bool,
 
+	/// MindRoom: Bind OpenID tokens to the relying party a client names in
+	/// `io.mindroom.audience`.
+	///
+	/// When enabled, `request_token` binds a token to the body field
+	/// `io.mindroom.audience`, `/openid/userinfo` verifies it only against a
+	/// matching `io.mindroom.audience` query parameter, and
+	/// `/_matrix/client/versions` advertises `io.mindroom.openid_audience`.
+	///
+	/// When disabled, the server behaves as upstream: both fields are ignored,
+	/// every token is issued unbound, and a token bound while this was enabled
+	/// verifies like an unbound one.
+	///
+	/// Enable only after the relying parties and clients in use send
+	/// audiences; a bound token is rejected by a relying party that sends none,
+	/// and an unbound token by one that sends one.
+	///
+	/// default: false
+	#[serde(default)]
+	pub mindroom_openid_audience: bool,
+
 	/// Sets the `Access-Control-Allow-Origin` header included by this server in
 	/// all responses. A list of multiple values can be specified. The default
 	/// is an empty list. The actual header defaults to `*` upon an empty list.
