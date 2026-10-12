@@ -2,10 +2,9 @@
 
 This document describes the current MindRoom fork behavior on top of upstream
 `tuwunel`. The fork is rebased directly onto upstream commits; see
-`docs/rebase-*.md` for the per-rebase log. As of the 2026-10-06 rebase the base
-is upstream `main` at `3f5db6d3a`, 134 commits past the `v1.9.3` release (the
-workspace version is still 1.9.3). Earlier changes merged upstream and dropped from the
-fork include the room-creation default power-level
+`docs/rebase-*.md` for the per-rebase log. As of the 2026-10-11 rebase the base
+is the upstream `v1.9.4` release (`f473d9a4a`). Earlier changes merged upstream
+and dropped from the fork include the room-creation default power-level
 override and the SSO grant-cookie path hardening (2026-07-07 rebase), and the
 drained/zero one-time-key counts fix and public MatrixRTC transport discovery
 (2026-07-21 rebase, upstream `164b8da61`/`007033cd5` and `a1776c368`). The
@@ -28,24 +27,48 @@ row with the device (`1347197ee`) and refuses a device ID that names a
 cross-signing key (`99c6c320a`); the fork keeps only its per-device lock and
 immutability policy around them. UIAA password flows follow upstream's
 credential-matched rule (`0726625e6`). The upstream fixes the fork had
-backported from `main` and that `v1.9.3` does not contain are carried as
-individual cherry-picks (see below). The fork's sliding sync profiles fix
-(#60) is dropped as well: upstream's rewrite of the profiles extension
-(`005830a1b`) sends profile changes only for joined rooms, and #60's test
-passes on v1.9.3 without it.
+backported from `main` and that `v1.9.3` does not contain were carried as
+individual cherry-picks. The fork's sliding sync profiles fix (#60) was
+dropped at that rebase because its test passes on v1.9.3 without it, but
+upstream's rewrite of the profiles extension (`005830a1b`) only checks that
+each user shares a joined room with the requester, so the fix was carried
+again (#76) until v1.9.4.
 See the [v1.9.3 rebase record](docs/rebase-v1.9.3-2026-10-05.md).
 
 On upstream `main` (`3f5db6d3a`), the fork's thread summary fixes (#19-#21)
 are upstream: PRs #617-#619 (`c9307347a`, `787099ab5`, `e6735fdf3`) and their
 rework into a single `rebuild_thread_summaries` startup pass (`b0c52a081`),
 which replaces the fork's `recount_thread_replies` and
-`scrub_redacted_thread_latest` passes and runs once on a fork database. Only
-the bound on the search for a redacted latest reply's replacement (#24) stays
-in the fork, on upstream's rewritten helpers. All eight temporary backports are
-in `main` and are no longer carried. Account deactivation now holds upstream's
-admin-room lock and refuses the last admin (`3fe9ef681`, `5420f2e56`); the fork
-records its deactivation reason under that lock.
+`scrub_redacted_thread_latest` passes and runs once on a fork database. The
+bound on the search for a redacted latest reply's replacement (#24) stayed in
+the fork, on upstream's rewritten helpers, until v1.9.4. All eight temporary
+backports are in `main` and are no longer carried. Account deactivation now
+holds upstream's admin-room lock and refuses the last admin (`3fe9ef681`,
+`5420f2e56`); the fork records its deactivation reason under that lock.
 See the [upstream main rebase record](docs/rebase-upstream-main-2026-10-06.md).
+
+At v1.9.4, upstream contains 34 of the fork's fixes: half through the fork's
+own upstream changes (PRs #624-#637 and three directly applied commits), some
+extended by the maintainer, and half as the maintainer's own versions of the
+same fixes. Their fork commits are dropped with their tests and entries, and
+upstream's versions are kept where they differ. Among them: the thread reply
+search bound (#24, now `thread_latest_reply_search_limit`), the UIAA body bound
+(#27), the sliding sync timeline cap and knock timeline (#29, #35), federated
+key query and claim filtering (#30, #58), knock and leave membership fixes
+(#31-#33, #46, #75), the SSO login-token confirmation, provider chaining and
+username fallback (#34, #37, #62), redirect and IP denylist hardening (#41,
+#51, #63, #65, #83), read receipt visibility (#49, #102), hierarchy cache
+authority (#52, #72), remote profile limits and sliding sync profile rooms
+(#76-#78, #86), and the prev-event room and old-event cutoff checks (#47, #48).
+Nine commits keep only what upstream lacks: #57 (stored-copy guard and
+redaction of send_join events), #66 (the federated receipt path), #67
+(`/state_ids` and local-build room checks), #84 (uploaded key sizes), #87 and
+#103 (on upstream's knock member skip), #88 (test only), #89 and #90 (on
+upstream's rewritten sliding sync fold and profile merge). The legacy SSO
+callback now uses upstream's Continue page, which trusts only the
+`well_known.client` origin and `oidc_registration_allowed_redirect_hosts`; the
+fork's `sso_trusted_redirect_hosts` option is gone.
+See the [v1.9.4 rebase record](docs/rebase-v1.9.4-2026-10-11.md).
 
 ## How To Inspect
 - Fork commits: `git log --reverse --oneline <upstream-base>..HEAD`
@@ -58,11 +81,11 @@ verification needs in the test environment instead of carrying extra patches.
 
 The history keeps the v1.9.1 ownership layout of eight commits (shared test
 infrastructure, five runtime features with their tests and compatibility
-changes, CI, and docs), followed by the squash-merged fork PRs #15, #17, #18
-and #22-#24 in their original order, the fork PRs #26-#59 and #61-#67 in merge
-order, the v1.9.3 rebase record, and this rebase's documentation. No upstream
+changes, CI, and docs), followed by the squash-merged fork PRs that upstream
+does not contain, in merge order (#15 to #105), with the v1.9.3 and upstream
+main rebase records after #64 and this rebase's documentation last. No upstream
 backports are carried.
-See the [current ownership and rebase procedure](docs/rebase-upstream-main-2026-10-06.md).
+See the [current ownership and rebase procedure](docs/rebase-v1.9.4-2026-10-11.md).
 Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
@@ -829,12 +852,11 @@ Behavior:
 - Computes `v<base_version>-mindroom.<n>` tags on `main`, creates/reuses the
   matching GitHub Release, publishes Linux `x86_64`/`aarch64` binaries, and
   dispatches container publication. Runs the fork's own GitHub-hosted checks.
-- Pins CI rustfmt to `nightly-2026-10-04`, which passes upstream main
-  `3f5db6d3a` unchanged; nightly-2026-09-26 reports one upstream file, and
-  upstream CI floats `nightly`. The locked Fenix formatter in `flake.lock`
-  (nightly-2026-08-05) reports nine upstream files, so the development shell's
-  `cargo fmt` must not be used to reformat. Keep the two CI formatter commands
-  aligned.
+- Pins CI rustfmt to `nightly-2026-10-04`, which passes upstream `v1.9.4`
+  unchanged; upstream CI floats `nightly`. The locked Fenix formatter in
+  `flake.lock` (nightly-2026-08-05) reports nine upstream files, so the
+  development shell's `cargo fmt` must not be used to reformat. Keep the two CI
+  formatter commands aligned.
 - Runs tests with `TMPDIR` set to the CI runner's temporary directory. This
   environment setting remains in the CI owner after dropping the full-state
   sync fix now supplied by upstream.
