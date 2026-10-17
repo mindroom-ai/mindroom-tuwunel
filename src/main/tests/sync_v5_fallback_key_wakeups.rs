@@ -150,9 +150,8 @@ async fn sync_e2ee(&self, resume: Option<(&str, u64)>) -> Result<Value> {
 		},
 	});
 
-	let query = resume.map_or_else(String::new, |(pos, timeout)| {
-		format!("?pos={pos}&timeout={timeout}")
-	});
+	let query =
+		resume.map_or_else(String::new, |(pos, timeout)| format!("?pos={pos}&timeout={timeout}"));
 
 	let url = format!(
 		"{}/_matrix/client/unstable/org.matrix.simplified_msc3575/sync{query}",
