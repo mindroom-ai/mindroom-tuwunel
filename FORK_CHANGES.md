@@ -198,9 +198,9 @@ continuously instead of waiting. MindRoom's agents each committed a durable
 sync batch for every such answer: about 2,300 of 3,000 SQLite fsyncs a minute
 on an idle MindRoom deployment. A pass now ignores the fallback key types when
 deciding whether it found anything. Types already collected stay in the
-response, including when the poll times out. Upstream has the same bug, from MSC2732 fallback key support (`bfc1ccaba`).
-File: `src/api/client/sync/v5.rs`; tests in the same file and in
-`src/main/tests/sync_v5_fallback_key_wakeups.rs`.
+response, including when the poll times out. Upstream has the same bug, from
+MSC2732 fallback key support (`bfc1ccaba`). File: `src/api/client/sync/v5.rs`;
+tests in the same file and in `src/main/tests/sync_v5_fallback_key_wakeups.rs`.
 
 ### Uploaded device and cross-signing keys are bounded in size
 
