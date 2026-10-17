@@ -187,6 +187,21 @@ naming the room. Upstream has the same bug. Files: `src/service/sync/mod.rs`,
 `src/api/client/sync/v5/filter.rs`; tests in `src/service/sync/tests.rs` and
 `src/main/tests/sync_v5_list_filters.rs`.
 
+### Sliding sync long polls wait when only fallback key types are new
+
+The e2ee extension reports the device's unused fallback key types on every
+pass, including an empty list, and a response holding them counted as
+non-empty. Whenever anything on the server had moved the global count since
+the client's position, the next long poll answered at once with only those
+types, so a client with the e2ee extension on a busy server polled
+continuously instead of waiting. MindRoom's agents each committed a durable
+sync batch for every such answer: about 2,300 of 3,000 SQLite fsyncs a minute
+on an idle MindRoom deployment. A pass now ignores the fallback key types when
+deciding whether it found anything; they are still sent with every response.
+Upstream has the same bug, from MSC2732 fallback key support (`bfc1ccaba`).
+File: `src/api/client/sync/v5.rs`; tests in the same file and in
+`src/main/tests/sync_v5_fallback_key_wakeups.rs`.
+
 ### Uploaded device and cross-signing keys are bounded in size
 
 Device keys a local client uploaded, and its master and self-signing keys,
