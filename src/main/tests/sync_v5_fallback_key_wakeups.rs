@@ -18,8 +18,19 @@ mod client;
 const READER_TOKEN: &str = "sync-v5-fallback-key-wakeups-reader-token";
 const OTHER_TOKEN: &str = "sync-v5-fallback-key-wakeups-other-token";
 
-/// How long a resumed sync polls for, in milliseconds.
-const POLL_TIMEOUT: u64 = 1_500;
+/// How long the idle round polls for, in milliseconds.
+///
+/// With nothing new for the reader the round must wait all of it.
+const IDLE_POLL_TIMEOUT: u64 = 1_500;
+
+/// How long the round with news polls for, in milliseconds.
+///
+/// It must answer on its first pass, so the server's budget is set far above
+/// the deadline the test gives the whole request.
+const NEWS_POLL_TIMEOUT: u64 = 30_000;
+
+/// How long the round with news may take from request to parsed response.
+const NEWS_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Drives a long poll carrying the e2ee extension past unrelated activity.
 ///
@@ -84,7 +95,9 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.await?;
 
 	let started = Instant::now();
-	let idle = reader.sync_e2ee(Some(pos)).await?;
+	let idle = reader
+		.sync_e2ee(Some((pos, IDLE_POLL_TIMEOUT)))
+		.await?;
 	let waited = started.elapsed();
 
 	idle["extensions"]["e2ee"]["device_unused_fallback_key_types"]
@@ -92,7 +105,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.ok_or_else(|| err!("the idle round did not report the fallback key types"))?;
 
 	waited
-		.ge(&Duration::from_millis(POLL_TIMEOUT - 100))
+		.ge(&Duration::from_millis(IDLE_POLL_TIMEOUT - 100))
 		.ok_or_else(|| {
 			err!("the fallback key types alone ended the long poll after {waited:?}")
 		})?;
@@ -103,7 +116,9 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.await?;
 
 	let started = Instant::now();
-	let joined = reader.sync_e2ee(Some(pos)).await?;
+	let joined = reader
+		.sync_e2ee(Some((pos, NEWS_POLL_TIMEOUT)))
+		.await?;
 	let waited = started.elapsed();
 
 	joined["rooms"][room.as_str()]
@@ -111,15 +126,18 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.ok_or_else(|| err!("the round after joining did not carry the new room"))?;
 
 	waited
-		.lt(&Duration::from_millis(POLL_TIMEOUT))
-		.ok_or_else(|| err!("a round with news waited out the poll ({waited:?})"))?;
+		.lt(&NEWS_DEADLINE)
+		.ok_or_else(|| err!("a round with news waited for the poll ({waited:?})"))?;
 
 	Ok(())
 }
 
-/// One sliding sync carrying the e2ee extension, optionally resuming a pos.
+/// One sliding sync carrying the e2ee extension.
+///
+/// Without a resume position it opens the connection and answers at once;
+/// with one it long-polls for the given number of milliseconds.
 #[implement(Client, params = "<'_>")]
-async fn sync_e2ee(&self, pos: Option<&str>) -> Result<Value> {
+async fn sync_e2ee(&self, resume: Option<(&str, u64)>) -> Result<Value> {
 	let body = json!({
 		"lists": {
 			"all": {
@@ -132,7 +150,9 @@ async fn sync_e2ee(&self, pos: Option<&str>) -> Result<Value> {
 		},
 	});
 
-	let query = pos.map_or_else(String::new, |pos| format!("?pos={pos}&timeout={POLL_TIMEOUT}"));
+	let query = resume.map_or_else(String::new, |(pos, timeout)| {
+		format!("?pos={pos}&timeout={timeout}")
+	});
 
 	let url = format!(
 		"{}/_matrix/client/unstable/org.matrix.simplified_msc3575/sync{query}",

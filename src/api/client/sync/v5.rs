@@ -310,7 +310,8 @@ fn config_change_needs_position(
 ///
 /// The e2ee extension reports the device's unused fallback key types on every
 /// pass. They are current state, not a change, so on their own they must not
-/// end a long poll; they still travel with whatever response is sent.
+/// end a long poll. Types already collected stay in the response, including
+/// when the poll times out.
 fn is_empty_response(response: &mut Response) -> bool {
 	let fallback_key_types = response
 		.extensions
