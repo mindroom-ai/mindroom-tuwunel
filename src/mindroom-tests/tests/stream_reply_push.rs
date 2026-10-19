@@ -245,7 +245,8 @@ async fn check_read_reply(services: &Services, router: &Router) -> Result {
 		services
 			.pusher
 			.last_notification_read(author, &room)
-			.await? > unread_count
+			.await?
+			> unread_count
 	);
 	send(
 		router,
