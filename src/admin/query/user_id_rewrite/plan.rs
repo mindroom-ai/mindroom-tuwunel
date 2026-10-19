@@ -157,6 +157,48 @@ pub(super) fn replace_user_id(input: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
 	out
 }
 
+/// Occurrences of the user's localpart outside bounded full-ID matches. They
+/// are reported, never rewritten.
+pub(super) fn localpart_only_hits(haystack: &[u8], user_id: &[u8]) -> usize {
+	let localpart = localpart(user_id);
+	if localpart.is_empty() || haystack.len() < localpart.len() {
+		return 0;
+	}
+
+	let full = find_user_id(haystack, user_id);
+	(0..=haystack.len() - localpart.len())
+		.filter(|&i| haystack[i..].starts_with(localpart))
+		.filter(|&i| i == 0 || full.binary_search(&(i - 1)).is_err())
+		.count()
+}
+
+/// Occurrences of `%40<localpart>%3A<server>`, as in `matrix.to` links. They
+/// are reported, never rewritten.
+pub(super) fn url_encoded_hits(haystack: &[u8], user_id: &[u8]) -> usize {
+	let localpart = localpart(user_id);
+	let server = user_id
+		.get(localpart.len().saturating_add(2)..)
+		.unwrap_or_default();
+	let encoded = [b"%40".as_slice(), localpart, b"%3a", server].concat();
+	if haystack.len() < encoded.len() {
+		return 0;
+	}
+
+	haystack
+		.windows(encoded.len())
+		.filter(|window| window.eq_ignore_ascii_case(&encoded))
+		.count()
+}
+
+fn localpart(user_id: &[u8]) -> &[u8] {
+	let end = user_id
+		.iter()
+		.position(|&byte| byte == b':')
+		.unwrap_or(user_id.len());
+
+	user_id.get(1..end).unwrap_or_default()
+}
+
 pub(super) fn plan_record(
 	class: MapClass,
 	key: &[u8],
@@ -201,8 +243,8 @@ mod tests {
 	use ruma::{ServerName, UserId};
 
 	use super::{
-		MapClass, RecordAction, find_user_id, map_class, plan_record, replace_user_id,
-		validate_ids,
+		MapClass, RecordAction, find_user_id, localpart_only_hits, map_class, plan_record,
+		replace_user_id, url_encoded_hits, validate_ids,
 	};
 
 	#[test]
@@ -329,5 +371,21 @@ mod tests {
 		assert_eq!(map_class("keyid_key"), MapClass::ClearOwnKeysOnly);
 		assert_eq!(map_class("pduid_pdu"), MapClass::EventGraph);
 		assert_eq!(map_class("eventid_outlierpdu"), MapClass::EventGraph);
+	}
+
+	#[test]
+	fn counts_localpart_hits_outside_full_ids() {
+		let id = b"@a_b:example.org";
+		assert_eq!(localpart_only_hits(b"@a_b:example.org a_b x", id), 1);
+		assert_eq!(localpart_only_hits(b"@a_b:example.org", id), 0);
+		assert_eq!(localpart_only_hits(b"@a_b:example.org.uk", id), 1);
+	}
+
+	#[test]
+	fn counts_url_encoded_ids_case_insensitively() {
+		let id = b"@a_b:example.org";
+		assert_eq!(url_encoded_hits(b"https://matrix.to/#/%40a_b%3Aexample.org", id), 1);
+		assert_eq!(url_encoded_hits(b"%40a_b%3aexample.org and %40A_B%3AEXAMPLE.ORG", id), 2);
+		assert_eq!(url_encoded_hits(b"@a_b:example.org", id), 0);
 	}
 }
