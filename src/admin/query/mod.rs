@@ -16,6 +16,7 @@ mod short;
 mod storage;
 mod sync;
 mod threepid;
+mod user_id_rewrite;
 mod users;
 
 use clap::Subcommand;
