@@ -1,7 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use futures::{
-	FutureExt, StreamExt,
+	FutureExt, StreamExt, TryFutureExt,
 	future::{join, join3, join4},
 };
 use ruma::{
@@ -282,9 +282,12 @@ async fn replaced_pdu_count(&self, pdu_id: &RawPduId, pdu: &Pdu) -> Option<u64> 
 	(shortroomid == PduId::from(*pdu_id).shortroomid).then_some(count)
 }
 
-/// Whether the read watermark of the bucket the event counts in, its thread
-/// or else the room, covers the event at `count`. A main-timeline receipt
-/// moves the room watermark but leaves thread counts, so it covers no thread.
+/// Whether the user has read the event at `count`: the read watermark of the
+/// bucket it counts in (its thread, or else the room) or the unthreaded
+/// private read marker covers it. A main-timeline receipt moves the room
+/// watermark but leaves thread counts, so it covers no thread. The user's own
+/// send, such as a stop reaction, moves the unthreaded marker to its position
+/// and clears every thread's watermark with its counts.
 #[implement(super::Service)]
 async fn read_through(
 	&self,
@@ -293,14 +296,26 @@ async fn read_through(
 	thread_root: Option<&EventId>,
 	count: u64,
 ) -> bool {
-	let last_read = match thread_root {
-		| Some(root) =>
-			self.last_thread_notification_read(user, room_id, root)
-				.await,
-		| None => self.last_notification_read(user, room_id).await,
+	let bucket = async {
+		match thread_root {
+			| Some(root) =>
+				self.last_thread_notification_read(user, room_id, root)
+					.await,
+			| None => self.last_notification_read(user, room_id).await,
+		}
 	};
 
-	last_read.is_ok_and(|last_read| last_read >= count)
+	let unthreaded = self
+		.services
+		.read_receipt
+		.private_read_get_count(room_id, user)
+		.map_ok(|(count, _)| count);
+
+	let (bucket, unthreaded) = join(bucket, unthreaded).await;
+
+	[bucket, unthreaded]
+		.into_iter()
+		.any(|last_read| last_read.is_ok_and(|last_read| last_read >= count))
 }
 
 #[implement(super::Service)]

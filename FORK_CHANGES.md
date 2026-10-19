@@ -833,14 +833,15 @@ Behavior:
   single notification instead of the generic edit-suppression rule swallowing
   the terminal update.
 - A terminal edit adds no unread count (notification or highlight) when the
-  recipient's read watermark for the count it would add to (its thread, or
-  the room for a main-timeline reply) already covers the event it replaces.
-  Clients send no receipt for an edit of a reply they already read, so a user
-  who watched a reply finish would otherwise keep a count, and an app-icon
-  badge, with nothing left to read. The push itself is still delivered.
-  An unthreaded reset (including the user's own send) deletes thread
-  watermarks, so after a follow-up sent mid-stream the finished reply counts
-  as before, until the next thread receipt.
+  recipient has read the event it replaces: the read watermark for the count
+  it would add to (its thread, or the room for a main-timeline reply) or the
+  unthreaded private read marker covers it. The user's own send (a message
+  anywhere in the room, or the reaction that stops a stream) moves that marker
+  and clears every thread's watermark and counts. A `"main"` receipt covers
+  no thread. Clients send no receipt for an edit of a reply they already
+  read, so a user who watched a reply finish would otherwise keep a count,
+  and an app-icon badge, with nothing left to read. The push itself is still
+  delivered.
 - The `push_everything` debug mode honors the same suppression.
 - Keeps upstream's recipient-based membership-notification target flag. The
   real gateway fixture checks an invite addressed to someone other than its

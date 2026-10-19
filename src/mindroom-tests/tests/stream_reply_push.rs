@@ -182,41 +182,12 @@ async fn check_read_reply(services: &Services, router: &Router) -> Result {
 		json!({"msgtype": "m.text", "body": "What is the answer?"}),
 	)
 	.await;
-	let thread = json!({"rel_type": "m.thread", "event_id": question});
 	let before = services
 		.pusher
 		.global_notification_count(author)
 		.await;
 
-	// Read mid-stream, then finished: nothing is left unread.
-	let read = send(router, &room, HELPER_TOKEN, "read", stream_reply(&thread)).await;
-	request(
-		router,
-		"POST",
-		&format!("/rooms/{room}/receipt/m.read/{read}"),
-		AUTHOR_TOKEN,
-		json!({"thread_id": question}),
-	)
-	.await;
-	send(
-		router,
-		&room,
-		HELPER_TOKEN,
-		"read-done",
-		terminal_reply("completed", &read, &question),
-	)
-	.await;
-	let thread_counts = services
-		.pusher
-		.thread_notification_counts(author, &room)
-		.await;
-	assert_eq!(
-		thread_counts
-			.get(&question)
-			.copied()
-			.unwrap_or_default(),
-		(0, 0)
-	);
+	check_watched_thread(services, router, &room, &question).await;
 	assert_eq!(
 		services
 			.pusher
@@ -225,42 +196,7 @@ async fn check_read_reply(services: &Services, router: &Router) -> Result {
 		before
 	);
 
-	// A main-timeline receipt moves the room watermark but resets no thread,
-	// so the finished reply of an unread thread still counts.
-	let unread = send(router, &room, HELPER_TOKEN, "unread", stream_reply(&thread)).await;
-	request(
-		router,
-		"POST",
-		&format!("/rooms/{room}/receipt/m.read/{question}"),
-		AUTHOR_TOKEN,
-		json!({"thread_id": "main"}),
-	)
-	.await;
-	let unread_count = services
-		.timeline
-		.get_pdu_count(&unread)
-		.await?
-		.into_unsigned();
-	assert!(
-		services
-			.pusher
-			.last_notification_read(author, &room)
-			.await?
-			> unread_count
-	);
-	send(
-		router,
-		&room,
-		HELPER_TOKEN,
-		"unread-done",
-		terminal_reply("completed", &unread, &question),
-	)
-	.await;
-	let thread_counts = services
-		.pusher
-		.thread_notification_counts(author, &room)
-		.await;
-	assert_eq!(thread_counts.get(&question), Some(&(1, 1)));
+	check_unread_thread(services, router, &room, &question).await?;
 	assert_eq!(
 		services
 			.pusher
@@ -278,14 +214,7 @@ async fn check_read_reply(services: &Services, router: &Router) -> Result {
 		json!({"msgtype": "m.text", "body": "Thinking", "io.mindroom.stream_status": "streaming"}),
 	)
 	.await;
-	request(
-		router,
-		"POST",
-		&format!("/rooms/{room}/receipt/m.read/{main}"),
-		AUTHOR_TOKEN,
-		json!({"thread_id": "main"}),
-	)
-	.await;
+	receipt(router, &room, &main, "main").await;
 	send(
 		router,
 		&room,
@@ -309,6 +238,143 @@ async fn check_read_reply(services: &Services, router: &Router) -> Result {
 	);
 
 	Ok(())
+}
+
+/// Thread replies read mid-stream stay read when they finish, including one
+/// the user stops and an encrypted one.
+async fn check_watched_thread(
+	services: &Services,
+	router: &Router,
+	room: &RoomId,
+	question: &EventId,
+) {
+	let thread = json!({"rel_type": "m.thread", "event_id": question});
+
+	let read = send(router, room, HELPER_TOKEN, "read", stream_reply(&thread)).await;
+	receipt(router, room, &read, question.as_str()).await;
+	send(
+		router,
+		room,
+		HELPER_TOKEN,
+		"read-done",
+		terminal_reply("completed", &read, question),
+	)
+	.await;
+	assert_eq!(thread_counts(services, room, question).await, (0, 0));
+
+	// Stopping a watched stream is the user's own send (a reaction): it clears
+	// the thread watermark with the counts, and the cancelled reply stays read.
+	let stopped = send(router, room, HELPER_TOKEN, "stopped", stream_reply(&thread)).await;
+	receipt(router, room, &stopped, question.as_str()).await;
+	send_event(
+		router,
+		room,
+		AUTHOR_TOKEN,
+		"m.reaction",
+		"stop",
+		json!({"m.relates_to": {"rel_type": "m.annotation", "event_id": stopped, "key": "🛑"}}),
+	)
+	.await;
+	send(
+		router,
+		room,
+		HELPER_TOKEN,
+		"stopped-done",
+		terminal_reply("cancelled", &stopped, question),
+	)
+	.await;
+	assert_eq!(thread_counts(services, room, question).await, (0, 0));
+
+	// Encrypted streams carry the stream status and relation in cleartext.
+	let encrypted = send_event(
+		router,
+		room,
+		HELPER_TOKEN,
+		"m.room.encrypted",
+		"encrypted",
+		encrypted_stream("streaming", &thread),
+	)
+	.await;
+	receipt(router, room, &encrypted, question.as_str()).await;
+	send_event(
+		router,
+		room,
+		HELPER_TOKEN,
+		"m.room.encrypted",
+		"encrypted-done",
+		encrypted_stream("completed", &json!({"rel_type": "m.replace", "event_id": encrypted})),
+	)
+	.await;
+	assert_eq!(thread_counts(services, room, question).await, (0, 0));
+}
+
+/// A main-timeline receipt moves the room watermark but resets no thread, so
+/// the finished reply of an unread thread still counts.
+async fn check_unread_thread(
+	services: &Services,
+	router: &Router,
+	room: &RoomId,
+	question: &EventId,
+) -> Result {
+	let thread = json!({"rel_type": "m.thread", "event_id": question});
+	let unread = send(router, room, HELPER_TOKEN, "unread", stream_reply(&thread)).await;
+	receipt(router, room, question, "main").await;
+	let unread_count = services
+		.timeline
+		.get_pdu_count(&unread)
+		.await?
+		.into_unsigned();
+	assert!(
+		services
+			.pusher
+			.last_notification_read(user_id!("@author:localhost"), room)
+			.await?
+			> unread_count
+	);
+	send(
+		router,
+		room,
+		HELPER_TOKEN,
+		"unread-done",
+		terminal_reply("completed", &unread, question),
+	)
+	.await;
+	assert_eq!(thread_counts(services, room, question).await, (1, 1));
+
+	Ok(())
+}
+
+async fn receipt(router: &Router, room: &RoomId, event: &EventId, thread_id: &str) {
+	request(
+		router,
+		"POST",
+		&format!("/rooms/{room}/receipt/m.read/{event}"),
+		AUTHOR_TOKEN,
+		json!({"thread_id": thread_id}),
+	)
+	.await;
+}
+
+async fn thread_counts(services: &Services, room: &RoomId, root: &EventId) -> (u64, u64) {
+	services
+		.pusher
+		.thread_notification_counts(user_id!("@author:localhost"), room)
+		.await
+		.get(root)
+		.copied()
+		.unwrap_or_default()
+}
+
+fn encrypted_stream(status: &str, relation: &Value) -> Value {
+	json!({
+		"algorithm": "m.megolm.v1.aes-sha2",
+		"ciphertext": "opaque",
+		"device_id": "HELPERDEVICE",
+		"sender_key": "sender-key",
+		"session_id": "session",
+		"io.mindroom.stream_status": status,
+		"m.relates_to": relation,
+	})
 }
 
 fn stream_reply(thread: &Value) -> Value {
@@ -438,14 +504,20 @@ async fn send(
 	txn: &str,
 	content: Value,
 ) -> OwnedEventId {
-	let response = request(
-		router,
-		"PUT",
-		&format!("/rooms/{room}/send/m.room.message/{txn}"),
-		token,
-		content,
-	)
-	.await;
+	send_event(router, room, token, "m.room.message", txn, content).await
+}
+
+async fn send_event(
+	router: &Router,
+	room: &RoomId,
+	token: &str,
+	event_type: &str,
+	txn: &str,
+	content: Value,
+) -> OwnedEventId {
+	let response =
+		request(router, "PUT", &format!("/rooms/{room}/send/{event_type}/{txn}"), token, content)
+			.await;
 	response["event_id"]
 		.as_str()
 		.expect("sent event id")
