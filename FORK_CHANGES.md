@@ -812,7 +812,8 @@ was merged upstream, so it is no longer a fork delta.
 
 ### 4) `pusher: notify once when streams finish`
 Files:
-- `src/service/pusher/mod.rs`, `src/service/pusher/send.rs`
+- `src/service/pusher/mod.rs`, `src/service/pusher/send.rs`,
+  `src/service/pusher/append.rs`
 - `src/service/pusher/tests.rs`
 - `src/mindroom-tests/tests/stream_reply_push.rs`
 
@@ -831,6 +832,15 @@ Behavior:
   `m.relates_to`. Ordinary room/DM/mention/mute push rules then decide the
   single notification instead of the generic edit-suppression rule swallowing
   the terminal update.
+- A terminal edit adds no unread count (notification or highlight) when the
+  recipient's read watermark for the count it would add to (its thread, or
+  the room for a main-timeline reply) already covers the event it replaces.
+  Clients send no receipt for an edit of a reply they already read, so a user
+  who watched a reply finish would otherwise keep a count, and an app-icon
+  badge, with nothing left to read. The push itself is still delivered.
+  An unthreaded reset (including the user's own send) deletes thread
+  watermarks, so after a follow-up sent mid-stream the finished reply counts
+  as before, until the next thread receipt.
 - The `push_everything` debug mode honors the same suppression.
 - Keeps upstream's recipient-based membership-notification target flag. The
   real gateway fixture checks an invite addressed to someone other than its

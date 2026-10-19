@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use futures::{
 	FutureExt, StreamExt,
-	future::{join, join4},
+	future::{join, join3, join4},
 };
 use ruma::{
 	EventId, RoomId, UserId,
@@ -65,6 +65,8 @@ struct Appended<'a> {
 	serialized: &'a Raw<AnySyncTimelineEvent>,
 	thread_root: Option<&'a EventId>,
 	related_events: Option<&'a Arc<RelatedEvents>>,
+	/// The count of the event a terminal MindRoom stream edit replaces.
+	replaced: Option<u64>,
 }
 
 /// Called by timeline append_pdu.
@@ -112,8 +114,12 @@ pub(crate) async fn append_pdu(&self, pdu_id: RawPduId, pdu: &Pdu) -> Result {
 	}
 
 	let serialized = pdu.to_format();
-	let (thread_root, related_events) =
-		join(self.services.threads.get_thread_id(pdu), self.related_events(pdu)).await;
+	let (thread_root, related_events, replaced) = join3(
+		self.services.threads.get_thread_id(pdu),
+		self.related_events(pdu),
+		self.replaced_pdu_count(&pdu_id, pdu),
+	)
+	.await;
 
 	let appended = Appended {
 		pdu_id: &pdu_id,
@@ -122,6 +128,7 @@ pub(crate) async fn append_pdu(&self, pdu_id: RawPduId, pdu: &Pdu) -> Result {
 		serialized: &serialized,
 		thread_root: thread_root.as_deref(),
 		related_events: related_events.as_ref(),
+		replaced,
 	};
 
 	let _cork = self.db.db.cork();
@@ -167,6 +174,7 @@ async fn append_pdu_for_user(
 		serialized,
 		thread_root,
 		related_events,
+		replaced,
 	}: Appended<'_>,
 ) {
 	let ruleset = self.ruleset(user).await;
@@ -196,20 +204,31 @@ async fn append_pdu_for_user(
 		"Push rules evaluated",
 	);
 
+	// A terminal stream edit notifies in place of its suppressed original, so
+	// once the user has read that original it is not unread again.
+	let read = match replaced {
+		| Some(count) if notify || highlight =>
+			self.read_through(user, pdu.room_id(), thread_root, count)
+				.await,
+		| _ => false,
+	};
+
+	let (notify_unread, highlight_unread) = (notify && !read, highlight && !read);
+
 	// Mutually-exclusive partition: each notify (and each highlight)
 	// lands in either the room-level or thread bucket, never both.
-	let main_notify = (notify && thread_root.is_none())
+	let main_notify = (notify_unread && thread_root.is_none())
 		.then_async(|| self.increment_notificationcount(pdu.room_id(), user));
 
-	let main_highlight = (highlight && thread_root.is_none())
+	let main_highlight = (highlight_unread && thread_root.is_none())
 		.then_async(|| self.increment_highlightcount(pdu.room_id(), user));
 
 	let thread_notify = thread_root
-		.filter(|_| notify)
+		.filter(|_| notify_unread)
 		.map_async(|root| self.increment_thread_notificationcount(pdu.room_id(), user, root));
 
 	let thread_highlight = thread_root
-		.filter(|_| highlight)
+		.filter(|_| highlight_unread)
 		.map_async(|root| self.increment_thread_highlightcount(pdu.room_id(), user, root));
 
 	join4(main_notify, thread_notify, main_highlight, thread_highlight).await;
@@ -242,6 +261,46 @@ async fn append_pdu_for_user(
 			})
 			.await;
 	}
+}
+
+/// The count of the same-room event a terminal MindRoom stream edit replaces.
+#[implement(super::Service)]
+async fn replaced_pdu_count(&self, pdu_id: &RawPduId, pdu: &Pdu) -> Option<u64> {
+	let target = super::mindroom_terminal_edit_target(pdu)?;
+	let target: PduId = self
+		.services
+		.timeline
+		.get_pdu_id(&target)
+		.await
+		.ok()?
+		.into();
+
+	let PduId { shortroomid, count: Count::Normal(count) } = target else {
+		return None;
+	};
+
+	(shortroomid == PduId::from(*pdu_id).shortroomid).then_some(count)
+}
+
+/// Whether the read watermark of the bucket the event counts in, its thread
+/// or else the room, covers the event at `count`. A main-timeline receipt
+/// moves the room watermark but leaves thread counts, so it covers no thread.
+#[implement(super::Service)]
+async fn read_through(
+	&self,
+	user: &UserId,
+	room_id: &RoomId,
+	thread_root: Option<&EventId>,
+	count: u64,
+) -> bool {
+	let last_read = match thread_root {
+		| Some(root) =>
+			self.last_thread_notification_read(user, room_id, root)
+				.await,
+		| None => self.last_notification_read(user, room_id).await,
+	};
+
+	last_read.is_ok_and(|last_read| last_read >= count)
 }
 
 #[implement(super::Service)]

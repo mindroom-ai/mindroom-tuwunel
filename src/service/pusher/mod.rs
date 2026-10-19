@@ -133,6 +133,27 @@ pub(super) fn mindroom_terminal_push_content(
 	}
 }
 
+/// The event a terminal MindRoom stream edit replaces, for the event types
+/// whose terminal edits notify.
+pub(super) fn mindroom_terminal_edit_target<E: Event>(event: &E) -> Option<OwnedEventId> {
+	if !matches!(event.kind(), TimelineEventType::RoomMessage | TimelineEventType::RoomEncrypted)
+	{
+		return None;
+	}
+
+	let content = event.get_content_as_value();
+	if !is_terminal_mindroom_edit(&content) {
+		return None;
+	}
+
+	content
+		.get("m.relates_to")?
+		.get("event_id")?
+		.as_str()?
+		.try_into()
+		.ok()
+}
+
 fn is_terminal_mindroom_edit(content: &JsonValue) -> bool {
 	let Some((content, stream_status)) = mindroom_stream_content(content) else {
 		return false;

@@ -85,7 +85,8 @@ fn terminal_replies_preserve_highlight_and_gateway_tweaks() -> Result {
 		}
 
 		exercise_replies(&services, &router, author, &room, &pusher, &mut captured).await?;
-		check_invite_target(&services, &router, &pusher, &mut captured).await
+		check_invite_target(&services, &router, &pusher, &mut captured).await?;
+		check_read_reply(&services, &router).await
 	});
 	gateway.handle.abort();
 	result
@@ -164,6 +165,158 @@ async fn exercise_replies(
 	);
 
 	Ok(())
+}
+
+/// A terminal edit of a reply the user already read must not count as unread:
+/// clients never send a receipt for it, so the count and the push badge would
+/// otherwise stay up with nothing left to read.
+async fn check_read_reply(services: &Services, router: &Router) -> Result {
+	let author = user_id!("@author:localhost");
+	let room = create_room(router).await;
+	request(router, "POST", &format!("/rooms/{room}/join"), HELPER_TOKEN, json!({})).await;
+	let question = send(
+		router,
+		&room,
+		AUTHOR_TOKEN,
+		"read-question",
+		json!({"msgtype": "m.text", "body": "What is the answer?"}),
+	)
+	.await;
+	let thread = json!({"rel_type": "m.thread", "event_id": question});
+	let before = services
+		.pusher
+		.global_notification_count(author)
+		.await;
+
+	// Read mid-stream, then finished: nothing is left unread.
+	let read = send(router, &room, HELPER_TOKEN, "read", stream_reply(&thread)).await;
+	request(
+		router,
+		"POST",
+		&format!("/rooms/{room}/receipt/m.read/{read}"),
+		AUTHOR_TOKEN,
+		json!({"thread_id": question}),
+	)
+	.await;
+	send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"read-done",
+		terminal_reply("completed", &read, &question),
+	)
+	.await;
+	let thread_counts = services
+		.pusher
+		.thread_notification_counts(author, &room)
+		.await;
+	assert_eq!(
+		thread_counts
+			.get(&question)
+			.copied()
+			.unwrap_or_default(),
+		(0, 0)
+	);
+	assert_eq!(
+		services
+			.pusher
+			.global_notification_count(author)
+			.await,
+		before
+	);
+
+	// A main-timeline receipt moves the room watermark but resets no thread,
+	// so the finished reply of an unread thread still counts.
+	let unread = send(router, &room, HELPER_TOKEN, "unread", stream_reply(&thread)).await;
+	request(
+		router,
+		"POST",
+		&format!("/rooms/{room}/receipt/m.read/{question}"),
+		AUTHOR_TOKEN,
+		json!({"thread_id": "main"}),
+	)
+	.await;
+	let unread_count = services
+		.timeline
+		.get_pdu_count(&unread)
+		.await?
+		.into_unsigned();
+	assert!(
+		services
+			.pusher
+			.last_notification_read(author, &room)
+			.await? > unread_count
+	);
+	send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"unread-done",
+		terminal_reply("completed", &unread, &question),
+	)
+	.await;
+	let thread_counts = services
+		.pusher
+		.thread_notification_counts(author, &room)
+		.await;
+	assert_eq!(thread_counts.get(&question), Some(&(1, 1)));
+	assert_eq!(
+		services
+			.pusher
+			.global_notification_count(author)
+			.await,
+		before.saturating_add(1)
+	);
+
+	// A main-timeline reply read mid-stream stays read as well.
+	let main = send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"main",
+		json!({"msgtype": "m.text", "body": "Thinking", "io.mindroom.stream_status": "streaming"}),
+	)
+	.await;
+	request(
+		router,
+		"POST",
+		&format!("/rooms/{room}/receipt/m.read/{main}"),
+		AUTHOR_TOKEN,
+		json!({"thread_id": "main"}),
+	)
+	.await;
+	send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"main-done",
+		terminal_reply("completed", &main, &question),
+	)
+	.await;
+	assert_eq!(
+		(
+			services
+				.pusher
+				.notification_count(author, &room)
+				.await,
+			services
+				.pusher
+				.highlight_count(author, &room)
+				.await,
+		),
+		(0, 0)
+	);
+
+	Ok(())
+}
+
+fn stream_reply(thread: &Value) -> Value {
+	json!({
+		"msgtype": "m.text",
+		"body": "Thinking",
+		"io.mindroom.stream_status": "streaming",
+		"m.relates_to": thread,
+	})
 }
 
 /// Stream normalization must preserve upstream's recipient-based invite target.
