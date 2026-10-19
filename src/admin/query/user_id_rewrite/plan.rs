@@ -134,16 +134,20 @@ pub(super) fn find_user_id(haystack: &[u8], user_id: &[u8]) -> Vec<usize> {
 
 	(0..=haystack.len() - user_id.len())
 		.filter(|&i| haystack[i..].starts_with(user_id))
-		.filter(|&i| {
-			haystack
-				.get(i + user_id.len())
-				.is_none_or(|&byte| !continues_server_name(byte))
-		})
+		.filter(|&i| !continues_server_name(&haystack[i + user_id.len()..]))
 		.collect()
 }
 
-fn continues_server_name(byte: u8) -> bool {
-	byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':')
+/// Whether the bytes after a candidate match extend its server name: a label
+/// character, a `.` or `-` before one, or a `:` before a port digit. Trailing
+/// punctuation and `:<device_id>` suffixes end the ID.
+fn continues_server_name(rest: &[u8]) -> bool {
+	match rest {
+		| [byte, ..] if byte.is_ascii_alphanumeric() => true,
+		| [b'.' | b'-', next, ..] => next.is_ascii_alphanumeric(),
+		| [b':', next, ..] => next.is_ascii_digit(),
+		| _ => false,
+	}
 }
 
 pub(super) fn replace_user_id(input: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
@@ -264,6 +268,21 @@ mod tests {
 		assert!(find_user_id(b"@a:example.org:8448", id).is_empty());
 		assert!(find_user_id(b"@a:example.org-x", id).is_empty());
 		assert!(find_user_id(b"@ab:example.org", id).is_empty());
+	}
+
+	#[test]
+	fn match_allows_punctuation_and_device_suffix_after_id() {
+		let id = b"@a:example.org";
+		assert_eq!(find_user_id(b"ask @a:example.org.", id), vec![4]);
+		assert_eq!(find_user_id(b"@a:example.org. Then", id), vec![0]);
+		assert_eq!(find_user_id(b"@a:example.org: hi", id), vec![0]);
+		assert_eq!(find_user_id(b"@a:example.org:", id), vec![0]);
+		assert_eq!(find_user_id(b"@a:example.org- x", id), vec![0]);
+		assert_eq!(find_user_id(b"@a:example.org...", id), vec![0]);
+		assert_eq!(find_user_id(b"\"@a:example.org:cA6GgYzlTQ\"", id), vec![1]);
+		assert!(find_user_id(b"@a:example.org:8448", id).is_empty());
+		assert!(find_user_id(b"@a:example.org.uk.", id).is_empty());
+		assert!(find_user_id(b"@a:example.org-gateway:x", id).is_empty());
 	}
 
 	#[test]
