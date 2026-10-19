@@ -20,6 +20,10 @@ pub(super) enum MapClass {
 	EventGraph,
 	/// Not reviewed for this Tuwunel version: any match blocks the rewrite.
 	Unknown,
+	/// Cannot hold a user ID, so it is never read. The search index keys
+	/// `shortroomid, word, 0xFF, pdu_id` with empty values, and words never
+	/// contain `@` or `:`.
+	Skip,
 }
 
 #[derive(Debug)]
@@ -119,6 +123,8 @@ pub(super) fn map_class(map: &str) -> MapClass {
 		| "pduid_pdu"
 		| "referencedevents"
 		| "roomid_pduleaves" => MapClass::EventGraph,
+
+		| "tokenids" => MapClass::Skip,
 
 		| _ => MapClass::Unknown,
 	}
@@ -236,6 +242,7 @@ pub(super) fn plan_record(
 		| MapClass::EventGraph if rewrite_event_graph => rewrite(),
 		| MapClass::EventGraph => RecordAction::Block("event graph needs --rewrite-event-graph"),
 		| MapClass::Unknown => RecordAction::Block("unclassified map"),
+		| MapClass::Skip => RecordAction::Skip,
 	}
 }
 
@@ -398,6 +405,7 @@ mod tests {
 		assert_eq!(map_class("keyid_key"), MapClass::ClearOwnKeysOnly);
 		assert_eq!(map_class("pduid_pdu"), MapClass::EventGraph);
 		assert_eq!(map_class("eventid_outlierpdu"), MapClass::EventGraph);
+		assert_eq!(map_class("tokenids"), MapClass::Skip);
 	}
 
 	#[test]

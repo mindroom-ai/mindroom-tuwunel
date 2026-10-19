@@ -6,7 +6,7 @@ use serde::Serialize;
 use tuwunel_core::{Err, Result};
 
 use super::{
-	plan::{RecordAction, map_class, plan_record, validate_ids},
+	plan::{MapClass, RecordAction, map_class, plan_record, validate_ids},
 	scan::{MapScan, ScanReport, scan_maps, write_report},
 };
 use crate::admin_command;
@@ -58,6 +58,9 @@ pub(super) async fn user_id_rewrite_apply(
 	let mut blocked: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
 	for (name, map) in services.db.iter() {
 		let class = map_class(name);
+		if class == MapClass::Skip {
+			continue;
+		}
 		let mut actions = Vec::new();
 		let stream = map.raw_stream();
 		pin_mut!(stream);

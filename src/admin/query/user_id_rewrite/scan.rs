@@ -97,6 +97,9 @@ pub(super) async fn scan_maps(
 
 	for (name, map) in services.db.iter() {
 		let class = map_class(name);
+		if class == MapClass::Skip {
+			continue;
+		}
 		let mut scan = MapScan {
 			map: (*name).to_owned(),
 			class,
