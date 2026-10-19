@@ -346,6 +346,22 @@ are unchanged. Upstream has the same bug.
 File: `src/service/rooms/event_handler/upgrade_outlier_pdu.rs`; test in
 `src/main/tests/federation_second_create.rs`.
 
+### Rooms created in the same millisecond get their own room IDs
+
+A room version 12 room's ID is the hash of its create event, which holds only
+the sender, the content and a millisecond timestamp. One user's `createRoom`
+requests with the same create content in the same millisecond got one room ID,
+and the later create was appended to the earlier room, resetting its state.
+Either request's next events could then fail authorization (``sender's
+membership `leave` is not `join` ``, ``no `m.room.join_rules` event``), or both
+requests answered with the same room. MindRoom's router creates its managed
+rooms four at a time at startup, and two of three starts of a 22-room
+deployment lost a room this way. A new version 12 room's create event now moves
+to a later millisecond while its room ID belongs to an existing room. Upstream
+has the same bug, latent since `628597c31` and exposed when `767f53cf5` made 12
+the default room version. File: `src/service/rooms/timeline/create.rs`; test in
+`src/main/tests/create_room_same_millisecond.rs`.
+
 ### Deleting an alias by power level takes room membership
 
 `DELETE /directory/room/{alias}` let anyone holding the room's

@@ -187,6 +187,24 @@ pub async fn create_hash_and_sign_event(
 		&& pdu.kind == TimelineEventType::RoomCreate
 	{
 		pdu.room_id = OwnedRoomId::from_parts('!', pdu.event_id.localpart(), None)?;
+
+		// One sender's creates with the same content in the same millisecond hash
+		// to the same room id, and appending the second would reset the first
+		// room's state. Callers build every such create under the placeholder
+		// room's lock, so move to a later millisecond until the id is unused.
+		while self.services.metadata.exists(&pdu.room_id).await {
+			pdu.origin_server_ts = pdu.origin_server_ts.saturating_add(uint!(1));
+			pdu_json.insert(
+				"origin_server_ts".into(),
+				CanonicalJsonValue::Integer(pdu.origin_server_ts.into()),
+			);
+			pdu.event_id = self
+				.services
+				.server_keys
+				.gen_id_hash_and_sign_event(&mut pdu_json, &room_version)?;
+			pdu.room_id = OwnedRoomId::from_parts('!', pdu.event_id.localpart(), None)?;
+		}
+
 		pdu_json.insert("room_id".into(), CanonicalJsonValue::String(pdu.room_id.clone().into()));
 	}
 
