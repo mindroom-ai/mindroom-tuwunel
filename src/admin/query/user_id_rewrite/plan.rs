@@ -38,7 +38,6 @@ pub(super) fn map_class(map: &str) -> MapClass {
 		| "alias_roomid"
 		| "alias_userid"
 		| "aliasid_alias"
-		| "mediaid_file"
 		| "mediaid_user"
 		| "presenceid_presence"
 		| "profilechangeid_userid"
@@ -101,7 +100,6 @@ pub(super) fn map_class(map: &str) -> MapClass {
 		| "userdeviceidtoken_index"
 		| "userdevicesessionid_uiaainfo"
 		| "userdevicetxnid_response"
-		| "userfilterid_filter"
 		| "userid_dehydrateddevice"
 		| "userid_devicelistversion"
 		| "userid_lastonetimekeyupdate"
@@ -110,8 +108,11 @@ pub(super) fn map_class(map: &str) -> MapClass {
 		| "userid_selfsigningkeyid"
 		| "userid_usersigningkeyid" => MapClass::Clear,
 
-		| "backupid_algorithm" | "backupid_etag" | "backupkeyid_backup" | "keyid_key" =>
-			MapClass::ClearOwnKeysOnly,
+		| "backupid_algorithm"
+		| "backupid_etag"
+		| "backupkeyid_backup"
+		| "keyid_key"
+		| "userfilterid_filter" => MapClass::ClearOwnKeysOnly,
 
 		| "eventid_originalpdu"
 		| "eventid_outlierpdu"
@@ -199,6 +200,13 @@ fn localpart(user_id: &[u8]) -> &[u8] {
 	user_id.get(1..end).unwrap_or_default()
 }
 
+/// Whether report samples may show records of this map. Session, device and
+/// key maps hold access tokens and key material, and `userid_password` holds
+/// the password hash.
+pub(super) fn sample_allowed(map: &str, class: MapClass) -> bool {
+	!matches!(class, MapClass::Clear | MapClass::ClearOwnKeysOnly) && map != "userid_password"
+}
+
 pub(super) fn plan_record(
 	class: MapClass,
 	key: &[u8],
@@ -244,7 +252,7 @@ mod tests {
 
 	use super::{
 		MapClass, RecordAction, find_user_id, localpart_only_hits, map_class, plan_record,
-		replace_user_id, url_encoded_hits, validate_ids,
+		replace_user_id, sample_allowed, url_encoded_hits, validate_ids,
 	};
 
 	#[test]
@@ -387,5 +395,26 @@ mod tests {
 		assert_eq!(url_encoded_hits(b"https://matrix.to/#/%40a_b%3Aexample.org", id), 1);
 		assert_eq!(url_encoded_hits(b"%40a_b%3aexample.org and %40A_B%3AEXAMPLE.ORG", id), 2);
 		assert_eq!(url_encoded_hits(b"@a_b:example.org", id), 0);
+	}
+
+	#[test]
+	fn media_file_keys_block_instead_of_rewrite() {
+		// The media file name is a hash of the key, so rewriting it orphans the file.
+		assert_eq!(map_class("mediaid_file"), MapClass::Unknown);
+	}
+
+	#[test]
+	fn filters_clear_only_own() {
+		// Another user's filter can name the renamed user in `senders`.
+		assert_eq!(map_class("userfilterid_filter"), MapClass::ClearOwnKeysOnly);
+	}
+
+	#[test]
+	fn samples_skip_secret_bearing_maps() {
+		assert!(!sample_allowed("token_userdeviceid", MapClass::Clear));
+		assert!(!sample_allowed("keyid_key", MapClass::ClearOwnKeysOnly));
+		assert!(!sample_allowed("userid_password", MapClass::RawReplace));
+		assert!(sample_allowed("pduid_pdu", MapClass::EventGraph));
+		assert!(sample_allowed("some_future_map", MapClass::Unknown));
 	}
 }

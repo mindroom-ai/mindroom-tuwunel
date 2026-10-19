@@ -1,6 +1,7 @@
 use std::{
-	fs::File,
+	fs::OpenOptions,
 	io::BufWriter,
+	os::unix::fs::OpenOptionsExt,
 	path::{Path, PathBuf},
 };
 
@@ -12,7 +13,7 @@ use tuwunel_service::Services;
 
 use super::plan::{
 	MapClass, RecordAction, find_user_id, localpart_only_hits, map_class, plan_record,
-	url_encoded_hits, validate_ids,
+	sample_allowed, url_encoded_hits, validate_ids,
 };
 use crate::admin_command;
 
@@ -145,7 +146,7 @@ pub(super) async fn scan_maps(
 					}
 				},
 			}
-			if scan.samples.len() < sample_limit_per_map {
+			if sample_allowed(name, class) && scan.samples.len() < sample_limit_per_map {
 				scan.samples.push(sample(key, value, from));
 			}
 		}
@@ -159,8 +160,15 @@ pub(super) async fn scan_maps(
 	Ok(report)
 }
 
+/// Reports can hold message excerpts, so only the owner may read them.
 pub(super) fn write_report<T: Serialize>(path: &Path, report: &T) -> Result {
-	serde_json::to_writer_pretty(BufWriter::new(File::create(path)?), report)?;
+	let file = OpenOptions::new()
+		.write(true)
+		.create(true)
+		.truncate(true)
+		.mode(0o600)
+		.open(path)?;
+	serde_json::to_writer_pretty(BufWriter::new(file), report)?;
 	Ok(())
 }
 
@@ -178,4 +186,24 @@ fn sample(key: &[u8], value: &[u8], from: &[u8]) -> String {
 	let key = &key[..key.len().min(160)];
 
 	format!("key={} value={}", key.escape_ascii(), value[start..end].escape_ascii())
+}
+
+#[cfg(test)]
+mod tests {
+	use std::os::unix::fs::PermissionsExt;
+
+	use super::write_report;
+
+	#[test]
+	fn reports_are_private() {
+		let path =
+			std::env::temp_dir().join(format!("user-id-rewrite-{}.json", std::process::id()));
+		write_report(&path, &serde_json::json!({"ok": true})).unwrap();
+		let mode = std::fs::metadata(&path)
+			.unwrap()
+			.permissions()
+			.mode() & 0o777;
+		std::fs::remove_file(&path).unwrap();
+		assert_eq!(mode, 0o600);
+	}
 }
