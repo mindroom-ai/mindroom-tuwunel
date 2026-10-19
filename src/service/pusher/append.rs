@@ -1,7 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use futures::{
-	FutureExt, StreamExt, TryFutureExt,
+	FutureExt, StreamExt,
 	future::{join, join3, join4},
 };
 use ruma::{
@@ -65,8 +65,8 @@ struct Appended<'a> {
 	serialized: &'a Raw<AnySyncTimelineEvent>,
 	thread_root: Option<&'a EventId>,
 	related_events: Option<&'a Arc<RelatedEvents>>,
-	/// The count of the event a terminal MindRoom stream edit replaces.
-	replaced: Option<u64>,
+	/// The position of the event a terminal MindRoom stream edit replaces.
+	replaced: Option<PduId>,
 }
 
 /// Called by timeline append_pdu.
@@ -117,7 +117,7 @@ pub(crate) async fn append_pdu(&self, pdu_id: RawPduId, pdu: &Pdu) -> Result {
 	let (thread_root, related_events, replaced) = join3(
 		self.services.threads.get_thread_id(pdu),
 		self.related_events(pdu),
-		self.replaced_pdu_count(&pdu_id, pdu),
+		self.replaced_pdu_id(&pdu_id, pdu),
 	)
 	.await;
 
@@ -207,8 +207,8 @@ async fn append_pdu_for_user(
 	// A terminal stream edit notifies in place of its suppressed original, so
 	// once the user has read that original it is not unread again.
 	let read = match replaced {
-		| Some(count) if notify || highlight =>
-			self.read_through(user, pdu.room_id(), thread_root, count)
+		| Some(replaced) if notify || highlight =>
+			self.read_through(user, pdu.room_id(), thread_root, replaced)
 				.await,
 		| _ => false,
 	};
@@ -263,9 +263,10 @@ async fn append_pdu_for_user(
 	}
 }
 
-/// The count of the same-room event a terminal MindRoom stream edit replaces.
+/// The position of the same-room event a terminal MindRoom stream edit
+/// replaces.
 #[implement(super::Service)]
-async fn replaced_pdu_count(&self, pdu_id: &RawPduId, pdu: &Pdu) -> Option<u64> {
+async fn replaced_pdu_id(&self, pdu_id: &RawPduId, pdu: &Pdu) -> Option<PduId> {
 	let target = super::mindroom_terminal_edit_target(pdu)?;
 	let target: PduId = self
 		.services
@@ -275,27 +276,25 @@ async fn replaced_pdu_count(&self, pdu_id: &RawPduId, pdu: &Pdu) -> Option<u64> 
 		.ok()?
 		.into();
 
-	let PduId { shortroomid, count: Count::Normal(count) } = target else {
-		return None;
-	};
-
-	(shortroomid == PduId::from(*pdu_id).shortroomid).then_some(count)
+	(target.shortroomid == PduId::from(*pdu_id).shortroomid
+		&& matches!(target.count, Count::Normal(_)))
+	.then_some(target)
 }
 
-/// Whether the user has read the event at `count`: the read watermark of the
-/// bucket it counts in (its thread, or else the room) or the unthreaded
-/// private read marker covers it. A main-timeline receipt moves the room
-/// watermark but leaves thread counts, so it covers no thread. The user's own
-/// send, such as a stop reaction, moves the unthreaded marker to its position
-/// and clears every thread's watermark with its counts.
+/// Whether the user has read the `replaced` event: the read watermark of the
+/// bucket it counts in (its thread, or else the room) covers it, or the
+/// user's own send in that same thread or timeline came after it. A
+/// main-timeline receipt moves the room watermark but leaves thread counts,
+/// so it covers no thread.
 #[implement(super::Service)]
 async fn read_through(
 	&self,
 	user: &UserId,
 	room_id: &RoomId,
 	thread_root: Option<&EventId>,
-	count: u64,
+	replaced: PduId,
 ) -> bool {
+	let count = replaced.count.into_unsigned();
 	let bucket = async {
 		match thread_root {
 			| Some(root) =>
@@ -305,17 +304,58 @@ async fn read_through(
 		}
 	};
 
-	let unthreaded = self
+	let (bucket, sent_after) =
+		join(bucket, self.sent_after_in_thread(user, room_id, thread_root, replaced)).await;
+
+	bucket.is_ok_and(|last_read| last_read >= count) || sent_after
+}
+
+/// Whether the unthreaded private read marker, which the user's own send
+/// moves to its own position, sits after `replaced` on an event of the same
+/// thread, such as the reaction that stops a stream. The own send's reset
+/// deletes the thread's watermark, so only this marker records the read; an
+/// own send elsewhere in the room says nothing about this thread.
+#[implement(super::Service)]
+async fn sent_after_in_thread(
+	&self,
+	user: &UserId,
+	room_id: &RoomId,
+	thread_root: Option<&EventId>,
+	replaced: PduId,
+) -> bool {
+	let Ok((marker, _)) = self
 		.services
 		.read_receipt
 		.private_read_get_count(room_id, user)
-		.map_ok(|(count, _)| count);
+		.await
+	else {
+		return false;
+	};
 
-	let (bucket, unthreaded) = join(bucket, unthreaded).await;
+	if marker < replaced.count.into_unsigned() {
+		return false;
+	}
 
-	[bucket, unthreaded]
-		.into_iter()
-		.any(|last_read| last_read.is_ok_and(|last_read| last_read >= count))
+	let marker = PduId {
+		shortroomid: replaced.shortroomid,
+		count: Count::Normal(marker),
+	};
+
+	let Ok(event) = self
+		.services
+		.timeline
+		.get_pdu_from_id(&marker.into())
+		.await
+	else {
+		return false;
+	};
+
+	self.services
+		.threads
+		.get_thread_id(&event)
+		.await
+		.as_deref()
+		== thread_root
 }
 
 #[implement(super::Service)]

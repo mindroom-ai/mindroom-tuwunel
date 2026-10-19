@@ -308,8 +308,9 @@ async fn check_watched_thread(
 	assert_eq!(thread_counts(services, room, question).await, (0, 0));
 }
 
-/// A main-timeline receipt moves the room watermark but resets no thread, so
-/// the finished reply of an unread thread still counts.
+/// A main-timeline receipt moves the room watermark but resets no thread, and
+/// the user's own send elsewhere in the room says nothing about this thread,
+/// so the finished reply of an unread thread still counts.
 async fn check_unread_thread(
 	services: &Services,
 	router: &Router,
@@ -331,6 +332,14 @@ async fn check_unread_thread(
 			.await?
 			> unread_count
 	);
+	send(
+		router,
+		room,
+		AUTHOR_TOKEN,
+		"elsewhere",
+		json!({"msgtype": "m.text", "body": "Meanwhile, another question"}),
+	)
+	.await;
 	send(
 		router,
 		room,
