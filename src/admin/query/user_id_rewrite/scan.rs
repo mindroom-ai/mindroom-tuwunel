@@ -205,7 +205,8 @@ mod tests {
 		let mode = std::fs::metadata(&path)
 			.unwrap()
 			.permissions()
-			.mode() & 0o777;
+			.mode()
+			& 0o777;
 		std::fs::remove_file(&path).unwrap();
 		assert_eq!(mode, 0o600);
 	}

@@ -138,9 +138,9 @@ pub(super) fn find_user_id(haystack: &[u8], user_id: &[u8]) -> Vec<usize> {
 		return Vec::new();
 	}
 
-	(0..=haystack.len() - user_id.len())
+	(0..=haystack.len().saturating_sub(user_id.len()))
 		.filter(|&i| haystack[i..].starts_with(user_id))
-		.filter(|&i| !continues_server_name(&haystack[i + user_id.len()..]))
+		.filter(|&i| !continues_server_name(&haystack[i.saturating_add(user_id.len())..]))
 		.collect()
 }
 
@@ -162,7 +162,7 @@ pub(super) fn replace_user_id(input: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
 	for offset in find_user_id(input, from) {
 		out.extend_from_slice(&input[copied..offset]);
 		out.extend_from_slice(to);
-		copied = offset + from.len();
+		copied = offset.saturating_add(from.len());
 	}
 	out.extend_from_slice(&input[copied..]);
 	out
@@ -177,9 +177,12 @@ pub(super) fn localpart_only_hits(haystack: &[u8], user_id: &[u8]) -> usize {
 	}
 
 	let full = find_user_id(haystack, user_id);
-	(0..=haystack.len() - localpart.len())
+	(0..=haystack.len().saturating_sub(localpart.len()))
 		.filter(|&i| haystack[i..].starts_with(localpart))
-		.filter(|&i| i == 0 || full.binary_search(&(i - 1)).is_err())
+		.filter(|&i| {
+			i.checked_sub(1)
+				.is_none_or(|at| full.binary_search(&at).is_err())
+		})
 		.count()
 }
 
@@ -392,7 +395,7 @@ mod tests {
 		let a: &UserId = "@a:example.org".try_into().unwrap();
 		let b: &UserId = "@b:example.org".try_into().unwrap();
 		let remote: &UserId = "@b:other.org".try_into().unwrap();
-		assert!(validate_ids(a, b, server).is_ok());
+		validate_ids(a, b, server).expect("a local rename is valid");
 		assert!(validate_ids(a, a, server).is_err());
 		assert!(validate_ids(a, remote, server).is_err());
 	}
