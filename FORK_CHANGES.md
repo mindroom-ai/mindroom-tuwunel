@@ -319,6 +319,18 @@ the member events the room's state has for other local users. Upstream has the
 same bug. Files: `src/service/membership/{join.rs,knock.rs}`; tests in
 `src/service/membership/{join,knock}/tests.rs`.
 
+### A restricted join refused here is not authorised by a local user
+
+When a user's join to a restricted room this server is in fails the allow list
+here, the join asks a server from `via` for a `make_join` template and signs
+it. The template's `join_authorised_via_users_server` was kept even when it
+named a joined user of this server, so this server's signature authorised the
+join it had just refused, and the remote server could complete it. The join
+now fails with the local refusal when the template names a local authoriser;
+a template naming the remote server's own user is still signed and sent.
+Upstream has the same bug. File: `src/service/membership/join.rs`; test in
+`src/main/tests/restricted_join_fallback.rs`.
+
 ### The state before an incoming event comes only from its room
 
 When the state at an incoming PDU's prev events is not known, it is built
