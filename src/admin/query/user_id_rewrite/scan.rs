@@ -1,6 +1,7 @@
 use std::{
-	fs::OpenOptions,
-	io::BufWriter,
+	ffi::OsString,
+	fs::{self, OpenOptions},
+	io::{BufWriter, Write},
 	os::unix::fs::OpenOptionsExt,
 	path::{Path, PathBuf},
 };
@@ -8,7 +9,7 @@ use std::{
 use futures::{StreamExt, pin_mut};
 use ruma::OwnedUserId;
 use serde::Serialize;
-use tuwunel_core::Result;
+use tuwunel_core::{Err, Result};
 use tuwunel_service::Services;
 
 use super::plan::{
@@ -163,15 +164,42 @@ pub(super) async fn scan_maps(
 	Ok(report)
 }
 
-/// Reports can hold message excerpts, so only the owner may read them.
+/// Reports can hold message excerpts, so only the owner may read them. The
+/// report is built in a new mode 0600 file next to the target and renamed over
+/// it, so an existing report never keeps its old mode and a failed write never
+/// leaves a truncated report behind.
 pub(super) fn write_report<T: Serialize>(path: &Path, report: &T) -> Result {
+	let Some(name) = path.file_name() else {
+		return Err!("report path {} has no file name", path.display());
+	};
+
+	let mut temp_name = OsString::from(".");
+	temp_name.push(name);
+	temp_name.push(format!(".{}.tmp", std::process::id()));
+	let temp = path.with_file_name(temp_name);
+
 	let file = OpenOptions::new()
 		.write(true)
-		.create(true)
-		.truncate(true)
+		.create_new(true)
 		.mode(0o600)
-		.open(path)?;
-	serde_json::to_writer_pretty(BufWriter::new(file), report)?;
+		.open(&temp)?;
+
+	let result = write_json(&file, report)
+		.and_then(|()| Ok(file.sync_all()?))
+		.and_then(|()| Ok(fs::rename(&temp, path)?));
+	if result.is_err() {
+		drop(fs::remove_file(&temp));
+	}
+
+	result
+}
+
+/// Flushes explicitly: dropping a `BufWriter` discards a flush error.
+fn write_json<W: Write, T: Serialize>(writer: W, report: &T) -> Result {
+	let mut writer = BufWriter::new(writer);
+	serde_json::to_writer_pretty(&mut writer, report)?;
+	writer.flush()?;
+
 	Ok(())
 }
 
@@ -193,21 +221,84 @@ fn sample(key: &[u8], value: &[u8], from: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-	use std::os::unix::fs::PermissionsExt;
+	use std::{
+		fs,
+		io::{self, Write},
+		os::unix::fs::PermissionsExt,
+		path::PathBuf,
+	};
 
-	use super::write_report;
+	use serde::{Serialize, Serializer};
+
+	use super::{write_json, write_report};
+
+	/// Fresh directory per test so parallel tests and leftovers cannot clash.
+	fn test_dir(name: &str) -> PathBuf {
+		let dir =
+			std::env::temp_dir().join(format!("user-id-rewrite-{}-{name}", std::process::id()));
+		drop(fs::remove_dir_all(&dir));
+		fs::create_dir_all(&dir).unwrap();
+		dir
+	}
+
+	fn mode(path: &PathBuf) -> u32 { fs::metadata(path).unwrap().permissions().mode() & 0o777 }
+
+	struct Unserializable;
+
+	impl Serialize for Unserializable {
+		fn serialize<S: Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+			Err(serde::ser::Error::custom("cannot serialize"))
+		}
+	}
+
+	/// Accepts writes but fails on flush, like a full disk behind a buffer.
+	struct FailingFlush;
+
+	impl Write for FailingFlush {
+		fn write(&mut self, buf: &[u8]) -> io::Result<usize> { Ok(buf.len()) }
+
+		fn flush(&mut self) -> io::Result<()> { Err(io::Error::other("flush failed")) }
+	}
 
 	#[test]
 	fn reports_are_private() {
-		let path =
-			std::env::temp_dir().join(format!("user-id-rewrite-{}.json", std::process::id()));
+		let dir = test_dir("private");
+		let path = dir.join("report.json");
 		write_report(&path, &serde_json::json!({"ok": true})).unwrap();
-		let mode = std::fs::metadata(&path)
-			.unwrap()
-			.permissions()
-			.mode()
-			& 0o777;
-		std::fs::remove_file(&path).unwrap();
-		assert_eq!(mode, 0o600);
+		assert_eq!(mode(&path), 0o600);
+		fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[test]
+	fn existing_report_becomes_private_with_new_content() {
+		let dir = test_dir("existing");
+		let path = dir.join("report.json");
+		fs::write(&path, "old report with a much longer body than the new one").unwrap();
+		fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+		write_report(&path, &serde_json::json!({"ok": true})).unwrap();
+		assert_eq!(mode(&path), 0o600);
+		let report: serde_json::Value =
+			serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+		assert_eq!(report, serde_json::json!({"ok": true}));
+		let entries = fs::read_dir(&dir).unwrap().count();
+		assert_eq!(entries, 1, "no temporary file may stay behind");
+		fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[test]
+	fn failed_write_keeps_old_report_and_leaves_no_temporary_file() {
+		let dir = test_dir("failed");
+		let path = dir.join("report.json");
+		fs::write(&path, "old report").unwrap();
+		write_report(&path, &Unserializable).unwrap_err();
+		assert_eq!(fs::read_to_string(&path).unwrap(), "old report");
+		let entries = fs::read_dir(&dir).unwrap().count();
+		assert_eq!(entries, 1, "no temporary file may stay behind");
+		fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[test]
+	fn flush_error_is_not_swallowed() {
+		write_json(FailingFlush, &serde_json::json!({"ok": true})).unwrap_err();
 	}
 }
