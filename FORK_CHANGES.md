@@ -641,6 +641,22 @@ Behavior:
   Turn the option on only after MindRoom backends with audience support (mindroom-ai/mindroom#2775) and MindRoom Chat clients that send audiences, including the iOS app (mindroom-ai/mindroom-chat#442), are live.
   Turning it off again restores upstream behavior, including for tokens issued bound.
 
+### OpenID userinfo can confirm room membership
+
+Files: `src/api/server/openid.rs`, `src/api/router.rs`; test in
+`src/mindroom-tests/tests/openid_room_membership.rs`.
+
+`GET /_matrix/federation/v1/openid/userinfo` reads an optional
+`io.mindroom.room_id` query parameter. With it, the token verifies only while
+its user is joined to that room: the response is
+`{"sub": ..., "io.mindroom.room_joined": true}`, and a user who is not joined
+gets 403 `M_FORBIDDEN`. A server that ignores the parameter never sends
+`io.mindroom.room_joined`, so a relying party such as the MatrixRTC
+authorization service can refuse calls for non-members instead of trusting
+such a server. Without the parameter the response is unchanged. The
+route is registered as a plain axum route because ruma's response type has no
+room for the extra field.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
@@ -927,7 +943,8 @@ sweep command and its retry after a storage failure
 device-key immutability/cleanup/
 concurrency, real gateway stream/invite notifications, and audience-bound
 OpenID tokens with the option on and off (`openid_audience.rs`,
-`openid_audience_disabled.rs`). Stream classification
+`openid_audience_disabled.rs`), and OpenID userinfo room membership
+(`openid_room_membership.rs`). Stream classification
 also has unit tests in `src/service/pusher/tests.rs`.
 
 The v1.9.3 rebase adds pins for its semantic overlaps:
