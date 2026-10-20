@@ -145,13 +145,26 @@ pub(super) fn find_user_id(haystack: &[u8], user_id: &[u8]) -> Vec<usize> {
 }
 
 /// Whether the bytes after a candidate match extend its server name: a label
-/// character, a `.` or `-` before one, or a `:` before a port digit. Trailing
-/// punctuation and `:<device_id>` suffixes end the ID.
+/// character, a `.` or `-` before one, or a `:` before a port. A port is one or
+/// more digits that end the input or precede a non-alphanumeric byte, so an
+/// all-digit suffix stays ambiguous and counts as a port. Trailing punctuation
+/// and `:<device_id>` suffixes end the ID, including device IDs that start with
+/// a digit and continue with a letter (`:12AB`).
 fn continues_server_name(rest: &[u8]) -> bool {
 	match rest {
 		| [byte, ..] if byte.is_ascii_alphanumeric() => true,
 		| [b'.' | b'-', next, ..] => next.is_ascii_alphanumeric(),
-		| [b':', next, ..] => next.is_ascii_digit(),
+		| [b':', suffix @ ..] => {
+			let digits = suffix
+				.iter()
+				.take_while(|byte| byte.is_ascii_digit())
+				.count();
+
+			digits > 0
+				&& suffix
+					.get(digits)
+					.is_none_or(|byte| !byte.is_ascii_alphabetic())
+		},
 		| _ => false,
 	}
 }
@@ -276,6 +289,8 @@ mod tests {
 		assert_eq!(find_user_id(b"\"@a:example.org\"", id), vec![1]);
 		assert!(find_user_id(b"@a:example.org.uk", id).is_empty());
 		assert!(find_user_id(b"@a:example.org:8448", id).is_empty());
+		assert!(find_user_id(b"@a:example.org:8448/x", id).is_empty());
+		assert!(find_user_id(b"@a:example.org:1234", id).is_empty());
 		assert!(find_user_id(b"@a:example.org-x", id).is_empty());
 		assert!(find_user_id(b"@ab:example.org", id).is_empty());
 	}
@@ -290,6 +305,8 @@ mod tests {
 		assert_eq!(find_user_id(b"@a:example.org- x", id), vec![0]);
 		assert_eq!(find_user_id(b"@a:example.org...", id), vec![0]);
 		assert_eq!(find_user_id(b"\"@a:example.org:cA6GgYzlTQ\"", id), vec![1]);
+		assert_eq!(find_user_id(b"@a:example.org:12AB", id), vec![0]);
+		assert_eq!(find_user_id(b"\"@a:example.org:9xYz\"", id), vec![1]);
 		assert!(find_user_id(b"@a:example.org:8448", id).is_empty());
 		assert!(find_user_id(b"@a:example.org.uk.", id).is_empty());
 		assert!(find_user_id(b"@a:example.org-gateway:x", id).is_empty());
