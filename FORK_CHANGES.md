@@ -920,8 +920,8 @@ Behavior:
   unknown map, or a value-only match in an own-keys map, blocks `apply`.
 - Not upstream. Rewritten events no longer match their hashes and signatures,
   so the command is only for rooms not shared with other servers.
-- Used on `mindroom.chat` on 2026-10-19 to rename `@mindroom_openclaw` to
-  `@mindroom_harry`: scan 43 s, apply 68 s, Tuwunel down 2 min 44 s. Operator
+- Used on `mindroom.chat` on 2026-10-19 to rename an agent account: scan
+  43 s, apply 68 s, Tuwunel down 2 min 44 s. Operator
   guide: [docs/user-id-rewrite.md](docs/user-id-rewrite.md).
 
 ## Tests
