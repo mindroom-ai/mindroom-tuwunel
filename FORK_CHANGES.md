@@ -560,6 +560,18 @@ Files: `src/service/rooms/pdu_metadata/bundling.rs`,
 `src/api/client/{room/initial_sync.rs,push/notifications.rs}`; test in
 `src/main/tests/bundled_relations_after_leave.rs`.
 
+### The last `/relations` page has no `next_batch`
+
+Every non-empty `/relations` page carried a `next_batch`, also the page that
+reached the end of the relations, as the first page of a short thread does.
+Clients then fetched one more, empty page, and MindRoom Chat showed "Load Older
+Messages" above threads whose history was complete and stored the cursor in its
+cache. Synapse gives `next_batch` only when more relations follow. A page now
+reads one relation past its limit and gives `next_batch` only when that
+relation exists, in both directions and with `recurse`. Upstream has the same
+bug. File: `src/api/client/relations.rs`; test in
+`src/main/tests/relations_next_batch.rs`.
+
 ### A device's tokens rotate under its device lock
 
 Refresh-token rotation read the token a device points at, removed it, and wrote
