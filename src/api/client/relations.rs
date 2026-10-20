@@ -190,7 +190,7 @@ async fn paginate_relations_with_filter(
 			.boxed()
 	};
 
-	let events = unfold(select_all(once(fetch(0, target.count))), async |mut relations| {
+	let mut events = unfold(select_all(once(fetch(0, target.count))), async |mut relations| {
 		let (depth, count, pdu) = relations.next().await?;
 
 		if depth < max_depth {
@@ -217,7 +217,8 @@ async fn paginate_relations_with_filter(
 			.await
 			.then_some((depth, count, pdu))
 	})
-	.take(limit)
+	// One event past the page shows whether another page follows.
+	.take(limit.saturating_add(1))
 	.wide_then(async |(depth, count, pdu)| {
 		let pdu = services
 			.pdu_metadata
@@ -228,6 +229,9 @@ async fn paginate_relations_with_filter(
 	})
 	.collect::<Vec<_>>()
 	.await;
+
+	let more = events.len() > limit;
+	events.truncate(limit);
 
 	Ok(get_relating_events::v1::Response {
 		recursion_depth: max_depth
@@ -241,6 +245,7 @@ async fn paginate_relations_with_filter(
 
 		next_batch: events
 			.last()
+			.filter(|_| more)
 			.map(at!(1))
 			.as_ref()
 			.map(ToString::to_string),
