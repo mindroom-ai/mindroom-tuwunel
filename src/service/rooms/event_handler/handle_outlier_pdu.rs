@@ -1,8 +1,9 @@
-use std::sync::atomic::AtomicUsize;
+use std::{iter::once, sync::atomic::AtomicUsize};
 
 use futures::{StreamExt, TryFutureExt};
 use ruma::{
-	CanonicalJsonObject, EventId, RoomId, RoomVersionId, ServerName, events::TimelineEventType,
+	CanonicalJsonObject, EventId, RoomId, RoomVersionId, ServerName,
+	events::{StateEventType, TimelineEventType},
 	room_version_rules::RoomVersionRules,
 };
 use tuwunel_core::{
@@ -13,6 +14,7 @@ use tuwunel_core::{
 	warn,
 };
 
+use super::upgrade_outlier_pdu::check_create_event_id;
 use crate::rooms::state_res::auth_check;
 
 #[implement(super::Service)]
@@ -126,7 +128,9 @@ pub(super) async fn handle_outlier_pdu(
 /// Checks an event against the stored auth events it names.
 ///
 /// In room versions that derive the room ID from the create event, the create
-/// event is also taken as an auth event. A missing auth event fails the check.
+/// event is also taken as an auth event. A missing auth event fails the check,
+/// and so does a create event other than the room's, as the event itself or
+/// as one of its auth events, once this server has the room's state.
 #[implement(super::Service)]
 pub async fn auth_check_by_auth_events(
 	&self,
@@ -159,6 +163,17 @@ pub async fn auth_check_by_auth_events(
 		})
 		.collect()
 		.await;
+
+	if let Ok(create_event_id) = self
+		.services
+		.state_accessor
+		.room_state_get_id(event.room_id(), &StateEventType::RoomCreate, "")
+		.await
+	{
+		once(event)
+			.chain(auth_events.iter().map(|(_, pdu)| pdu))
+			.try_for_each(|pdu| check_create_event_id(pdu, &create_event_id))?;
+	}
 
 	auth_check(room_rules, event, &*self.services.timeline, auth_events.as_slice())
 		.await?

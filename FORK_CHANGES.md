@@ -339,12 +339,15 @@ In room versions 1 to 11, an `m.room.create` event for a room this server is
 in, other than the room's own create, passed the authorization rules when it
 came from the server named in the room ID, since a create event has no rules
 that depend on the room state. It was added to the timeline and resolved into
-the current state, where it could take the place of the room's create. Such an
-event is now refused before it reaches the timeline or the room state, whether
-it arrives in a transaction or as a fetched prev event. The authorization rules
-are unchanged. Upstream has the same bug.
-File: `src/service/rooms/event_handler/upgrade_outlier_pdu.rs`; test in
-`src/main/tests/federation_second_create.rs`.
+the current state, where it could take the place of the room's create. It was
+also stored as an outlier when it arrived in a transaction, as a fetched auth
+event or in a `/state_ids` answer, and events naming it as an auth event were
+authorized against it, so state resolution could apply them. Such a create is
+now refused before it is stored, and so is an event naming another create as
+an auth event, even when that create was stored earlier. The authorization
+rules are unchanged. Upstream has the same bug.
+Files: `src/service/rooms/event_handler/{handle_outlier_pdu,upgrade_outlier_pdu}.rs`;
+test in `src/main/tests/federation_second_create.rs`.
 
 ### Rooms created in the same millisecond get their own room IDs
 
