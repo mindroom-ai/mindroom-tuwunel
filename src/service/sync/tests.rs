@@ -373,6 +373,22 @@ fn update_cache_keeps_only_the_first_lists_and_ranges() {
 }
 
 #[test]
+fn update_cache_keeps_only_the_first_distinct_ranges() {
+	let ranges: Vec<_> = once(0)
+		.chain(0..)
+		.take(RANGES_MAX + 1)
+		.map(|start| (start, start))
+		.collect();
+
+	let request = request_with_list(list_with_ranges(&ranges));
+	let mut conn = Connection::default();
+
+	assert!(conn.update_cache(&request));
+	assert!(!conn.update_cache(&request));
+	assert_cached_ranges(&conn, &ranges[1..]);
+}
+
+#[test]
 fn update_cache_keeps_only_the_first_extension_filters() {
 	let room_id = room_id!("!extension:example.com");
 	let lists = ListIds::from_elem(list_id(), LISTS_MAX + 1);

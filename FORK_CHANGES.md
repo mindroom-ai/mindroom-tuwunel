@@ -187,6 +187,18 @@ naming the room. Upstream has the same bug. Files: `src/service/sync/mod.rs`,
 `src/api/client/sync/v5/filter.rs`; tests in `src/service/sync/tests.rs` and
 `src/main/tests/sync_v5_list_filters.rs`.
 
+### Sliding sync copies each window room once
+
+Each pass copied a room, with the IDs of the lists it matched, once for every
+list and range that selected it, and a list kept a range repeated in a request
+as often as it was sent. The window holds each room once, so 64 lists of 16
+identical full ranges copied every room about a thousand times in a pass that
+does not yield, and kept a worker busy for seconds with a thousand rooms. A
+list now keeps each distinct range once, and the window copies a room the
+first time a range selects it. Upstream has the same bug. Files:
+`src/service/sync/mod.rs`, `src/api/client/sync/v5/selector.rs`; test in
+`src/service/sync/tests.rs`.
+
 ### Sliding sync long polls wait when only fallback key types are new
 
 The e2ee extension reports the device's unused fallback key types on every
