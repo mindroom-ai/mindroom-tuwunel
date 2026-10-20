@@ -12,26 +12,30 @@ already holds them would reject them.
 ## What it does
 
 `scan` reads every database map and writes a JSON report: matches per map, the
-planned action for each, and up to `--sample-limit` excerpts per map. It never
-writes. `apply` makes the same plan, refuses if anything is unplanned, writes,
-then scans again and prints how many matches remain.
+planned action for each, and up to `--sample-limit-per-map` excerpts per map
+(default 3). It never writes. `apply` makes the same plan, refuses if anything
+is unplanned, writes, then scans again and prints how many matches remain.
 
 Each map has a class:
 
 | Class | Maps (examples) | Action |
 |---|---|---|
 | Raw replace | `userid_password`, `userid_displayname`, membership indexes, account data, receipts, `mediaid_user` | Replace the ID in keys and values, including other users' records that mention it (such as `m.direct`) |
-| Clear | devices, access and refresh tokens, transaction IDs, device keys, one-time and fallback keys, pushers, filters, to-device queue | Delete matching records: signed key material would not verify under a new ID |
-| Clear own keys only | `keyid_key`, key backups | Delete records keyed by the user; a match only in a value (another user's key signed by this user) blocks `apply` |
+| Clear | devices, access and refresh tokens, transaction IDs, device keys, one-time and fallback keys, pushers, to-device queue | Delete matching records: signed key material would not verify under a new ID |
+| Clear own keys only | `keyid_key`, key backups, filters | Delete records keyed by the user; a match only in a value (another user's key signed by this user, another user's filter naming this user in `senders`) blocks `apply` |
 | Event graph | `pduid_pdu`, `eventid_originalpdu`, `eventid_outlierpdu`, `referencedevents`, `roomid_pduleaves` | Replace only with `--rewrite-event-graph` |
 | Skip | `tokenids` (search index) | Never read: search words never contain `@` or `:` |
 | Unknown | anything else | Any match blocks `apply` |
 
-A match is a full user ID that does not continue a server name: a letter or
-digit, a `.` or `-` before one, or a `:` before a port digit after it rejects
-the match. Mentions followed by punctuation, and MatrixRTC membership IDs
-(`<user_id>:<device_id>`), are rewritten. URL-encoded `matrix.to` links and the
-bare localpart are counted in the report but not rewritten.
+A match is a full user ID that does not continue a server name. A letter or
+digit after it, a `.` or `-` before one, or a port rejects the match. A port is
+a `:` followed by digits that end the text or precede a non-alphanumeric byte
+(`:8448`, `:8448/x`). Digits followed by a letter are a device ID instead, so
+`@a:example.org:12AB` matches. A suffix of only digits is ambiguous and counts
+as a port, so a device ID made of digits alone is not rewritten. Mentions
+followed by punctuation, and MatrixRTC membership IDs (`<user_id>:<device_id>`),
+are rewritten. URL-encoded `matrix.to` links and the bare localpart are counted
+in the report but not rewritten.
 
 `apply` refuses without `--confirm-offline-clone`, on a read-only database, when
 the new ID already exists, on any blocked record, and on a key collision.
@@ -88,6 +92,10 @@ password maps. They do contain message excerpts; delete them afterwards.
 - Other users see the renamed user's old encrypted messages as sent by an
   unknown device, and the renamed user cannot decrypt encrypted history from
   before the rename.
+- Queued to-device messages that the renamed user sent to other users and that
+  were not yet delivered are deleted. Their encrypted payload names the old ID
+  as sender and would fail the recipient's sender check under the new ID. The
+  recipients' clients request keys again as needed.
 - Rewritten events fail signature checks if they ever reach another server.
 - The search index keeps the words of rewritten messages as they were, so a
   search for the new localpart does not find mentions written before.
