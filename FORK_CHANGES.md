@@ -136,6 +136,19 @@ same redaction as their reason. Upstream redacts only the target too. Files:
 `src/service/rooms/{timeline/append.rs,pdu_metadata/bundling.rs}`; test in
 `src/main/tests/redaction_edits.rs`.
 
+### Redacting replaced state redacts the copy in its successor
+
+A state event stores the content of the state it replaces in
+`unsigned.prev_content`. A redaction pruned only its target, so when the target
+was a state event that had since been replaced, the event that replaced it kept
+the removed content. Any member who could see that event, also one who joined
+after the redaction, could still read it in `/messages`, `/context`, `/event`
+or `/state`. A redaction of a replaced state event now also sets its
+successor's `prev_content` to the redacted content, in the same write as the
+target. Upstream has the same bug. Files:
+`src/service/rooms/timeline/{append.rs,mod.rs,redact.rs}`; test in
+`src/main/tests/redaction_prev_content.rs`.
+
 ### Sliding sync looks up delivered required state selectors in a set
 
 When a room's sliding sync configuration changes, each required state entry is
