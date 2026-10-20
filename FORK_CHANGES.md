@@ -136,6 +136,18 @@ same redaction as their reason. Upstream redacts only the target too. Files:
 `src/service/rooms/{timeline/append.rs,pdu_metadata/bundling.rs}`; test in
 `src/main/tests/redaction_edits.rs`.
 
+### Redacting an outlier redacts it
+
+Joining a room over federation stores the room's existing state as outliers,
+and state reads serve them. A redaction of such an event, such as removing a
+topic set before this server joined, did nothing without a timeline row, so the
+full event stayed readable, also to local users who joined later. The outlier
+is now replaced by its redacted form, with the original retained as for
+timeline events. Upgrading it into the timeline later reuses that copy, and a
+redacted copy fetched again, as by backfill, is refused as already known.
+Upstream has the same bug. File: `src/service/rooms/timeline/redact.rs`; test
+in the same file.
+
 ### Sliding sync looks up delivered required state selectors in a set
 
 When a room's sliding sync configuration changes, each required state entry is

@@ -27,8 +27,8 @@ use crate::rooms::{
 
 /// Replaces an accepted PDU with its room-version redacted form.
 ///
-/// Failure to resolve the event's accepted PDU ID is treated as a successful
-/// no-op. Original retention, search removal, and relation deletion occur
+/// An event held only as an outlier is redacted there, and an unknown event is
+/// a no-op. Original retention, search removal, and relation deletion occur
 /// before the accepted row is replaced, so the operation is not atomic if a
 /// later step fails. A redacted thread reply is removed from its root's
 /// `m.thread` summary (the count, and the latest event when it was the latest)
@@ -43,9 +43,9 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 	state_lock: &RoomMutexGuard,
 ) -> Result {
 	let Ok(pdu_id) = self.get_pdu_id(event_id).await else {
-		// If event does not exist, just noop
-		// TODO this is actually wrong!
-		return Ok(());
+		return self
+			.redact_outlier(event_id, reason, state_lock)
+			.await;
 	};
 
 	let pdu = self
@@ -72,18 +72,7 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 	}
 
 	let room_id: &RoomId = pdu.get("room_id").try_into()?;
-
-	let room_version_id = self
-		.services
-		.state
-		.get_room_version(room_id)
-		.await?;
-
-	let room_version_rules = room_version_id.rules().ok_or_else(|| {
-		err!(Request(UnsupportedRoomVersion(
-			"Cannot redact event for unknown room version {room_version_id:?}."
-		)))
-	})?;
+	let rules = self.redaction_rules(room_id).await?;
 
 	self.services
 		.pdu_metadata
@@ -96,7 +85,7 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 	let pdu = redact_keeping_thread(
 		pdu,
 		keep_thread,
-		&room_version_rules.redaction,
+		&rules,
 		redacted_because(reason.to_canonical_object()),
 	)?;
 
@@ -112,6 +101,57 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 
 	self.replace_redacted_pdu(&pdu_id, &pdu, root)
 		.await
+}
+
+/// Replaces an outlier with its room-version redacted form.
+///
+/// A join over federation stores the room's existing state as outliers, and
+/// state reads serve them. Outliers have no search, relation or thread
+/// entries, so only the original is retained before the row is replaced.
+#[implement(super::Service)]
+async fn redact_outlier<Pdu: Event + Send + Sync>(
+	&self,
+	event_id: &EventId,
+	reason: &Pdu,
+	state_lock: &RoomMutexGuard,
+) -> Result {
+	let Ok(pdu) = self.get_outlier_pdu_json(event_id).await else {
+		// If event does not exist, just noop
+		// TODO this is actually wrong!
+		return Ok(());
+	};
+
+	self.services
+		.retention
+		.save_original_pdu(event_id, &pdu, state_lock)
+		.await;
+
+	let room_id: &RoomId = pdu.get("room_id").try_into()?;
+	let rules = self.redaction_rules(room_id).await?;
+	let because = redacted_because(reason.to_canonical_object());
+	let pdu = redact_keeping_thread(pdu, true, &rules, because)?;
+
+	self.add_pdu_outlier(event_id, &pdu);
+
+	Ok(())
+}
+
+/// The redaction rules of the room's version.
+#[implement(super::Service)]
+async fn redaction_rules(&self, room_id: &RoomId) -> Result<RedactionRules> {
+	let room_version_id = self
+		.services
+		.state
+		.get_room_version(room_id)
+		.await?;
+
+	let room_version_rules = room_version_id.rules().ok_or_else(|| {
+		err!(Request(UnsupportedRoomVersion(
+			"Cannot redact event for unknown room version {room_version_id:?}."
+		)))
+	})?;
+
+	Ok(room_version_rules.redaction)
 }
 
 /// Records an applied redaction on an accepted PDU that does not carry it.
@@ -266,10 +306,14 @@ fn redacted_because(mut reason: CanonicalJsonObject) -> RedactedBecause {
 
 #[cfg(test)]
 mod tests {
-	use ruma::{RoomVersionId, room_id};
+	use std::sync::Arc;
+
+	use ruma::{RoomVersionId, event_id, events::StateEventType, room_id};
 	use serde_json::{from_value, json};
+	use tuwunel_core::{PduEvent, config::Figment};
 
 	use super::*;
+	use crate::test_utils::fixture;
 
 	#[test]
 	fn recorded_redaction_drops_its_unsigned() {
@@ -419,6 +463,90 @@ mod tests {
 		assert!(recorded_redaction(&unrecorded).is_none());
 		assert!(recorded_redaction(&recorded).is_some());
 		assert!(recorded_redaction(&nameless).is_some());
+	}
+
+	/// A join over federation stores the room's state as outliers, and later
+	/// reads of that state serve the outlier.
+	#[tokio::test]
+	async fn redacting_an_outlier_redacts_the_room_state() -> Result {
+		let Some(fixture) = fixture(Figment::new()).await? else {
+			return Ok(());
+		};
+
+		let services = &fixture.services;
+		let room = room_id!("!outlier:remote.invalid");
+		let (create, topic) =
+			(event_id!("$create:remote.invalid"), event_id!("$topic:remote.invalid"));
+		let mut state = Vec::new();
+
+		for (id, kind, content) in [
+			(create, StateEventType::RoomCreate, json!({ "room_version": "10" })),
+			(topic, StateEventType::RoomTopic, json!({ "topic": "removed later" })),
+		] {
+			let pdu = event(room, id, &kind.to_string(), Some(""), &content);
+			let key = services
+				.short
+				.get_or_create_shortstatekey(&kind, "");
+			let compressed = services
+				.state_compressor
+				.compress_state_event(key.await, id);
+
+			services
+				.timeline
+				.add_pdu_outlier(id, &object(pdu));
+			state.push(compressed.await);
+		}
+
+		let state = Arc::new(state.into_iter().collect());
+		let state = services
+			.state
+			.set_event_state(topic, room, state)
+			.await?;
+		let lock = services.state.mutex.lock(room).await;
+
+		services.state.set_room_state(room, state, &lock);
+
+		let redaction = event_id!("$redaction:remote.invalid");
+		let reason =
+			event(room, redaction, "m.room.redaction", None, &json!({ "redacts": topic }));
+		let shortroomid = services
+			.short
+			.get_or_create_shortroomid(room)
+			.await;
+
+		services
+			.timeline
+			.redact_pdu(topic, &from_value::<PduEvent>(reason)?, shortroomid, &lock)
+			.await?;
+
+		let current = services
+			.state_accessor
+			.room_state_get(room, &StateEventType::RoomTopic, "")
+			.await?;
+
+		assert_eq!(current.content().get(), "{}");
+		assert!(current.is_redacted());
+
+		let original = services.retention.get_original_pdu(topic).await?;
+
+		assert_eq!(original.content().get(), r#"{"topic":"removed later"}"#);
+
+		Ok(())
+	}
+
+	fn event(
+		room: &RoomId,
+		id: &EventId,
+		kind: &str,
+		state_key: Option<&str>,
+		content: &serde_json::Value,
+	) -> serde_json::Value {
+		json!({
+			"event_id": id, "room_id": room, "sender": "@mod:remote.invalid",
+			"type": kind, "state_key": state_key, "content": content,
+			"origin_server_ts": 1, "depth": 1, "prev_events": [], "auth_events": [],
+			"hashes": { "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }, "signatures": {},
+		})
 	}
 
 	fn object(value: serde_json::Value) -> CanonicalJsonObject {
