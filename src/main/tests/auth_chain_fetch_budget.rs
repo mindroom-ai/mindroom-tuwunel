@@ -1,6 +1,15 @@
 #![cfg(test)]
 
-use std::{collections::HashMap, net::TcpListener, path::PathBuf, sync::Arc};
+use std::{
+	collections::HashMap,
+	net::TcpListener,
+	path::PathBuf,
+	sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	},
+	time::Duration,
+};
 
 use axum::{
 	Json, Router,
@@ -12,7 +21,7 @@ use axum::{
 use axum_server::{from_tcp_rustls, tls_rustls::RustlsConfig};
 use futures::StreamExt;
 use serde_json::{Value, json};
-use tokio::spawn;
+use tokio::{spawn, time::sleep};
 use tuwunel_core::{
 	Result, err,
 	matrix::{Event, pdu::into_outgoing_federation},
@@ -39,11 +48,22 @@ const CERTIFICATE: &str = "../../nix/pkgs/complement/certificate.crt";
 
 const PRIVATE_KEY: &str = "../../nix/pkgs/complement/private_key.key";
 
-const OPTIONS: [&str; 4] = [
+/// Logging is off, as the two servers booted in turn would share one
+/// process-wide log subscriber.
+const OPTIONS: [&str; 5] = [
 	"ip_range_denylist=[]",
 	"allow_invalid_tls_certificates=true",
 	"max_fetch_prev_events=2",
 	"fetch_prev_wait_ms=0",
+	"log_enable=false",
+];
+
+/// `OPTIONS` with the default `max_fetch_prev_events`.
+const WIDTH_OPTIONS: [&str; 4] = [
+	"ip_range_denylist=[]",
+	"allow_invalid_tls_certificates=true",
+	"fetch_prev_wait_ms=0",
+	"log_enable=false",
 ];
 
 /// Events by event id.
@@ -57,12 +77,28 @@ struct Peer {
 
 	/// The `/get_missing_events` answer.
 	missing: Vec<CanonicalJsonObject>,
+
+	/// How long each `/event` answer takes.
+	delay: Duration,
+
+	/// The `/event` requests being answered.
+	running: AtomicUsize,
+
+	/// The most `/event` requests answered at once.
+	most_running: AtomicUsize,
 }
 
-/// The fetches an incoming event starts stay within `max_fetch_prev_events`.
+/// The fetches an incoming event starts stay within `max_fetch_prev_events`,
+/// and its prev event walk runs only a few of them at once.
 #[test]
 fn incoming_event_fetches_are_bounded() -> Result {
-	boot("auth-chain-fetch-budget", OPTIONS, exercise)
+	boot("auth-chain-fetch-budget", OPTIONS, exercise).and_then(|()| {
+		boot(
+			"auth-chain-fetch-width",
+			WIDTH_OPTIONS,
+			prev_event_walk_runs_a_few_fetches_at_once,
+		)
+	})
 }
 
 async fn exercise(services: &Services, base: &str) -> Result {
@@ -119,8 +155,7 @@ async fn prev_event_walks_share_one_size_limit(client: &Client<'_>, user_id: &Us
 }
 
 /// The prev event walk counts the fetches it queues against
-/// `max_fetch_prev_events`, as they all run at once, not only the events it
-/// has already walked.
+/// `max_fetch_prev_events`, not only the events it has already walked.
 async fn prev_event_walk_counts_queued_fetches(client: &Client<'_>, user_id: &UserId) -> Result {
 	let services = client.services;
 	let room_id = client.create_room(&json!({})).await?;
@@ -170,6 +205,45 @@ async fn missing_events_beyond_the_limit_are_dropped(
 
 	let stored = count_stored(services, &ids).await;
 	assert_eq!(stored, 10, "more missing events were stored than asked for");
+
+	Ok(())
+}
+
+/// A prev event walk over a gap wider than the fetches it runs at once leaves
+/// the rest of the fetcher to other rooms, and still fetches the whole gap.
+async fn prev_event_walk_runs_a_few_fetches_at_once(services: &Services, base: &str) -> Result {
+	let user_id = register(services, "authwidth", TOKEN).await?;
+	let client = Client { services, base, token: TOKEN };
+	let room_id = client.create_room(&json!({})).await?;
+
+	// Twenty prev events of an incoming event, each naming ten prev events of
+	// its own.
+	let mut events = messages(services, &user_id, &room_id, 200, 0).await?;
+	let below: Vec<_> = events.keys().cloned().collect();
+	let mut tops = Vec::new();
+	for (i, ids) in below.chunks(10).enumerate() {
+		let body = format!("top {i}");
+		let (top_id, top) =
+			sign_message(services, &user_id, &room_id, &body, Some(("prev_events", ids))).await?;
+
+		events.insert(top_id.clone(), top);
+		tops.push(top_id);
+	}
+
+	let ids: Vec<_> = events.keys().cloned().collect();
+	let (event_id, pdu) =
+		sign_message(services, &user_id, &room_id, "hello", Some(("prev_events", &tops))).await?;
+
+	// Each answer takes a while, so the walk's fetches overlap.
+	let delay = Duration::from_millis(300);
+	let peer = Peer { events, delay, ..Peer::default() };
+	let peer = deliver(services, &room_id, &event_id, pdu, peer).await?;
+
+	let most = peer.most_running.load(Ordering::Relaxed);
+	assert!(most <= 32, "the walk ran {most} fetches at once");
+
+	let stored = count_stored(services, &ids).await;
+	assert_eq!(stored, ids.len(), "the walk did not fetch the whole gap");
 
 	Ok(())
 }
@@ -229,14 +303,15 @@ async fn sign_message(
 	Ok((event_id, into_outgoing_federation(json, &room_version)))
 }
 
-/// Hand `pdu` over as an incoming event from a server answering as `peer`.
+/// Hand `pdu` over as an incoming event from a server answering as `peer`,
+/// returning the peer for what it saw.
 async fn deliver(
 	services: &Services,
 	room_id: &RoomId,
 	event_id: &EventId,
 	pdu: CanonicalJsonObject,
 	peer: Peer,
-) -> Result {
+) -> Result<Arc<Peer>> {
 	let listener = TcpListener::bind(("127.0.0.1", 0))?;
 	let peer_name = ServerName::parse(listener.local_addr()?.to_string())
 		.map_err(|e| err!("peer server name: {e}"))?;
@@ -244,7 +319,8 @@ async fn deliver(
 	// tokio refuses to adopt a blocking socket
 	listener.set_nonblocking(true)?;
 
-	let peer = spawn(serve_peer(listener, peer));
+	let peer = Arc::new(peer);
+	let server = spawn(serve_peer(listener, peer.clone()));
 
 	// Only the events stored along the way matter, not the incoming event.
 	services
@@ -253,9 +329,9 @@ async fn deliver(
 		.await
 		.ok();
 
-	peer.abort();
+	server.abort();
 
-	Ok(())
+	Ok(peer)
 }
 
 async fn count_stored(services: &Services, ids: &[OwnedEventId]) -> usize {
@@ -266,7 +342,7 @@ async fn count_stored(services: &Services, ids: &[OwnedEventId]) -> usize {
 		.await
 }
 
-async fn serve_peer(listener: TcpListener, peer: Peer) -> Result {
+async fn serve_peer(listener: TcpListener, peer: Arc<Peer>) -> Result {
 	let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 	let config =
 		RustlsConfig::from_pem_file(manifest.join(CERTIFICATE), manifest.join(PRIVATE_KEY))
@@ -275,7 +351,7 @@ async fn serve_peer(listener: TcpListener, peer: Peer) -> Result {
 	let app = Router::new()
 		.route("/_matrix/federation/v1/event/{event_id}", get(event))
 		.route("/_matrix/federation/v1/get_missing_events/{room_id}", post(missing_events))
-		.with_state(Arc::new(peer));
+		.with_state(peer);
 
 	from_tcp_rustls(listener, config)?
 		.serve(app.into_make_service())
@@ -285,6 +361,16 @@ async fn serve_peer(listener: TcpListener, peer: Peer) -> Result {
 }
 
 async fn event(State(peer): State<Arc<Peer>>, Path(event_id): Path<OwnedEventId>) -> Response {
+	let running = peer
+		.running
+		.fetch_add(1, Ordering::Relaxed)
+		.saturating_add(1);
+
+	peer.most_running
+		.fetch_max(running, Ordering::Relaxed);
+	sleep(peer.delay).await;
+	peer.running.fetch_sub(1, Ordering::Relaxed);
+
 	let Some(pdu) = peer.events.get(&event_id) else {
 		let error = json!({"errcode": "M_NOT_FOUND", "error": "Event not found."});
 

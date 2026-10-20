@@ -420,6 +420,18 @@ bugs. Files: `src/service/rooms/event_handler/fetch_prev.rs`,
 `src/service/rooms/event_handler/handle_incoming_pdu.rs`; tests in
 `src/main/tests/auth_chain_fetch_budget.rs`.
 
+### A prev event walk runs a few fetches at once
+
+The walk over an incoming event's missing prev events started every fetch it
+queued at once, up to `max_fetch_prev_events` (default 1024). The fetcher runs
+at most 256 fetches for all rooms together, so one walk over a wide gap whose
+server answered slowly could take all of them, and fetches for every other
+room waited behind it. A walk now runs at most 32 of its fetches at once, more
+than the 20 prev events one event may name, and starts the rest as those
+finish, so a wide gap still fills completely. Upstream has the same bug. File:
+`src/service/rooms/event_handler/fetch_prev.rs`; test in
+`src/main/tests/auth_chain_fetch_budget.rs`.
+
 ### Federation bodies and incoming PDUs are parsed after their checks
 
 A federation request's body was parsed into a JSON tree before the request was
