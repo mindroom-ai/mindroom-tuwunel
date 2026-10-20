@@ -466,6 +466,20 @@ Files: `src/service/fetcher/{mod.rs,transport.rs,validate.rs}`,
 `src/service/rooms/event_handler/fetch_prev.rs`; test in
 `src/main/tests/federation_event_response_limit.rs`.
 
+### A `/state_ids` answer walks each event once
+
+When the state before an incoming event is taken from the sending server's
+`/state_ids` answer, every id in the answer started a walk, and an id named
+more than once started one for each copy. A walk for an event we hold loads
+the whole event, outside the size limit the walks share for fetched events, and
+all walks keep their results until the last one ends; only then was the second
+copy refused as a repeated state key. An answer of up to 64 MiB can name one
+large stored event over a million times. Each event of the answer is now walked
+once, and an answer naming an event more than once gives the state it would
+give naming it once. Upstream has the same bug. File:
+`src/service/rooms/event_handler/fetch_state.rs`; test in
+`src/main/tests/auth_chain_fetch_budget.rs`.
+
 ### GitHub sign-in uses the account id
 
 GitHub's user API has no `sub`, so a `login` alias made the username the
