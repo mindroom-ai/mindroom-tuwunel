@@ -319,6 +319,17 @@ the member events the room's state has for other local users. Upstream has the
 same bug. Files: `src/service/membership/{join.rs,knock.rs}`; tests in
 `src/service/membership/{join,knock}/tests.rs`.
 
+### send_join answers an old join only while its user is joined
+
+`send_join` answered with the room's current state and auth chain for a join
+event this server already had, without looking at it again. A server whose
+user had once joined could send that join again after the user left, was
+kicked or was banned, and read the room's current state each time. A join this
+server already has is now answered only while its user is still joined, as a
+retry of a join that still stands, and refused otherwise. New joins are
+unchanged. Upstream has the same bug. File: `src/api/server/send_join.rs`;
+test in `src/main/tests/federation_membership_refusal.rs`.
+
 ### The state before an incoming event comes only from its room
 
 When the state at an incoming PDU's prev events is not known, it is built
