@@ -121,9 +121,9 @@ const LISTS_MAX: usize = 64;
 
 /// The longest list ID one connection keeps, in bytes, as in Synapse.
 ///
-/// Each room in the window carries the IDs of the lists it matched and is
-/// copied with them for every range it is selected in, so a list with a longer
-/// ID is ignored, and so is such an ID in an extension filter.
+/// Each room in the window carries the IDs of the lists it matched, and every
+/// range of every list looks for its ID among them, so a list with a longer ID
+/// is ignored, and so is such an ID in an extension filter.
 const LIST_ID_MAX: usize = 64;
 
 /// The most entries one list filter keeps of its spaces, tags and room types.
