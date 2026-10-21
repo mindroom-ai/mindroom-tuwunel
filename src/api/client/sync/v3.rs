@@ -921,7 +921,8 @@ async fn load_left_room(
 	.await
 	.unwrap_or_default();
 
-	let clamp_to_departure = departure_clamp(services, sender_user, room_id).await?;
+	let (sees_room_state, clamp_to_departure) =
+		left_room_state_access(services, sender_user, room_id).await;
 
 	let since_shortstatehash = services
 		.timeline
@@ -981,16 +982,6 @@ async fn load_left_room(
 		})
 		.boxed()
 		.await?;
-
-	// A user who never joined, such as a knocker who withdrew or an invitee who
-	// rejected, sees only their own membership unless the room is world-readable.
-	let once_joined = services
-		.state_cache
-		.once_joined(sender_user, room_id);
-
-	let world_readable = services.state_accessor.is_world_readable(room_id);
-
-	let sees_room_state = once_joined.or(world_readable).await;
 
 	let is_sender_membership = |event: &PduEvent| {
 		*event.kind() == RoomMember && event.state_key() == Some(sender_user.as_str())
@@ -1077,40 +1068,52 @@ async fn load_left_room(
 	}))
 }
 
-/// Clamps a left room's state snapshots to the user's departure.
+/// Whether a user sees a left room's state beyond their own membership, and
+/// the clamp of its state snapshots to their departure.
 ///
+/// A user who never joined, such as a knocker who withdrew or an invitee who
+/// rejected, sees only their own membership unless the room is world-readable.
 /// A former member reads the state no later than the leave or ban that ended
 /// their last join, though a withdrawn knock or a rejected invite since then
 /// gives them a later leave. A snapshot at a count past that departure becomes
-/// the state after it; any other snapshot, and every snapshot of a user who
-/// never joined, stays as it is.
-async fn departure_clamp(
+/// the state after it, and a former member whose departure is not found sees
+/// only their own membership.
+async fn left_room_state_access(
 	services: &Services,
 	sender_user: &UserId,
 	room_id: &RoomId,
-) -> Result<impl Fn(PduCount, ShortStateHash) -> ShortStateHash + Copy + use<>> {
-	let departure = if services
+) -> (bool, impl Fn(PduCount, ShortStateHash) -> ShortStateHash + Copy + use<>) {
+	let once_joined = services
 		.state_cache
 		.once_joined(sender_user, room_id)
-		.await
-	{
-		let current = services
-			.state
-			.get_room_shortstatehash(room_id)
-			.await?;
+		.await;
 
-		services
-			.state_accessor
-			.user_departure(sender_user, room_id, current)
-			.await?
-	} else {
-		None
+	let departure = match once_joined {
+		| false => Ok(None),
+		| true =>
+			services
+				.state
+				.get_room_shortstatehash(room_id)
+				.and_then(|current| {
+					services
+						.state_accessor
+						.user_departure(sender_user, room_id, current)
+				})
+				.inspect_err(inspect_debug_log)
+				.await,
 	};
 
-	Ok(move |count: PduCount, snapshot: ShortStateHash| match departure {
-		| Some((departure, departed)) if count > departure => departed,
-		| _ => snapshot,
-	})
+	let world_readable = services.state_accessor.is_world_readable(room_id);
+	let sees_room_state = departure.is_ok() && (once_joined || world_readable.await);
+	let departure = departure.ok().flatten();
+
+	(
+		sees_room_state,
+		move |count: PduCount, snapshot: ShortStateHash| match departure {
+			| Some((departure, departed)) if count > departure => departed,
+			| _ => snapshot,
+		},
+	)
 }
 
 /// Records a failed horizon read, quietly when the row is simply absent.

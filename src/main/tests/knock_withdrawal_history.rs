@@ -23,7 +23,9 @@ const MEMBER_TOKEN: &str = "knock-withdrawal-history-member-access-token";
 /// A kicked member who knocks and withdraws the knock still reads what was
 /// sent before and while it was joined, and its own join, but nothing sent
 /// after the kick. While knocking and after withdrawing, it reads the room
-/// state from the kick.
+/// state from the kick. A member that knocks and withdraws too often for its
+/// kick to be found still gets the left room in `/sync`, with no state but its
+/// own membership.
 #[test]
 fn departure_bounds_history() -> Result {
 	let options: [&str; 0] = [];
@@ -39,7 +41,8 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let owner = Client { services, base, token: OWNER_TOKEN };
 	let member = Client { services, base, token: MEMBER_TOKEN };
 
-	withdrawn_knock(&owner, &member, &member_id).await
+	withdrawn_knock(&owner, &member, &member_id).await?;
+	many_withdrawn_knocks(&owner, &member, &member_id).await
 }
 
 async fn withdrawn_knock(owner: &Client<'_>, member: &Client<'_>, member_id: &UserId) -> Result {
@@ -142,6 +145,63 @@ async fn withdrawn_knock(owner: &Client<'_>, member: &Client<'_>, member_id: &Us
 	assert!(bodies.contains(&"while-joined"), "member loses its joined history: {bodies:?}");
 	assert!(!bodies.contains(&"after-kick"), "member reads past its kick: {bodies:?}");
 	assert!(own_join, "member loses its own join: {messages}");
+
+	Ok(())
+}
+
+async fn many_withdrawn_knocks(
+	owner: &Client<'_>,
+	member: &Client<'_>,
+	member_id: &UserId,
+) -> Result {
+	let room_id = owner
+		.create_room(&json!({
+			"preset": "private_chat",
+			"initial_state": [{
+				"type": "m.room.join_rules",
+				"state_key": "",
+				"content": { "join_rule": "knock" },
+			}],
+		}))
+		.await?;
+
+	let target = json!({ "user_id": member_id });
+
+	owner
+		.post(&format!("rooms/{room_id}/invite"), &target)
+		.await?;
+	member
+		.post(&format!("rooms/{room_id}/join"), &json!({}))
+		.await?;
+	owner
+		.post(&format!("rooms/{room_id}/kick"), &target)
+		.await?;
+
+	// Sixteen membership changes after the kick, more than the walk back takes.
+	for _ in 0..8 {
+		member
+			.post(&format!("knock/{room_id}"), &json!({}))
+			.await?;
+		member
+			.post(&format!("rooms/{room_id}/leave"), &json!({}))
+			.await?;
+	}
+
+	let filter = json!({ "room": { "include_leave": true } }).to_string();
+	let sync = member
+		.get("sync", &[("filter", filter.as_str())])
+		.await?;
+
+	let left_room = &sync["rooms"]["leave"][room_id.as_str()];
+	let foreign: Vec<_> = left_room["state"]["events"]
+		.as_array()
+		.into_iter()
+		.flatten()
+		.filter(|event| event["state_key"] != member_id.as_str())
+		.collect();
+
+	assert!(left_room.is_object(), "member's sync lacks the left room: {sync}");
+	assert!(foreign.is_empty(), "member reads the room's state: {foreign:?}");
 
 	Ok(())
 }
