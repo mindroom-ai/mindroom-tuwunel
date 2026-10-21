@@ -43,7 +43,6 @@ async fn send_join_auth_chain_is_checked_before_storing() -> Result {
 	let version = RoomVersionId::V11;
 	let rules = room_version::rules(&version)?;
 	let [(create_id, create), (join_id, join)] = room(services, room_id)?;
-	let join_auth = [create_id.clone()];
 	let auth_events = [&create_id, &join_id];
 	let (known_id, known) = topic(services, room_id, "known", &auth_events)?;
 	let (unknown_id, unknown) = topic(services, room_id, "unknown", &auth_events)?;
@@ -55,13 +54,13 @@ async fn send_join_auth_chain_is_checked_before_storing() -> Result {
 	let auth_chain = raw(&[&create, &join, &known])?;
 	services
 		.membership
-		.ingest_send_join_events(room_id, bob, &join_auth, &version, &rules, &auth_chain, &[])
+		.ingest_send_join_events(room_id, bob, &version, &rules, &auth_chain, &[])
 		.await?;
 
 	let auth_chain = raw(&[&create, &join, &altered(&known), &altered(&unknown), &foreign])?;
 	services
 		.membership
-		.ingest_send_join_events(room_id, bob, &join_auth, &version, &rules, &auth_chain, &[])
+		.ingest_send_join_events(room_id, bob, &version, &rules, &auth_chain, &[])
 		.await?;
 
 	let stored = async |event_id| {
@@ -95,7 +94,6 @@ async fn send_join_state_replaces_knock_state() -> Result {
 	let version = RoomVersionId::V11;
 	let rules = room_version::rules(&version)?;
 	let [(create_id, create), (join_id, join)] = room(services, room_id)?;
-	let join_auth = [create_id.clone()];
 	let (event_id, event) = topic(services, room_id, "joined", &[&create_id, &join_id])?;
 
 	store_own_keys(services);
@@ -107,7 +105,7 @@ async fn send_join_state_replaces_knock_state() -> Result {
 	let state = raw(&[&create, &join, &event])?;
 	services
 		.membership
-		.ingest_send_join_events(room_id, bob, &join_auth, &version, &rules, &[], &state)
+		.ingest_send_join_events(room_id, bob, &version, &rules, &[], &state)
 		.await?;
 
 	let stored: Value = services.timeline.get_outlier(&event_id).await?;
@@ -139,18 +137,17 @@ async fn send_join_create_keeps_its_own_room_id() -> Result {
 	store_own_keys(services);
 
 	let rules = room_version::rules(&v11)?;
-	let join_auth = [other_id.clone()];
 	let auth_chain = raw(&[&other_create])?;
 	services
 		.membership
-		.ingest_send_join_events(other, bob, &join_auth, &v11, &rules, &auth_chain, &[])
+		.ingest_send_join_events(other, bob, &v11, &rules, &auth_chain, &[])
 		.await?;
 
 	let rules = room_version::rules(&v12)?;
 	let auth_chain = raw(&[&joined_create, &other_create, &foreign_create])?;
 	services
 		.membership
-		.ingest_send_join_events(&room_id, bob, &[], &v12, &rules, &auth_chain, &[])
+		.ingest_send_join_events(&room_id, bob, &v12, &rules, &auth_chain, &[])
 		.await?;
 
 	let stored_room = async |event_id| {
@@ -186,7 +183,6 @@ async fn send_join_state_is_authorized() -> Result {
 	let version = RoomVersionId::V11;
 	let rules = room_version::rules(&version)?;
 	let [(create_id, create), (join_id, join)] = room(services, room_id)?;
-	let join_auth = [create_id.clone()];
 	let (alice_id, alice) = state_event(
 		services,
 		&version,
@@ -221,7 +217,7 @@ async fn send_join_state_is_authorized() -> Result {
 	for state in [omitted, after] {
 		let state: HashSet<_> = services
 			.membership
-			.ingest_send_join_events(room_id, bob, &join_auth, &version, &rules, &[], &state)
+			.ingest_send_join_events(room_id, bob, &version, &rules, &[], &state)
 			.await?
 			.into_values()
 			.collect();
@@ -237,10 +233,10 @@ async fn send_join_state_is_authorized() -> Result {
 /// The state of a send_join answer cannot make another local user joined.
 ///
 /// Up to room version 10, a join for the creator a create event names passes
-/// from any sender when that create is its only previous event, so a create
-/// naming a local user lets the answering server join them. Their join is
-/// stored, as other events may name it, but the joined room's state leaves it
-/// out.
+/// from any sender when that create is its only previous event, so a second
+/// create naming a local user lets the answering server join them. Their join
+/// is stored, as other events may name it, but the joined room's state leaves
+/// it out, while the joining user's own join there still applies.
 #[tokio::test]
 async fn send_join_state_leaves_other_local_users_alone() -> Result {
 	let Some(fixture) = fixture(Figment::new()).await? else {
@@ -253,14 +249,17 @@ async fn send_join_state_leaves_other_local_users_alone() -> Result {
 	let rules = room_version::rules(&version)?;
 	let (alice, bob) = (user_id!("@alice:localhost"), user_id!("@bob:localhost"));
 	let joined = json!({ "membership": "join" });
-	let create_content = json!({ "creator": alice, "room_version": version });
+	let create_content = |creator| json!({ "creator": creator, "room_version": version });
 	let event = |kind, state_key: &str, content: &Value, auth_events: &[&OwnedEventId]| {
 		state_event(services, &version, room_id, kind, state_key, content, auth_events)
 	};
 
-	let (create_id, room_create) = event("m.room.create", "", &create_content, &[])?;
+	let (create_id, room_create) = event("m.room.create", "", &create_content(bob), &[])?;
+	let (_, bob_join) = event("m.room.member", bob.as_str(), &joined, &[&create_id])?;
+	let (alice_create_id, alice_create) =
+		event("m.room.create", "", &create_content(alice), &[])?;
 	let (alice_join_id, alice_join) =
-		event("m.room.member", alice.as_str(), &joined, &[&create_id])?;
+		event("m.room.member", alice.as_str(), &joined, &[&alice_create_id])?;
 	let state_lock = services.state.mutex.lock(room_id).await;
 
 	store_own_keys(services);
@@ -269,11 +268,11 @@ async fn send_join_state_leaves_other_local_users_alone() -> Result {
 		.get_or_create_shortroomid(room_id)
 		.await;
 
-	let join_auth = [create_id.clone()];
-	let state = raw(&[&room_create, &alice_join])?;
+	let auth_chain = raw(&[&alice_create])?;
+	let state = raw(&[&room_create, &bob_join, &alice_join])?;
 	let state = services
 		.membership
-		.ingest_send_join_events(room_id, bob, &join_auth, &version, &rules, &[], &state)
+		.ingest_send_join_events(room_id, bob, &version, &rules, &auth_chain, &state)
 		.await?;
 
 	services
@@ -288,6 +287,7 @@ async fn send_join_state_leaves_other_local_users_alone() -> Result {
 			.is_joined(alice, room_id)
 			.await
 	);
+	assert!(services.state_cache.is_joined(bob, room_id).await);
 
 	Ok(())
 }
@@ -334,7 +334,6 @@ async fn send_join_state_keeps_other_local_members() -> Result {
 	};
 
 	let create_id = append(bob, PduBuilder::state(String::new(), &create)).await?;
-	let join_auth = [create_id.clone()];
 	let bob_join_id = append(bob, member(bob, MembershipState::Join)).await?;
 	let join_rules_id = append(bob, PduBuilder::state(String::new(), &join_rules)).await?;
 	let alice_join_id = append(alice, member(alice, MembershipState::Join)).await?;
@@ -348,7 +347,7 @@ async fn send_join_state_keeps_other_local_members() -> Result {
 
 	let state = services
 		.membership
-		.ingest_send_join_events(room_id, carol, &join_auth, &version, &rules, &[], &answer)
+		.ingest_send_join_events(room_id, carol, &version, &rules, &[], &answer)
 		.await?;
 
 	services
@@ -413,7 +412,6 @@ async fn send_join_state_follows_other_local_members() -> Result {
 	let (alice, bob) = (user_id!("@alice:localhost"), user_id!("@bob:localhost"));
 	let carol = user_id!("@carol:localhost");
 	let [(create_id, create), (join_id, join)] = room(services, room_id)?;
-	let join_auth = [create_id.clone()];
 	let member = |membership, auth_events: &[&OwnedEventId]| {
 		let content = json!({ "membership": membership });
 		let kind = "m.room.member";
@@ -434,7 +432,7 @@ async fn send_join_state_follows_other_local_members() -> Result {
 	let state = raw(&[&create, &join, &ban])?;
 	let state = services
 		.membership
-		.ingest_send_join_events(room_id, bob, &join_auth, &version, &rules, &[], &state)
+		.ingest_send_join_events(room_id, bob, &version, &rules, &[], &state)
 		.await?;
 
 	services
@@ -446,15 +444,7 @@ async fn send_join_state_follows_other_local_members() -> Result {
 	let state = raw(&[&create, &join, &invite])?;
 	let state: HashSet<_> = services
 		.membership
-		.ingest_send_join_events(
-			room_id,
-			carol,
-			&join_auth,
-			&version,
-			&rules,
-			&auth_chain,
-			&state,
-		)
+		.ingest_send_join_events(room_id, carol, &version, &rules, &auth_chain, &state)
 		.await?
 		.into_values()
 		.collect();
@@ -501,74 +491,16 @@ async fn send_join_refuses_a_rejected_create() -> Result {
 			&[&create_id],
 		)?;
 
-		let join_auth = [create_id.clone()];
 		let state = raw(&[&create, &join])?;
 		let result = services
 			.membership
-			.ingest_send_join_events(room_id, bob, &join_auth, &version, &rules, &[], &state)
+			.ingest_send_join_events(room_id, bob, &version, &rules, &[], &state)
 			.await;
 
 		assert!(result.is_err(), "{room_id} create was accepted");
 		assert!(!services.timeline.pdu_exists(&create_id).await);
 		assert!(!services.timeline.pdu_exists(&join_id).await);
 	}
-
-	Ok(())
-}
-
-/// A send_join answer holding a create the join does not name fails the join
-/// before anything is stored.
-///
-/// Up to room version 11 the room ID does not name the room's create, so the
-/// answering server could add another one, and with it events such as a join of
-/// the local user it names. An answer without it still joins.
-#[tokio::test]
-async fn send_join_refuses_another_create() -> Result {
-	let Some(fixture) = fixture(Figment::new()).await? else {
-		return Ok(());
-	};
-
-	let services = &fixture.services;
-	let bob = user_id!("@bob:localhost");
-	let room_id = room_id!("!join:localhost");
-	let version = RoomVersionId::V11;
-	let rules = room_version::rules(&version)?;
-	let (other_id, other) = create(services, &version, Some(room_id), "@alice:localhost")?;
-	let [(create_id, room_create), (join_id, join)] = room(services, room_id)?;
-	let (alice_id, alice) = state_event(
-		services,
-		&version,
-		room_id,
-		"m.room.member",
-		"@alice:localhost",
-		&json!({ "membership": "join" }),
-		&[&other_id],
-	)?;
-
-	store_own_keys(services);
-
-	let join_auth = [create_id.clone()];
-	let auth_chain = raw(&[&other])?;
-	let state = raw(&[&room_create, &join, &alice])?;
-	let result = services
-		.membership
-		.ingest_send_join_events(room_id, bob, &join_auth, &version, &rules, &auth_chain, &state)
-		.await;
-
-	assert!(result.is_err(), "the other create was accepted");
-	for event_id in [&create_id, &join_id, &other_id, &alice_id] {
-		assert!(!services.timeline.pdu_exists(event_id).await, "{event_id} was stored");
-	}
-
-	let state = raw(&[&room_create, &join])?;
-	let state: HashSet<_> = services
-		.membership
-		.ingest_send_join_events(room_id, bob, &join_auth, &version, &rules, &[], &state)
-		.await?
-		.into_values()
-		.collect();
-
-	assert_eq!(state, HashSet::from([create_id, join_id]));
 
 	Ok(())
 }
