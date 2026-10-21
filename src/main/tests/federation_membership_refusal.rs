@@ -115,6 +115,14 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	ban(services, &admin, &joining, &room_id).await?;
 	assert_refused(services, base, Route::Join, &room_id, &join_event).await?;
 
+	let replaying = register(services, "replaying-refusal").await?;
+	let old_join = prepare(services, &replaying, &room_id, MembershipState::Join).await?;
+
+	assert_join_status(services, base, &room_id, &old_join, 200).await?;
+	assert_join_status(services, base, &room_id, &old_join, 200).await?;
+	ban(services, &admin, &replaying, &room_id).await?;
+	assert_join_status(services, base, &room_id, &old_join, 403).await?;
+
 	let leaving = register(services, "leaving-refusal").await?;
 
 	join_room(services, &leaving, &room_id).await?;
@@ -310,6 +318,22 @@ async fn assert_refused(
 			.is_err_and(|error| error.is_not_found()),
 		"{route:?}: refused event entered the timeline",
 	);
+
+	Ok(())
+}
+
+async fn assert_join_status(
+	services: &Services,
+	base: &str,
+	room_id: &RoomId,
+	event: &MembershipPdu,
+	status: u16,
+) -> Result {
+	let response = Route::Join
+		.send(services, base, room_id, &event.event_id, event.pdu.clone())
+		.await?;
+
+	assert_eq!(response.0, status, "{}", response.1);
 
 	Ok(())
 }
