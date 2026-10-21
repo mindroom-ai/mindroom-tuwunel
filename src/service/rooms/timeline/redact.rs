@@ -10,20 +10,31 @@ use futures::future::join;
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, EventId, RoomId,
 	canonical_json::{RedactedBecause, redact_in_place},
-	events::TimelineEventType,
+	events::{StateEventType, TimelineEventType},
 	room_version_rules::RedactionRules,
 };
 use tuwunel_core::{
 	Result, err, implement,
 	utils::{BoolExt, OptionExt, result::NotFound, to_canonical_object},
 };
-use tuwunel_matrix::event::Event;
+use tuwunel_matrix::{event::Event, pdu::RawPduId};
 
 use crate::rooms::{
 	short::ShortRoomId,
 	threads::{thread_bundle_mut, thread_root},
 	timeline::RoomMutexGuard,
 };
+
+/// How far back from a key's current state a redacted state event is looked
+/// for, in replaced states.
+///
+/// Each step reads one state snapshot under the room guard, as appending one
+/// state event does. A key's whole history is covered only while it has at
+/// most this many replacements. Topic, name, avatar, join rules and power
+/// levels usually stay under that, but any state type can pass it, such as a
+/// topic changed weekly, and a member's event changes on every join, leave and
+/// profile change. The successor of an event past the bound keeps its copy.
+const SUCCESSOR_STEPS: usize = 16;
 
 /// Replaces an accepted PDU with its room-version redacted form.
 ///
@@ -34,7 +45,10 @@ use crate::rooms::{
 /// removed from its root's `m.thread` summary (the count, and the latest event
 /// when it was the latest) in the same write as the accepted row, which also
 /// takes a thread left with no replies off the thread list; a redacted thread
-/// root keeps its summary.
+/// root keeps its summary. A redacted state event that was replaced is redacted
+/// in the `prev_content` of the event that replaced it, in the same write,
+/// unless it was already redacted or is more than `SUCCESSOR_STEPS` replaced
+/// states behind its key's current state.
 #[implement(super::Service)]
 #[tracing::instrument(name = "redact", level = "debug", skip(self))]
 pub async fn redact_pdu<Pdu: Event + Send + Sync>(
@@ -97,6 +111,9 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.redact_pdu(&pdu_id, event_id, &pdu)
 		.await;
 
+	// A repeated redaction does not look for the successor again.
+	let redacted_before = recorded_redaction(&pdu).is_some();
+
 	// Read before redaction strips `m.relates_to`.
 	let root_event_id = pdu.get("content").and_then(thread_root);
 	let keep_thread = root_event_id.as_deref() != Some(event_id);
@@ -117,8 +134,63 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.await
 		.flatten();
 
-	self.replace_redacted_pdu(&pdu_id, &pdu, root)
+	let successor = (!redacted_before)
+		.then_async(|| self.redacted_state_successor(event_id, &pdu))
 		.await
+		.flatten();
+
+	self.replace_redacted_pdu(&pdu_id, &pdu, root, successor)
+		.await
+}
+
+/// The state event that replaced a redacted one, with the redacted content as
+/// its `prev_content`.
+///
+/// `append_pdu` stores the content of the state an event replaces in its
+/// `prev_content`. The room's current state for the redacted event's type and
+/// key is followed back through the state each event replaced, at most
+/// `SUCCESSOR_STEPS` times, until it reaches the redacted event. `None` when
+/// the redacted event is the current state, is not reached, or its successor
+/// has no `prev_content`.
+#[implement(super::Service)]
+async fn redacted_state_successor(
+	&self,
+	event_id: &EventId,
+	redacted: &CanonicalJsonObject,
+) -> Option<(RawPduId, CanonicalJsonObject)> {
+	let room_id: &RoomId = redacted.get("room_id").try_into().ok()?;
+	let kind: StateEventType = redacted.get("type")?.as_str()?.into();
+	let state_key = redacted.get("state_key")?.as_str()?;
+
+	let mut next = self
+		.services
+		.state_accessor
+		.room_state_get(room_id, &kind, state_key)
+		.await
+		.ok()?;
+
+	let mut successor = None;
+	for _ in 0..SUCCESSOR_STEPS {
+		if next.event_id == event_id {
+			break;
+		}
+
+		let prev = self.prev_state(&next, state_key).await?;
+		successor = Some(next);
+		next = prev;
+	}
+
+	(next.event_id == event_id).into_option()?;
+	let pdu_id = self.get_pdu_id(&successor?.event_id).await.ok()?;
+	let mut pdu = self.get_pdu_json_from_id(&pdu_id).await.ok()?;
+	let prev_content = pdu
+		.get_mut("unsigned")
+		.and_then(CanonicalJsonValue::as_object_mut)?
+		.get_mut("prev_content")?;
+
+	*prev_content = redacted.get("content")?.clone();
+
+	Some((pdu_id, pdu))
 }
 
 /// Records an applied redaction on an accepted PDU that does not carry it.
@@ -162,7 +234,7 @@ pub async fn restore_redaction<Pdu: Event + Send + Sync>(
 		return Ok(false);
 	};
 
-	self.replace_redacted_pdu(&pdu_id, &pdu, None)
+	self.replace_redacted_pdu(&pdu_id, &pdu, None, None)
 		.await
 		.map(|()| true)
 }
