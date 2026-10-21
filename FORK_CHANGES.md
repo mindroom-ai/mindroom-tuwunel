@@ -353,18 +353,19 @@ test in `src/main/tests/federation_second_create.rs`.
 
 ### A local user's join is sent by that user
 
-Up to room version 10, the authorization rules accept a join from any sender
-when its only previous event is a create and its state key is the user that
-create names as creator, and a remote event needs only the signature of its
-sender's server. Another server could therefore send a join of a user of this
-server, through the room's own create or a second one, and have it stored and
-applied to the room's state, which recorded the user as joined. This server
-makes the joins of its own users, each sent by the user it joins, so a join of
-a local user sent by anyone else is now refused wherever a remote event is
-checked against its auth events: in transactions, fetched events, `/state_ids`
-answers, backfill and `send_join` answers. The authorization rules are
-unchanged, and other servers' users are not affected. Upstream has the same
-bug. File: `src/service/rooms/event_handler/handle_outlier_pdu.rs`; tests in
+The authorization rules accept a join from any sender when its only previous
+event is a create and its state key is that create's creator: the create's
+`creator` up to room version 10, its sender since room version 11. A remote
+event needs only the signature of its sender's server, so another server could
+send a join of a user of this server, through the room's own create or a second
+one, and have it stored and applied to the room's state, which recorded the
+user as joined. This server makes the joins of its own users, each sent by the
+user it joins, so a join of a local user sent by anyone else is now refused
+wherever a remote event is checked against its auth events: in transactions,
+fetched events, `/state_ids` answers, backfill and `send_join` answers. The
+authorization rules are unchanged, and other servers' users are not affected.
+Upstream has the same bug.
+File: `src/service/rooms/event_handler/handle_outlier_pdu.rs`; tests in
 `src/main/tests/federation_local_join.rs` and
 `src/service/membership/join/tests.rs`.
 

@@ -23,9 +23,10 @@ const MEMBER_TOKEN: &str = "federation-local-join-member-token";
 
 /// A local user's join is sent by that user.
 ///
-/// Up to room version 10, the authorization rules let anyone send the join of
-/// the user the create event names as creator when the create is its only
-/// previous event. Such a join sent by another user does not join the creator
+/// The authorization rules let anyone send the join of a create's creator when
+/// that create is its only previous event: the create's `creator` up to room
+/// version 10, its sender since room version 11. Such a join sent by another
+/// user, even with content the rules do not read, does not join the creator
 /// again after they left, and the creator can still join themselves.
 #[test]
 fn local_join_by_another_sender_is_refused() -> Result {
@@ -66,7 +67,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		"depth": 2,
 		"prev_events": [create_id],
 		"auth_events": [create_id],
-		"content": {"membership": "join"},
+		"content": {"membership": "join", "displayname": 7},
 	}))?;
 
 	let event_id = services

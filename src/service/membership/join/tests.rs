@@ -232,12 +232,13 @@ async fn send_join_state_is_authorized() -> Result {
 
 /// The state of a send_join answer cannot make another local user joined.
 ///
-/// Up to room version 10, a join for the creator a create event names passes
-/// from any sender when that create is its only previous event. Such a join of
-/// a local user sent by anyone else is refused and not stored, unlike one of
-/// another server's user. Their own join, such as an old one, is stored, as
-/// other events may name it, but the joined room's state leaves it out, while
-/// the joining user's own join there still applies.
+/// A join of a create's creator passes the authorization rules from any sender
+/// when that create is its only previous event: the create's `creator` up to
+/// room version 10, its sender since room version 11. Such a join of a local
+/// user sent by anyone else is refused and not stored, unlike one of another
+/// server's user. Their own join, such as an old one, is stored, as other
+/// events may name it, but the joined room's state leaves it out, while the
+/// joining user's own join there still applies.
 #[tokio::test]
 async fn send_join_state_leaves_other_local_users_alone() -> Result {
 	let Some(fixture) = fixture(Figment::new()).await? else {

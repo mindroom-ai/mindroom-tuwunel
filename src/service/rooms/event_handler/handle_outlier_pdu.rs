@@ -3,10 +3,7 @@ use std::{iter::once, sync::atomic::AtomicUsize};
 use futures::{StreamExt, TryFutureExt};
 use ruma::{
 	CanonicalJsonObject, EventId, RoomId, RoomVersionId, ServerName, UserId,
-	events::{
-		StateEventType, TimelineEventType,
-		room::member::{MembershipState, RoomMemberEventContent},
-	},
+	events::{StateEventType, TimelineEventType, room::member::MembershipState},
 	room_version_rules::RoomVersionRules,
 };
 use tuwunel_core::{
@@ -18,7 +15,7 @@ use tuwunel_core::{
 };
 
 use super::upgrade_outlier_pdu::check_create_event_id;
-use crate::rooms::state_res::auth_check;
+use crate::rooms::state_res::{auth_check, events::RoomMemberEvent};
 
 #[implement(super::Service)]
 #[cfg_attr(unabridged, tracing::instrument(
@@ -191,9 +188,10 @@ pub async fn auth_check_by_auth_events(
 /// Whether the event joins a local user but is sent by someone else.
 ///
 /// This server makes the joins of its users, each sent by the user it joins.
-/// Up to room version 10 the authorization rules let anyone send the join of
-/// the user a create event names as creator, which this server refuses for its
-/// own users.
+/// The authorization rules let anyone send the join of a create's creator when
+/// that create is its only previous event: the create's `creator` up to room
+/// version 10, its sender since room version 11. This server refuses such a
+/// join for its own users. Only `membership` is read, as the rules read it.
 #[implement(super::Service)]
 fn is_local_join_by_another_sender(&self, event: &PduEvent) -> bool {
 	let local_but_not_sender = |state_key: &str| {
@@ -206,7 +204,7 @@ fn is_local_join_by_another_sender(&self, event: &PduEvent) -> bool {
 		&& event
 			.state_key()
 			.is_some_and(local_but_not_sender)
-		&& event
-			.get_content::<RoomMemberEventContent>()
-			.is_ok_and(|content| content.membership == MembershipState::Join)
+		&& RoomMemberEvent::new(event)
+			.membership()
+			.is_ok_and(|membership| membership == MembershipState::Join)
 }
