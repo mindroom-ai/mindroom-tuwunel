@@ -26,6 +26,14 @@ pub(crate) use self::{
 	set_room_account_data::set_room_account_data_route,
 };
 
+/// Largest `m.ignored_user_list` content stored, in bytes.
+///
+/// The whole list is read and parsed for every event another user sends in a
+/// room its owner is in, so its size bounds that per-event work. A mebibyte
+/// holds about 4,000 user IDs of the maximum 255 bytes, and over 30,000 of
+/// ordinary length.
+const MAX_IGNORED_USER_LIST_BYTES: usize = 1_048_576;
+
 fn assert_account_data_owner(
 	sender_user: &UserId,
 	user_id: &UserId,
@@ -49,6 +57,7 @@ async fn set_account_data(
 	data: &RawJsonValue,
 ) -> Result {
 	validate_event_type(event_type_s)?;
+	validate_content_size(event_type_s, data)?;
 
 	let data: serde_json::Value = serde_json::from_str(data.get())
 		.map_err(|e| err!(Request(BadJson(warn!("Invalid JSON provided: {e}")))))?;
@@ -79,6 +88,16 @@ fn validate_event_type(event_type: &str) -> Result {
 		return Err!(Request(BadJson(
 			"This endpoint cannot be used for setting/configuring push rules."
 		)));
+	}
+
+	Ok(())
+}
+
+fn validate_content_size(event_type: &str, data: &RawJsonValue) -> Result {
+	if event_type == GlobalAccountDataEventType::IgnoredUserList.to_cow_str()
+		&& data.get().len() > MAX_IGNORED_USER_LIST_BYTES
+	{
+		return Err!(Request(TooLarge("The ignored user list is too large.")));
 	}
 
 	Ok(())
