@@ -1030,6 +1030,15 @@ async fn try_user_id(
 		return None;
 	}
 
+	if services
+		.appservice
+		.is_exclusive_user_id(&user_id)
+		.await
+	{
+		debug_warn!(?username, "Username reserved by an appservice.");
+		return None;
+	}
+
 	if services.users.exists(&user_id).await {
 		if provider.trusted {
 			info!(

@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+mod appservice;
 #[expect(
 	dead_code,
 	reason = "Only listener readiness is shared with the client API harness."
@@ -29,7 +30,10 @@ use tuwunel_service::{
 	oauth::{fallback_localpart, unique_id_sub},
 };
 
-use self::fixture::boot;
+use self::{
+	appservice::{Bridge, register_appservice},
+	fixture::boot,
+};
 
 type TokenForm = HashMap<String, String>;
 
@@ -41,7 +45,8 @@ const CLIENT: &str = "https://client.example/callback";
 /// Alice claims the localpart derived from Bob's subject as her username, so
 /// Bob, whose own claimed username is then taken, falls back to her account.
 /// His callback must answer 400 and leave his identity unlinked, while Carol
-/// still reaches her own fallback account after an admin unlinks her.
+/// still reaches her own fallback account after an admin unlinks her. Dave
+/// claims a username an appservice reserves, so he gets his fallback account.
 #[test]
 fn sso_fallback_account() -> Result {
 	let provider = TcpListener::bind(("127.0.0.1", 0))?;
@@ -163,6 +168,21 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let response = sign_in(&client, base, "carol", &fallback).await?;
 
 	assert_eq!(signed_in(services, &response).await?, account);
+
+	let bridge = Bridge {
+		id: "sso-fallback-bridge",
+		token: "sso-fallback-bridge-token",
+		sender_localpart: "bridge",
+		users: "^@bridge_.*:.*$",
+		aliases: None,
+	};
+
+	register_appservice(services, &bridge).await?;
+
+	let dave = unique_id_sub((&provider, "dave"))?;
+	let response = sign_in(&client, base, "dave", "bridge_dave").await?;
+
+	assert_eq!(fallback_localpart(&dave), signed_in(services, &response).await?.localpart());
 
 	Ok(())
 }
