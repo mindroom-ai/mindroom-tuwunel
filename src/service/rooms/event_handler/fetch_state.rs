@@ -1,5 +1,5 @@
 use std::{
-	collections::{HashMap, hash_map},
+	collections::{HashMap, HashSet, hash_map},
 	sync::atomic::AtomicUsize,
 };
 
@@ -18,7 +18,8 @@ use crate::{
 
 #[derive(Deserialize)]
 struct StateIdsResponse {
-	pdu_ids: Vec<OwnedEventId>,
+	/// Each event once, however often the answer names it.
+	pdu_ids: HashSet<OwnedEventId>,
 }
 
 /// Call /state_ids to find out what the state at this pdu is. We trust the

@@ -13,7 +13,7 @@ use ruma::{
 };
 use serde_json::value::RawValue as RawJsonValue;
 use tuwunel_core::{
-	Err, Result, at, debug_error, err,
+	Err, Result, debug_error, err,
 	itertools::Itertools,
 	matrix::{
 		RoomVersionRules, event::gen_event_id_canonical_json, pdu::check_raw_size, room_version,
@@ -190,14 +190,26 @@ async fn create_join_event(
 		.lock(room_id)
 		.await;
 
-	let pdu_id = services
+	let (pdu_id, appended) = services
 		.event_handler
 		.handle_incoming_pdu(&origin, room_id, &event_id, value.clone(), true)
 		.await?
-		.map(at!(0))
 		.ok_or_else(|| err!(Request(Forbidden("Could not accept as timeline event."))))?;
 
 	drop(mutex_lock);
+
+	// A join we already have is answered again only while the user is still
+	// joined, as a retry; an old join of a user who has since left is refused.
+	if !appended
+		&& !services
+			.state_cache
+			.is_joined(&joining_user, room_id)
+			.await
+	{
+		return Err!(Request(Forbidden(
+			"Join event was already handled and its user is no longer joined."
+		)));
+	}
 
 	// Wait for state gather which the remaining operations depend on.
 	let state_ids = state_ids
