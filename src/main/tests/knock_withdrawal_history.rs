@@ -93,17 +93,25 @@ async fn withdrawn_knock(owner: &Client<'_>, member: &Client<'_>, member_id: &Us
 
 	let initial_sync_name = room_name(&initial_sync["state"]);
 
+	let filter = json!({ "room": { "include_leave": true } }).to_string();
+	let filter = ("filter", filter.as_str());
+	let knocking_sync = member.get("sync", &[filter]).await?;
+	let since = knocking_sync["next_batch"]
+		.as_str()
+		.unwrap_or_default();
+
 	member
 		.post(&format!("rooms/{room_id}/leave"), &json!({}))
 		.await?;
 
 	let withdrawn_name = member.get(&name_path, &[]).await?;
 
-	let filter = json!({ "room": { "include_leave": true } }).to_string();
-	let filter = ("filter", filter.as_str());
 	let sync = member.get("sync", &[filter]).await?;
 	let sync_after = member
 		.get("sync", &[filter, ("use_state_after", "true")])
+		.await?;
+	let sync_since = member
+		.get("sync", &[filter, ("since", since)])
 		.await?;
 
 	let left_room_name = |sync: &Value, state: &str| {
@@ -126,6 +134,15 @@ async fn withdrawn_knock(owner: &Client<'_>, member: &Client<'_>, member_id: &Us
 		left_room_name(&sync_after, "state_after"),
 		Some(json!("before")),
 		"withdrawn knock's left room state_after has the new name: {sync_after}"
+	);
+	assert!(
+		sync_since["rooms"]["leave"][room_id.as_str()].is_object(),
+		"sync since the knock lacks the left room: {sync_since}"
+	);
+	assert_eq!(
+		left_room_name(&sync_since, "state"),
+		None,
+		"sync since the knock shows the name changed after the kick: {sync_since}"
 	);
 
 	let messages = member
