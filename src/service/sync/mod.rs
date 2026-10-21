@@ -121,9 +121,9 @@ const LISTS_MAX: usize = 64;
 
 /// The longest list ID one connection keeps, in bytes, as in Synapse.
 ///
-/// Each room in the window carries the IDs of the lists it matched and is
-/// copied with them for every range it is selected in, so a list with a longer
-/// ID is ignored, and so is such an ID in an extension filter.
+/// Each room in the window carries the IDs of the lists it matched, and every
+/// range of every list looks for its ID among them, so a list with a longer ID
+/// is ignored, and so is such an ID in an extension filter.
 const LIST_ID_MAX: usize = 64;
 
 /// The most entries one list filter keeps of its spaces, tags and room types.
@@ -135,7 +135,7 @@ const LIST_FILTER_MAX: usize = 16;
 /// The most ranges one list uses.
 ///
 /// Each range is selected from the rooms of the window, so only the first this
-/// many ranges of a list are kept.
+/// many distinct ranges of a list are kept.
 const RANGES_MAX: usize = 16;
 
 /// The most rooms one extension filter names.
@@ -447,7 +447,7 @@ fn update_cache_lists(request: &Request, cached: &mut Self) -> bool {
 
 #[implement(Connection)]
 fn update_cache_list(request: &request::List, cached: &mut request::List) -> bool {
-	let ranges = &request.ranges[..request.ranges.len().min(RANGES_MAX)];
+	let ranges = first_distinct(&request.ranges, RANGES_MAX);
 	let ranges_changed = ranges != cached.ranges.as_slice();
 	let timeline_limit_changed =
 		request.room_details.timeline_limit != cached.room_details.timeline_limit;
@@ -531,19 +531,19 @@ fn kept_list_filters(filters: &request::ListFilters) -> request::ListFilters {
 		is_dm: filters.is_dm,
 		is_encrypted: filters.is_encrypted,
 		is_invite: filters.is_invite,
-		room_types: first_distinct(&filters.room_types),
-		not_room_types: first_distinct(&filters.not_room_types),
-		tags: first_distinct(&filters.tags),
-		not_tags: first_distinct(&filters.not_tags),
-		spaces: first_distinct(&filters.spaces),
+		room_types: first_distinct(&filters.room_types, LIST_FILTER_MAX),
+		not_room_types: first_distinct(&filters.not_room_types, LIST_FILTER_MAX),
+		tags: first_distinct(&filters.tags, LIST_FILTER_MAX),
+		not_tags: first_distinct(&filters.not_tags, LIST_FILTER_MAX),
+		spaces: first_distinct(&filters.spaces, LIST_FILTER_MAX),
 	}
 }
 
-fn first_distinct<T: Clone + PartialEq>(entries: &[T]) -> Vec<T> {
+fn first_distinct<T: Clone + PartialEq>(entries: &[T], max: usize) -> Vec<T> {
 	entries
 		.iter()
 		.fold(Vec::new(), |mut kept, entry| {
-			if kept.len() < LIST_FILTER_MAX && !kept.contains(entry) {
+			if kept.len() < max && !kept.contains(entry) {
 				kept.push(entry.clone());
 			}
 
