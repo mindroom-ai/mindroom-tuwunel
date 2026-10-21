@@ -515,12 +515,12 @@ room's current state, so a user who had left or been kicked or banned kept
 seeing later renames, topics, power levels and new members. A former member
 now reads the state as of their leave or ban, as the spec requires and as
 `/initialSync` already did. Knocking again, or withdrawing that knock, does not
-move this point: these routes and `/initialSync` serve the state after the
-leave or ban that ended the user's last join, found by the same walk that
-bounds their history. Upstream has the same bug. Files:
+move this point: these routes, `/initialSync` and a left room in `/sync` serve
+the state after the leave or ban that ended the user's last join, found by the
+same walk that bounds their history. Upstream has the same bug. Files:
 `src/service/rooms/state_accessor/user_can.rs`,
-`src/api/client/{state.rs,membership/members.rs,room/initial_sync.rs}`; tests
-in `src/main/tests/{state_departed_member.rs,knock_withdrawal_history.rs}`.
+`src/api/client/{state.rs,membership/members.rs,room/initial_sync.rs,sync/v3.rs}`;
+tests in `src/main/tests/{state_departed_member.rs,knock_withdrawal_history.rs}`.
 
 ### The room summary is not given to former members
 

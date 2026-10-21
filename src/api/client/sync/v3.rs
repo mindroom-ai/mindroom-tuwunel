@@ -921,6 +921,8 @@ async fn load_left_room(
 	.await
 	.unwrap_or_default();
 
+	let clamp_to_departure = departure_clamp(services, sender_user, room_id).await?;
+
 	let since_shortstatehash = services
 		.timeline
 		.next_shortstatehash(room_id, PduCount::Normal(since))
@@ -933,6 +935,7 @@ async fn load_left_room(
 			services
 				.timeline
 				.get_shortstatehash(room_id, count)
+				.map_ok(move |snapshot| clamp_to_departure(count, snapshot))
 				.inspect_err(log_horizon_error)
 				.ok()
 		});
@@ -942,6 +945,7 @@ async fn load_left_room(
 		services
 			.timeline
 			.shortstatehash_after(room_id, PduCount::Normal(left_count))
+			.map_ok(|snapshot| clamp_to_departure(PduCount::Normal(left_count), snapshot))
 			.inspect_err(inspect_debug_log)
 	});
 
@@ -950,6 +954,7 @@ async fn load_left_room(
 		.get_shortstatehash(room_id, PduCount::Normal(left_count))
 		.inspect_err(inspect_debug_log)
 		.or_else(|_| services.state.get_room_shortstatehash(room_id))
+		.map_ok(|snapshot| clamp_to_departure(PduCount::Normal(left_count), snapshot))
 		.map_err(|_| err!(Database(error!("Room {room_id} has no state"))));
 
 	let (since_shortstatehash, horizon_shortstatehash, after_shortstatehash, left_shortstatehash) =
@@ -1070,6 +1075,42 @@ async fn load_left_room(
 				.collect(),
 		},
 	}))
+}
+
+/// Clamps a left room's state snapshots to the user's departure.
+///
+/// A former member reads the state no later than the leave or ban that ended
+/// their last join, though a withdrawn knock or a rejected invite since then
+/// gives them a later leave. A snapshot at a count past that departure becomes
+/// the state after it; any other snapshot, and every snapshot of a user who
+/// never joined, stays as it is.
+async fn departure_clamp(
+	services: &Services,
+	sender_user: &UserId,
+	room_id: &RoomId,
+) -> Result<impl Fn(PduCount, ShortStateHash) -> ShortStateHash + Copy + use<>> {
+	let departure = if services
+		.state_cache
+		.once_joined(sender_user, room_id)
+		.await
+	{
+		let current = services
+			.state
+			.get_room_shortstatehash(room_id)
+			.await?;
+
+		services
+			.state_accessor
+			.user_departure(sender_user, room_id, current)
+			.await?
+	} else {
+		None
+	};
+
+	Ok(move |count: PduCount, snapshot: ShortStateHash| match departure {
+		| Some((departure, departed)) if count > departure => departed,
+		| _ => snapshot,
+	})
 }
 
 /// Records a failed horizon read, quietly when the row is simply absent.

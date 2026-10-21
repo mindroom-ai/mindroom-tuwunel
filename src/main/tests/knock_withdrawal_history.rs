@@ -88,18 +88,24 @@ async fn withdrawn_knock(owner: &Client<'_>, member: &Client<'_>, member_id: &Us
 		.get(&format!("rooms/{room_id}/initialSync"), &[])
 		.await?;
 
-	let initial_sync_name = initial_sync["state"]
-		.as_array()
-		.into_iter()
-		.flatten()
-		.find(|event| event["type"] == "m.room.name")
-		.map(|event| &event["content"]["name"]);
+	let initial_sync_name = room_name(&initial_sync["state"]);
 
 	member
 		.post(&format!("rooms/{room_id}/leave"), &json!({}))
 		.await?;
 
 	let withdrawn_name = member.get(&name_path, &[]).await?;
+
+	let filter = json!({ "room": { "include_leave": true } }).to_string();
+	let filter = ("filter", filter.as_str());
+	let sync = member.get("sync", &[filter]).await?;
+	let sync_after = member
+		.get("sync", &[filter, ("use_state_after", "true")])
+		.await?;
+
+	let left_room_name = |sync: &Value, state: &str| {
+		room_name(&sync["rooms"]["leave"][room_id.as_str()][state]["events"]).cloned()
+	};
 
 	assert_eq!(knocking_name["name"], "before", "knocking member reads the new name");
 	assert_eq!(
@@ -108,6 +114,16 @@ async fn withdrawn_knock(owner: &Client<'_>, member: &Client<'_>, member_id: &Us
 		"knocking member's initialSync has the new name: {initial_sync}"
 	);
 	assert_eq!(withdrawn_name["name"], "before", "withdrawn knock reads the new name");
+	assert_eq!(
+		left_room_name(&sync, "state"),
+		Some(json!("before")),
+		"withdrawn knock's left room has the new name: {sync}"
+	);
+	assert_eq!(
+		left_room_name(&sync_after, "state_after"),
+		Some(json!("before")),
+		"withdrawn knock's left room state_after has the new name: {sync_after}"
+	);
 
 	let messages = member
 		.get(&format!("rooms/{room_id}/messages"), &[("dir", "b")])
@@ -128,6 +144,16 @@ async fn withdrawn_knock(owner: &Client<'_>, member: &Client<'_>, member_id: &Us
 	assert!(own_join, "member loses its own join: {messages}");
 
 	Ok(())
+}
+
+/// The room name in one list of state events.
+fn room_name(events: &Value) -> Option<&Value> {
+	events
+		.as_array()
+		.into_iter()
+		.flatten()
+		.find(|event| event["type"] == "m.room.name")
+		.map(|event| &event["content"]["name"])
 }
 
 /// The message bodies in one `/messages` reply.
