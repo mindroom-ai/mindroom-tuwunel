@@ -144,7 +144,9 @@ topic set before this server joined, did nothing without a timeline row, so the
 full event stayed readable, also to local users who joined later. The outlier
 is now replaced by its redacted form, with the original retained as for
 timeline events. Upgrading it into the timeline later reuses that copy, and a
-redacted copy fetched again, as by backfill, is refused as already known.
+redacted copy fetched again, as peers that applied the redaction serve it, is
+refused as already known, so the event stays redacted. A peer still serving the
+unredacted original can bring it back when it is fetched again.
 Upstream has the same bug. File: `src/service/rooms/timeline/redact.rs`; test
 in the same file.
 
