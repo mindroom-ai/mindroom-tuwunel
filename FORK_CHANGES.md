@@ -373,8 +373,10 @@ their old join joined them again. The member event the room's state has for a
 local user other than the joining user now stays, unless the answer has later
 ones for them that follow it through their auth events, such as an unban and
 then a new invite. Knock state, which leaves member events out, likewise keeps
-the member events the room's state has for other local users. Upstream has the
-same bug. Files: `src/service/membership/{join.rs,knock.rs}`; tests in
+the member events the room's state has for other local users. A join of a local
+user that the user did not send is refused before any of this, as described
+under "A local user's join is sent by that user". Upstream has the same bug.
+Files: `src/service/membership/{join.rs,knock.rs}`; tests in
 `src/service/membership/{join,knock}/tests.rs`.
 
 ### send_join answers an old join only while its user is joined
@@ -420,12 +422,33 @@ In room versions 1 to 11, an `m.room.create` event for a room this server is
 in, other than the room's own create, passed the authorization rules when it
 came from the server named in the room ID, since a create event has no rules
 that depend on the room state. It was added to the timeline and resolved into
-the current state, where it could take the place of the room's create. Such an
-event is now refused before it reaches the timeline or the room state, whether
-it arrives in a transaction or as a fetched prev event. The authorization rules
-are unchanged. Upstream has the same bug.
-File: `src/service/rooms/event_handler/upgrade_outlier_pdu.rs`; test in
-`src/main/tests/federation_second_create.rs`.
+the current state, where it could take the place of the room's create. It was
+also stored as an outlier when it arrived in a transaction, as a fetched auth
+event or in a `/state_ids` answer, and events naming it as an auth event were
+authorized against it, so state resolution could apply them. Such a create is
+now refused before it is stored, and so is an event naming another create as
+an auth event, even when that create was stored earlier. The authorization
+rules are unchanged. Upstream has the same bug.
+Files: `src/service/rooms/event_handler/{handle_outlier_pdu,upgrade_outlier_pdu}.rs`;
+test in `src/main/tests/federation_second_create.rs`.
+
+### A local user's join is sent by that user
+
+The authorization rules accept a join from any sender when its only previous
+event is a create and its state key is that create's creator: the create's
+`creator` up to room version 10, its sender since room version 11. A remote
+event needs only the signature of its sender's server, so another server could
+send a join of a user of this server, through the room's own create or a second
+one, and have it stored and applied to the room's state, which recorded the
+user as joined. This server makes the joins of its own users, each sent by the
+user it joins, so a join of a local user sent by anyone else is now refused
+wherever a remote event is checked against its auth events: in transactions,
+fetched events, `/state_ids` answers, backfill and `send_join` answers. The
+authorization rules are unchanged, and other servers' users are not affected.
+Upstream has the same bug.
+File: `src/service/rooms/event_handler/handle_outlier_pdu.rs`; tests in
+`src/main/tests/federation_local_join.rs` and
+`src/service/membership/join/tests.rs`.
 
 ### Rooms created in the same millisecond get their own room IDs
 

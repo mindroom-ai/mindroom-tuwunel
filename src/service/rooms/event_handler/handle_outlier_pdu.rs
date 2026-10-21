@@ -1,8 +1,9 @@
-use std::sync::atomic::AtomicUsize;
+use std::{iter::once, sync::atomic::AtomicUsize};
 
 use futures::{StreamExt, TryFutureExt};
 use ruma::{
-	CanonicalJsonObject, EventId, RoomId, RoomVersionId, ServerName, events::TimelineEventType,
+	CanonicalJsonObject, EventId, RoomId, RoomVersionId, ServerName, UserId,
+	events::{StateEventType, TimelineEventType, room::member::MembershipState},
 	room_version_rules::RoomVersionRules,
 };
 use tuwunel_core::{
@@ -13,7 +14,8 @@ use tuwunel_core::{
 	warn,
 };
 
-use crate::rooms::state_res::auth_check;
+use super::upgrade_outlier_pdu::check_create_event_id;
+use crate::rooms::state_res::{auth_check, events::RoomMemberEvent};
 
 #[implement(super::Service)]
 #[cfg_attr(unabridged, tracing::instrument(
@@ -126,13 +128,20 @@ pub(super) async fn handle_outlier_pdu(
 /// Checks an event against the stored auth events it names.
 ///
 /// In room versions that derive the room ID from the create event, the create
-/// event is also taken as an auth event. A missing auth event fails the check.
+/// event is also taken as an auth event. A missing auth event fails the check,
+/// and so does a create event other than the room's, as the event itself or
+/// as one of its auth events, once this server has the room's state. A join of
+/// a local user sent by anyone else fails too.
 #[implement(super::Service)]
 pub async fn auth_check_by_auth_events(
 	&self,
 	event: &PduEvent,
 	room_rules: &RoomVersionRules,
 ) -> Result {
+	if self.is_local_join_by_another_sender(event) {
+		return Err!(Request(Forbidden("A local user's join must be sent by that user.")));
+	}
+
 	let is_hydra = !room_rules
 		.event_format
 		.allow_room_create_in_auth_events;
@@ -160,7 +169,42 @@ pub async fn auth_check_by_auth_events(
 		.collect()
 		.await;
 
+	if let Ok(create_event_id) = self
+		.services
+		.state_accessor
+		.room_state_get_id(event.room_id(), &StateEventType::RoomCreate, "")
+		.await
+	{
+		once(event)
+			.chain(auth_events.iter().map(|(_, pdu)| pdu))
+			.try_for_each(|pdu| check_create_event_id(pdu, &create_event_id))?;
+	}
+
 	auth_check(room_rules, event, &*self.services.timeline, auth_events.as_slice())
 		.await?
 		.into_result()
+}
+
+/// Whether the event joins a local user but is sent by someone else.
+///
+/// This server makes the joins of its users, each sent by the user it joins.
+/// The authorization rules let anyone send the join of a create's creator when
+/// that create is its only previous event: the create's `creator` up to room
+/// version 10, its sender since room version 11. This server refuses such a
+/// join for its own users. Only `membership` is read, as the rules read it.
+#[implement(super::Service)]
+fn is_local_join_by_another_sender(&self, event: &PduEvent) -> bool {
+	let local_but_not_sender = |state_key: &str| {
+		state_key != event.sender().as_str()
+			&& UserId::parse(state_key)
+				.is_ok_and(|user_id| self.services.globals.user_is_local(&user_id))
+	};
+
+	*event.kind() == TimelineEventType::RoomMember
+		&& event
+			.state_key()
+			.is_some_and(local_but_not_sender)
+		&& RoomMemberEvent::new(event)
+			.membership()
+			.is_ok_and(|membership| membership == MembershipState::Join)
 }

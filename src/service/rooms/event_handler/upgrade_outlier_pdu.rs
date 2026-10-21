@@ -272,7 +272,10 @@ pub(super) async fn upgrade_outlier_to_timeline_pdu(
 
 /// A room has exactly one create event: refuse any other before it can reach
 /// the timeline or be resolved into the room state.
-fn check_create_event_id(incoming_pdu: &PduEvent, create_event_id: &EventId) -> Result {
+pub(super) fn check_create_event_id(
+	incoming_pdu: &PduEvent,
+	create_event_id: &EventId,
+) -> Result {
 	if *incoming_pdu.kind() == TimelineEventType::RoomCreate
 		&& incoming_pdu.event_id() != create_event_id
 	{

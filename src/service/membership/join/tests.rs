@@ -232,11 +232,13 @@ async fn send_join_state_is_authorized() -> Result {
 
 /// The state of a send_join answer cannot make another local user joined.
 ///
-/// Up to room version 10, a join for the creator a create event names passes
-/// from any sender when that create is its only previous event, so a second
-/// create naming a local user lets the answering server join them. Their join
-/// is stored, as other events may name it, but the joined room's state leaves
-/// it out, while the joining user's own join there still applies.
+/// A join of a create's creator passes the authorization rules from any sender
+/// when that create is its only previous event: the create's `creator` up to
+/// room version 10, its sender since room version 11. Such a join of a local
+/// user sent by anyone else is refused and not stored, unlike one of another
+/// server's user. Their own join, such as an old one, is stored, as other
+/// events may name it, but the joined room's state leaves it out, while the
+/// joining user's own join there still applies.
 #[tokio::test]
 async fn send_join_state_leaves_other_local_users_alone() -> Result {
 	let Some(fixture) = fixture(Figment::new()).await? else {
@@ -258,8 +260,25 @@ async fn send_join_state_leaves_other_local_users_alone() -> Result {
 	let (_, bob_join) = event("m.room.member", bob.as_str(), &joined, &[&create_id])?;
 	let (alice_create_id, alice_create) =
 		event("m.room.create", "", &create_content(alice), &[])?;
-	let (alice_join_id, alice_join) =
+	let (forced_id, forced) =
 		event("m.room.member", alice.as_str(), &joined, &[&alice_create_id])?;
+	let carol = user_id!("@carol:remote.test");
+	let (carol_create_id, carol_create) =
+		event("m.room.create", "", &create_content(carol), &[])?;
+	let (carol_join_id, carol_join) =
+		event("m.room.member", carol.as_str(), &joined, &[&carol_create_id])?;
+
+	// The same join, sent by alice herself.
+	let mut own: CanonicalJsonObject = serde_json::from_value(forced.clone())?;
+	own.remove("hashes");
+	own.remove("signatures");
+	own.insert("sender".into(), alice.as_str().into());
+	services
+		.server_keys
+		.hash_and_sign_event(&mut own, &version)?;
+
+	let alice_join_id = gen_event_id(&own, &version)?;
+	let alice_join = serde_json::to_value(own)?;
 	let state_lock = services.state.mutex.lock(room_id).await;
 
 	store_own_keys(services);
@@ -268,7 +287,7 @@ async fn send_join_state_leaves_other_local_users_alone() -> Result {
 		.get_or_create_shortroomid(room_id)
 		.await;
 
-	let auth_chain = raw(&[&alice_create])?;
+	let auth_chain = raw(&[&alice_create, &forced, &carol_create, &carol_join])?;
 	let state = raw(&[&room_create, &bob_join, &alice_join])?;
 	let state = services
 		.membership
@@ -281,6 +300,8 @@ async fn send_join_state_leaves_other_local_users_alone() -> Result {
 		.await?;
 
 	assert!(services.timeline.pdu_exists(&alice_join_id).await);
+	assert!(!services.timeline.pdu_exists(&forced_id).await);
+	assert!(services.timeline.pdu_exists(&carol_join_id).await);
 	assert!(
 		!services
 			.state_cache
