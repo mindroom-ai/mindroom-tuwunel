@@ -449,6 +449,23 @@ comes. Upstream has the same bug. Files:
 `src/main/tests/federation_inbound_parse.rs` and
 `src/main/tests/federation_origin_key_fetch.rs`.
 
+### Client bodies are parsed after authentication
+
+A client request's body was also parsed into a JSON tree before the request
+was authenticated, on every route. A body can be up to `max_request_size`
+(24 MiB by default) and its tree many times that, about a hundred times for an
+array of small objects, so a few requests without an access token could take
+gigabytes. Only a federation request needs its body before authentication, to
+check the signature over it. A client request is now authenticated first, so a
+route that needs an account refuses a request without one before its body is
+read, and a malformed body sent without the credentials a route needs gets the
+authentication error rather than `M_NOT_JSON`. A request without an
+authenticated user, as for login, registration and token requests, is refused
+with `M_TOO_LARGE` when its body holds more than 1,024 brackets, commas and
+colons outside strings; those bodies hold a few dozen values. Upstream has
+the same bug. File: `src/api/router/args.rs`; test in
+`src/main/tests/client_body_after_auth.rs`.
+
 ### Missing-event and state id answers are read up to a limit
 
 An incoming event whose prev events are missing asks the sending server for
