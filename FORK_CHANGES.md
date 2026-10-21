@@ -218,6 +218,19 @@ size. Files:
 `src/service/sending/{mod.rs,sender/mod.rs}`; test in
 `src/main/tests/edu_content_size.rs`.
 
+### The ignored user list is bounded in size
+
+A user's `m.ignored_user_list` was stored at any size the request limit allowed
+(24 MiB by default). The whole list is read and parsed for every event another
+user sends in a room the owner is in, and no later change on the server reaches
+`/sync` until that is done. A list of 24 MiB took about 0.2 s to parse, so each
+such event held up sync for everyone. The list is now refused with 413
+`M_TOO_LARGE` over 1 MiB, which holds about 4,000 user IDs of the maximum
+length and over 30,000 of ordinary length, and parses in a few milliseconds.
+Upstream has the same bug; it bounds push rules, which are matched per event
+the same way, since v1.9.0. File: `src/api/client/account_data/mod.rs`; test in
+`src/main/tests/ignored_user_list_size.rs`.
+
 ### Federated read receipts need a joined user
 
 An `m.receipt` EDU from another server was stored for any of that server's
