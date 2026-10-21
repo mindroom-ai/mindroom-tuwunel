@@ -1,7 +1,8 @@
-use axum::extract::State;
-use ruma::api::federation::openid::get_openid_userinfo;
+use axum::{Json, extract::State};
+use ruma::{OwnedRoomId, api::federation::openid::get_openid_userinfo};
 use serde::Deserialize;
-use tuwunel_core::{Result, err, http::Uri};
+use serde_json::{Value, json};
+use tuwunel_core::{Err, Result, err, http::Uri};
 
 use crate::Ruma;
 
@@ -13,6 +14,13 @@ struct AudienceQuery {
 	audience: Option<String>,
 }
 
+/// Room the token's user must be joined to.
+#[derive(Deserialize)]
+struct RoomQuery {
+	#[serde(rename = "io.mindroom.room_id")]
+	room_id: Option<OwnedRoomId>,
+}
+
 /// # `GET /_matrix/federation/v1/openid/userinfo`
 ///
 /// Get information about the user that generated the OpenID token.
@@ -20,13 +28,17 @@ struct AudienceQuery {
 /// - With `mindroom_openid_audience` and `io.mindroom.audience`, only a token
 ///   bound to that audience verifies; without the parameter, only an unbound
 ///   token does. Without `mindroom_openid_audience` the parameter is ignored.
+/// - With `io.mindroom.room_id`, the token verifies only when its user is
+///   joined to that room, and the response says so with
+///   `"io.mindroom.room_joined": true`, which a server that ignores the
+///   parameter never sends.
 pub(crate) async fn get_openid_userinfo_route(
 	State(services): State<crate::State>,
 	uri: Uri,
 	body: Ruma<get_openid_userinfo::v1::Request>,
-) -> Result<get_openid_userinfo::v1::Response> {
+) -> Result<Json<Value>> {
+	let query = uri.query().unwrap_or_default();
 	let audience = if services.config.mindroom_openid_audience {
-		let query = uri.query().unwrap_or_default();
 		let AudienceQuery { audience } = serde_html_form::from_str(query).map_err(|_| {
 			err!(Request(InvalidParam("Invalid `io.mindroom.audience` parameter")))
 		})?;
@@ -35,10 +47,25 @@ pub(crate) async fn get_openid_userinfo_route(
 		None
 	};
 
-	Ok(get_openid_userinfo::v1::Response::new(
-		services
-			.users
-			.find_from_openid_token(&body.access_token, audience.as_deref())
-			.await?,
-	))
+	let RoomQuery { room_id } = serde_html_form::from_str(query)
+		.map_err(|_| err!(Request(InvalidParam("Invalid `io.mindroom.room_id` parameter"))))?;
+
+	let sub = services
+		.users
+		.find_from_openid_token(&body.access_token, audience.as_deref())
+		.await?;
+
+	let Some(room_id) = room_id else {
+		return Ok(Json(json!({ "sub": sub })));
+	};
+
+	if !services
+		.state_cache
+		.is_joined(&sub, &room_id)
+		.await
+	{
+		return Err!(Request(Forbidden("The token's user is not joined to the room")));
+	}
+
+	Ok(Json(json!({ "sub": sub, "io.mindroom.room_joined": true })))
 }
