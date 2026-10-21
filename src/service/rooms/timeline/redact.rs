@@ -29,9 +29,11 @@ use crate::rooms::{
 /// for, in replaced states.
 ///
 /// Each step reads one state snapshot under the room guard, as appending one
-/// state event does. A topic or name changes a few times in a room's life, but
-/// a member's event changes on every join, leave and profile change, so an
-/// older member event may be past the bound and its successor keep its copy.
+/// state event does. A key's whole history is covered only while it has at
+/// most this many replacements. Topic, name, avatar, join rules and power
+/// levels usually stay under that, but any state type can pass it, such as a
+/// topic changed weekly, and a member's event changes on every join, leave and
+/// profile change. The successor of an event past the bound keeps its copy.
 const SUCCESSOR_STEPS: usize = 16;
 
 /// Replaces an accepted PDU with its room-version redacted form.
