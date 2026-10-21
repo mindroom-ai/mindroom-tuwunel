@@ -16,7 +16,10 @@ use super::{
 	auth::{Auth, AuthDispatch, Scheme, auth, origin_key},
 	request::{Request, from as request_from},
 };
-use crate::{State, client::admin::require_admin};
+use crate::{
+	State,
+	client::admin::{mas::Mas, require_admin},
+};
 
 /// Extracts a typed Ruma request and its authentication context.
 ///
@@ -152,9 +155,10 @@ where
 		let json_body = match federation {
 			| true => json_body,
 			| false => {
-				if auth.sender_user.is_none()
-					&& json_tokens(&request.body) > MAX_ANONYMOUS_JSON_TOKENS
-				{
+				let anonymous =
+					auth.sender_user.is_none() && request.parts.extensions.get::<Mas>().is_none();
+
+				if anonymous && json_tokens(&request.body) > MAX_ANONYMOUS_JSON_TOKENS {
 					return Err!(Request(TooLarge(
 						"Request body has too many JSON values for an unauthenticated request."
 					)));
@@ -189,12 +193,13 @@ fn record_auth_context(span: &tracing::Span, auth: &Auth) {
 }
 
 /// Most brackets, commas and colons in the body of a request without an
-/// authenticated user.
+/// authenticated user or MAS.
 ///
 /// Such requests (login, registration, token refresh, email and phone token
 /// requests, rendezvous) send flat objects of a few dozen values. A parsed tree
 /// can take about a hundred times the text of small values, so this bounds the
-/// tree of such a body to a few hundred KiB.
+/// structure of such a body's tree to a few hundred KiB on top of the bytes of
+/// its strings.
 const MAX_ANONYMOUS_JSON_TOKENS: usize = 1024;
 
 /// Parses canonical JSON while retaining ordinary JSON for typed deserialization.

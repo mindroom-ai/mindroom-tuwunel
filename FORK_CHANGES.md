@@ -458,12 +458,13 @@ array of small objects, so a few requests without an access token could take
 gigabytes. Only a federation request needs its body before authentication, to
 check the signature over it. A client request is now authenticated first, so a
 route that needs an account refuses a request without one before its body is
-read, and a malformed body sent without the credentials a route needs gets the
-authentication error rather than `M_NOT_JSON`. A request without an
-authenticated user, as for login, registration and token requests, is refused
-with `M_TOO_LARGE` when its body holds more than 1,024 brackets, commas and
-colons outside strings; those bodies hold a few dozen values. Upstream has
-the same bug. File: `src/api/router/args.rs`; test in
+parsed, and a malformed body sent without the credentials a route needs gets
+the authentication error rather than `M_NOT_JSON`. A request without an
+authenticated user or MAS, as for login, registration and token requests, is
+refused with `M_TOO_LARGE` when its body holds more than 1,024 brackets, commas
+and colons outside strings; those bodies hold a few dozen values. Upstream has
+the same bug. Files: `src/api/router/args.rs`,
+`src/api/client/admin/mas/mod.rs`; test in
 `src/main/tests/client_body_after_auth.rs`.
 
 ### Missing-event and state id answers are read up to a limit
