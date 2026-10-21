@@ -344,10 +344,14 @@ also stored as an outlier when it arrived in a transaction, as a fetched auth
 event or in a `/state_ids` answer, and events naming it as an auth event were
 authorized against it, so state resolution could apply them. Such a create is
 now refused before it is stored, and so is an event naming another create as
-an auth event, even when that create was stored earlier. The authorization
-rules are unchanged. Upstream has the same bug.
-Files: `src/service/rooms/event_handler/{handle_outlier_pdu,upgrade_outlier_pdu}.rs`;
-test in `src/main/tests/federation_second_create.rs`.
+an auth event, even when that create was stored earlier. A `send_join` answer
+holding a create other than the one the join names fails the join before any
+of its events is stored. The authorization rules are unchanged. Upstream has
+the same bug.
+Files: `src/service/rooms/event_handler/{handle_outlier_pdu,upgrade_outlier_pdu}.rs`,
+`src/service/membership/join.rs`; tests in
+`src/main/tests/federation_second_create.rs` and
+`src/service/membership/join/tests.rs`.
 
 ### Rooms created in the same millisecond get their own room IDs
 

@@ -357,6 +357,7 @@ async fn join_remote(
 		.ingest_send_join_events(
 			room_id,
 			sender_user,
+			&parsed_join_pdu.auth_events,
 			&room_version_id,
 			&room_version_rules,
 			&response.auth_chain,
@@ -630,6 +631,12 @@ struct ExtractDepth {
 	depth: UInt,
 }
 
+#[derive(Deserialize)]
+struct ExtractType {
+	#[serde(rename = "type")]
+	kind: TimelineEventType,
+}
+
 /// Checks the events of a send_join response and stores those it accepts.
 ///
 /// Events whose signatures, content hash and format check out are authorized
@@ -642,12 +649,16 @@ struct ExtractDepth {
 /// stays in the returned state, unless an accepted member event of the response
 /// for that user follows it, naming it as an auth event directly or through
 /// earlier ones. A rejected create event, or one of another room version than
-/// the join's, fails the join.
+/// the join's, fails the join. Up to room version 11, a create event that
+/// `join_auth_events`, those of the join, do not name fails it before anything
+/// is stored.
 #[implement(Service)]
+#[expect(clippy::too_many_arguments)]
 async fn ingest_send_join_events(
 	&self,
 	room_id: &RoomId,
 	sender_user: &UserId,
+	join_auth_events: &[OwnedEventId],
 	room_version_id: &RoomVersionId,
 	room_version_rules: &RoomVersionRules,
 	auth_chain: &[Box<RawJsonValue>],
@@ -663,6 +674,25 @@ async fn ingest_send_join_events(
 		.map(|pdu| (pdu, false))
 		.chain(state_pdus.iter().map(|pdu| (pdu, true)))
 		.collect();
+
+	// Where the room ID does not name the room's create, it is the one the join
+	// names. An event naming another create is then rejected below.
+	let other_create = |pdu: &RawJsonValue| {
+		serde_json::from_str::<ExtractType>(pdu.get())
+			.is_ok_and(|event| event.kind == TimelineEventType::RoomCreate)
+			&& gen_event_id_canonical_json(pdu, room_version_id)
+				.is_ok_and(|(event_id, _)| !join_auth_events.contains(&event_id))
+	};
+
+	if !room_version_rules
+		.authorization
+		.room_create_event_id_as_room_id
+		&& pdus.iter().any(|(pdu, _)| other_create(pdu))
+	{
+		return Err!(BadServerResponse(warn!(
+			"send_join answer has a create event the join does not name"
+		)));
+	}
 
 	pdus.sort_by_cached_key(|(pdu, _)| {
 		serde_json::from_str::<ExtractDepth>(pdu.get())
