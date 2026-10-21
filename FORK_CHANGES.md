@@ -217,6 +217,21 @@ size. Files:
 `src/service/sending/{mod.rs,sender/mod.rs}`; test in
 `src/main/tests/edu_content_size.rs`.
 
+### Presence status messages are bounded in size
+
+A presence `status_msg` was stored at any size the request body limit allows
+(24 MiB by default), from a local client or in a federated presence EDU. Every
+user sharing a room with its sender then received it in each sync that carried
+the sender's presence, decoded and encoded again per sync, so one large status
+used a large share of the server's memory once the room's members synced. A
+local status message over 4 KiB is now refused with 413 `M_TOO_LARGE`, and a
+longer one in a federated update is dropped while the rest of the update
+applies. Status messages are a line of text: the MSC4426 profile status allows
+256 bytes, and a MindRoom agent's status, naming its model, role and tools,
+takes a few hundred. Upstream has the same bug. File:
+`src/service/presence/pipeline.rs`; test in
+`src/main/tests/presence_status_size.rs`.
+
 ### Federated read receipts need a joined user
 
 An `m.receipt` EDU from another server was stored for any of that server's
