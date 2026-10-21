@@ -921,6 +921,9 @@ async fn load_left_room(
 	.await
 	.unwrap_or_default();
 
+	let (sees_room_state, clamp_to_departure) =
+		left_room_state_access(services, sender_user, room_id).await;
+
 	let since_shortstatehash = services
 		.timeline
 		.next_shortstatehash(room_id, PduCount::Normal(since))
@@ -933,6 +936,7 @@ async fn load_left_room(
 			services
 				.timeline
 				.get_shortstatehash(room_id, count)
+				.map_ok(move |snapshot| clamp_to_departure(count, snapshot))
 				.inspect_err(log_horizon_error)
 				.ok()
 		});
@@ -942,6 +946,7 @@ async fn load_left_room(
 		services
 			.timeline
 			.shortstatehash_after(room_id, PduCount::Normal(left_count))
+			.map_ok(|snapshot| clamp_to_departure(PduCount::Normal(left_count), snapshot))
 			.inspect_err(inspect_debug_log)
 	});
 
@@ -950,6 +955,7 @@ async fn load_left_room(
 		.get_shortstatehash(room_id, PduCount::Normal(left_count))
 		.inspect_err(inspect_debug_log)
 		.or_else(|_| services.state.get_room_shortstatehash(room_id))
+		.map_ok(|snapshot| clamp_to_departure(PduCount::Normal(left_count), snapshot))
 		.map_err(|_| err!(Database(error!("Room {room_id} has no state"))));
 
 	let (since_shortstatehash, horizon_shortstatehash, after_shortstatehash, left_shortstatehash) =
@@ -976,16 +982,6 @@ async fn load_left_room(
 		})
 		.boxed()
 		.await?;
-
-	// A user who never joined, such as a knocker who withdrew or an invitee who
-	// rejected, sees only their own membership unless the room is world-readable.
-	let once_joined = services
-		.state_cache
-		.once_joined(sender_user, room_id);
-
-	let world_readable = services.state_accessor.is_world_readable(room_id);
-
-	let sees_room_state = once_joined.or(world_readable).await;
 
 	let is_sender_membership = |event: &PduEvent| {
 		*event.kind() == RoomMember && event.state_key() == Some(sender_user.as_str())
@@ -1070,6 +1066,54 @@ async fn load_left_room(
 				.collect(),
 		},
 	}))
+}
+
+/// Whether a user sees a left room's state beyond their own membership, and
+/// the clamp of its state snapshots to their departure.
+///
+/// A user who never joined, such as a knocker who withdrew or an invitee who
+/// rejected, sees only their own membership unless the room is world-readable.
+/// A former member reads the state no later than the leave or ban that ended
+/// their last join, though a withdrawn knock or a rejected invite since then
+/// gives them a later leave. A snapshot at a count past that departure becomes
+/// the state after it, and a former member whose departure is not found sees
+/// only their own membership.
+async fn left_room_state_access(
+	services: &Services,
+	sender_user: &UserId,
+	room_id: &RoomId,
+) -> (bool, impl Fn(PduCount, ShortStateHash) -> ShortStateHash + Copy + use<>) {
+	let once_joined = services
+		.state_cache
+		.once_joined(sender_user, room_id)
+		.await;
+
+	let departure = match once_joined {
+		| false => Ok(None),
+		| true =>
+			services
+				.state
+				.get_room_shortstatehash(room_id)
+				.and_then(|current| {
+					services
+						.state_accessor
+						.user_departure(sender_user, room_id, current)
+				})
+				.inspect_err(inspect_debug_log)
+				.await,
+	};
+
+	let world_readable = services.state_accessor.is_world_readable(room_id);
+	let sees_room_state = departure.is_ok() && (once_joined || world_readable.await);
+	let departure = departure.ok().flatten();
+
+	(
+		sees_room_state,
+		move |count: PduCount, snapshot: ShortStateHash| match departure {
+			| Some((departure, departed)) if count > departure => departed,
+			| _ => snapshot,
+		},
+	)
 }
 
 /// Records a failed horizon read, quietly when the row is simply absent.
