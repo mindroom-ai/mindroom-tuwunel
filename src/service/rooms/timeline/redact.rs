@@ -25,13 +25,13 @@ use crate::rooms::{
 	timeline::RoomMutexGuard,
 };
 
-/// How far back from a key's current state the successor of a redacted state
-/// event is looked for, in replaced states.
+/// How far back from a key's current state a redacted state event is looked
+/// for, in replaced states.
 ///
 /// Each step reads one state snapshot under the room guard, as appending one
 /// state event does. A topic or name changes a few times in a room's life, but
-/// a member's event changes on every join, leave and profile change, so the
-/// successor of an older member event may be past the bound and keep its copy.
+/// a member's event changes on every join, leave and profile change, so an
+/// older member event may be past the bound and its successor keep its copy.
 const SUCCESSOR_STEPS: usize = 16;
 
 /// Replaces an accepted PDU with its room-version redacted form.
@@ -44,7 +44,8 @@ const SUCCESSOR_STEPS: usize = 16;
 /// in the same write as the accepted row; a redacted thread root keeps its summary.
 /// A redacted state event that was replaced is redacted in the `prev_content`
 /// of the event that replaced it, in the same write, unless it was already
-/// redacted or its successor is not within `SUCCESSOR_STEPS`.
+/// redacted or is more than `SUCCESSOR_STEPS` replaced states behind its key's
+/// current state.
 #[implement(super::Service)]
 #[tracing::instrument(name = "redact", level = "debug", skip(self))]
 pub async fn redact_pdu<Pdu: Event + Send + Sync>(

@@ -145,10 +145,11 @@ the removed content. Any member who could see that event, also one who joined
 after the redaction, could still read it in `/messages`, `/context`, `/event`
 or `/state`. A redaction of a replaced state event now also sets its
 successor's `prev_content` to the redacted content, in the same write as the
-target. The successor is looked for at most 16 replaced states back from the
-key's current state, and not again when the target was already redacted. A
-successor further back, or on the losing side of concurrent changes to the same
-key, keeps its copy. Upstream has the same bug. Files:
+target. The target is looked for at most 16 replaced states back from its
+key's current state, and not when it was already redacted, so a copy left by a
+redaction made before this change is not repaired. The successor of a state
+event further back, or one on the losing side of concurrent changes to the
+same key, keeps its copy. Upstream has the same bug. Files:
 `src/service/rooms/timeline/{append.rs,mod.rs,redact.rs}`; tests in
 `src/main/tests/redaction_prev_content.rs`.
 

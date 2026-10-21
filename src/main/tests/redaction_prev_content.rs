@@ -112,9 +112,10 @@ async fn repeated(services: &Services, owner: &Client<'_>) -> Result {
 	Ok(())
 }
 
-/// A successor more than 16 replaced states back keeps its copy.
+/// The successor of a state event more than 16 replaced states back keeps its
+/// copy.
 ///
-/// The search for it stops at that bound, and the redaction still succeeds.
+/// The search stops at that bound, and the redaction still succeeds.
 /// Of 18 topics, the first is 17 replaced states behind the current one and
 /// the second 16.
 async fn bound(owner: &Client<'_>) -> Result {
