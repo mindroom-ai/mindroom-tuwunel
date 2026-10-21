@@ -25,6 +25,15 @@ use crate::rooms::{
 	timeline::RoomMutexGuard,
 };
 
+/// How far back from a key's current state the successor of a redacted state
+/// event is looked for, in replaced states.
+///
+/// Each step reads one state snapshot under the room guard, as appending one
+/// state event does. A topic or name changes a few times in a room's life, but
+/// a member's event changes on every join, leave and profile change, so the
+/// successor of an older member event may be past the bound and keep its copy.
+const SUCCESSOR_STEPS: usize = 16;
+
 /// Replaces an accepted PDU with its room-version redacted form.
 ///
 /// Failure to resolve the event's accepted PDU ID is treated as a successful
@@ -34,7 +43,8 @@ use crate::rooms::{
 /// `m.thread` summary (the count, and the latest event when it was the latest)
 /// in the same write as the accepted row; a redacted thread root keeps its summary.
 /// A redacted state event that was replaced is redacted in the `prev_content`
-/// of the event that replaced it, in the same write.
+/// of the event that replaced it, in the same write, unless it was already
+/// redacted or its successor is not within `SUCCESSOR_STEPS`.
 #[implement(super::Service)]
 #[tracing::instrument(name = "redact", level = "debug", skip(self))]
 pub async fn redact_pdu<Pdu: Event + Send + Sync>(
@@ -92,6 +102,9 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.delete_typed_relation(&pdu_id, &pdu)
 		.await;
 
+	// A repeated redaction does not look for the successor again.
+	let redacted_before = recorded_redaction(&pdu).is_some();
+
 	// Read before redaction strips `m.relates_to`.
 	let root_event_id = pdu.get("content").and_then(thread_root);
 	let keep_thread = root_event_id.as_deref() != Some(event_id);
@@ -112,9 +125,10 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 		.await
 		.flatten();
 
-	let successor = self
-		.redacted_state_successor(event_id, &pdu)
-		.await;
+	let successor = (!redacted_before)
+		.then_async(|| self.redacted_state_successor(event_id, &pdu))
+		.await
+		.flatten();
 	let related: Vec<_> = root.into_iter().chain(successor).collect();
 
 	self.replace_redacted_pdu(&pdu_id, &pdu, &related)
@@ -126,10 +140,10 @@ pub async fn redact_pdu<Pdu: Event + Send + Sync>(
 ///
 /// `append_pdu` stores the content of the state an event replaces in its
 /// `prev_content`. The room's current state for the redacted event's type and
-/// key is followed back through the state each event replaced until it reaches
-/// the redacted event; the replaced state is an ancestor, so each step must
-/// lower the depth and the walk ends. `None` when the redacted event is the
-/// current state, is not on that path, or its successor has no `prev_content`.
+/// key is followed back through the state each event replaced, at most
+/// `SUCCESSOR_STEPS` times, until it reaches the redacted event. `None` when
+/// the redacted event is the current state, is not reached, or its successor
+/// has no `prev_content`.
 #[implement(super::Service)]
 async fn redacted_state_successor(
 	&self,
@@ -148,13 +162,17 @@ async fn redacted_state_successor(
 		.ok()?;
 
 	let mut successor = None;
-	while next.event_id != event_id {
+	for _ in 0..SUCCESSOR_STEPS {
+		if next.event_id == event_id {
+			break;
+		}
+
 		let prev = self.prev_state(&next, state_key).await?;
-		(prev.depth < next.depth).into_option()?;
 		successor = Some(next);
 		next = prev;
 	}
 
+	(next.event_id == event_id).into_option()?;
 	let pdu_id = self.get_pdu_id(&successor?.event_id).await.ok()?;
 	let mut pdu = self.get_pdu_json_from_id(&pdu_id).await.ok()?;
 	let prev_content = pdu
