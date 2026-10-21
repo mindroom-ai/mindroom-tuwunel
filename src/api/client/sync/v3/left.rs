@@ -169,11 +169,17 @@ async fn handle_left_room(
 		}));
 	}
 
-	let horizon = services
+	let departure = services
 		.state_accessor
 		.departure_count(sender_user, room_id)
 		.await
-		.inspect_err(|error| warn!(target: "tuwunel_api_client::sync::v3", %room_id, %sender_user, %error, "Unreadable departure count"))
+		.inspect_err(|error| warn!(target: "tuwunel_api_client::sync::v3", %room_id, %sender_user, %error, "Unreadable departure count"));
+
+	// A former member whose departure is not found, such as one more than 16
+	// membership changes back, still gets the room, with only their own
+	// membership as its state.
+	let departure_found = departure.is_ok();
+	let horizon = departure
 		.ok()
 		.flatten()
 		.map(PduCount::into_unsigned)
@@ -185,6 +191,7 @@ async fn handle_left_room(
 		room_id,
 		since,
 		horizon,
+		departure_found,
 		full_state,
 		state_after,
 		filter,
@@ -253,6 +260,7 @@ async fn load_left_room(
 	room_id: &RoomId,
 	since: u64,
 	horizon: u64,
+	departure_found: bool,
 	full_state: bool,
 	state_after: StateAfter,
 	filter: &FilterDefinition,
@@ -339,7 +347,10 @@ async fn load_left_room(
 		.boxed()
 		.await?;
 
-	let sees_room_state = sees_left_room_state(services, sender_user, room_id).await;
+	// A former member whose departure is not found sees only their own
+	// membership, as a user who never joined does.
+	let sees_room_state =
+		departure_found && sees_left_room_state(services, sender_user, room_id).await;
 
 	let is_sender_membership = |event: &PduEvent| {
 		*event.kind() == RoomMember && event.state_key() == Some(sender_user.as_str())
