@@ -998,7 +998,7 @@ async fn join_local(
 
 	let room_version_id = self.require_supported_remote_room_version(&make_join_response)?;
 	let room_version_rules = room_version::rules(&room_version_id)?;
-	let (join_event, event_id, _) = self
+	let (join_event, event_id, join_authorized_via_users_server) = self
 		.create_join_event(
 			room_id,
 			sender_user,
@@ -1009,6 +1009,15 @@ async fn join_local(
 			extra_content,
 		)
 		.await?;
+
+	// A local authoriser would make our signature authorise the join that the
+	// local join above refused.
+	if join_authorized_via_users_server
+		.as_deref()
+		.is_some_and(|user| self.services.globals.user_is_local(user))
+	{
+		return Err(error);
+	}
 
 	let send_join_response = self
 		.execute_send_join(&remote_server, room_id, &event_id, join_event, &room_version_id)
