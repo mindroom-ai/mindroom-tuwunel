@@ -83,8 +83,9 @@ The history keeps the v1.9.1 ownership layout of eight commits (shared test
 infrastructure, five runtime features with their tests and compatibility
 changes, CI, and docs), followed by the squash-merged fork PRs that upstream
 does not contain, in merge order (#15 to #105), with the v1.9.3 and upstream
-main rebase records after #64 and this rebase's documentation last. No upstream
-backports are carried.
+main rebase records after #64 and this rebase's documentation last. That
+rebase carried no upstream backports; upstream `750dbc0b9` from `main` is
+carried since (see "Former members do not list a room's aliases").
 See the [current ownership and rebase procedure](docs/rebase-v1.9.4-2026-10-11.md).
 Earlier rebase records remain historical snapshots.
 
@@ -478,6 +479,20 @@ Files: `src/service/fetcher/{mod.rs,transport.rs,validate.rs}`,
 `src/service/rooms/event_handler/fetch_prev.rs`; test in
 `src/main/tests/federation_event_response_limit.rs`.
 
+### A `/state_ids` answer walks each event once
+
+When the state before an incoming event is taken from the sending server's
+`/state_ids` answer, every id in the answer started a walk, and an id named
+more than once started one for each copy. A walk for an event we hold loads
+the whole event, outside the size limit the walks share for fetched events, and
+all walks keep their results until the last one ends; only then was the second
+copy refused as a repeated state key. An answer of up to 64 MiB can name one
+large stored event over a million times. Each event of the answer is now walked
+once, and an answer naming an event more than once gives the state it would
+give naming it once. Upstream has the same bug. File:
+`src/service/rooms/event_handler/fetch_state.rs`; test in
+`src/main/tests/auth_chain_fetch_budget.rs`.
+
 ### GitHub sign-in uses the account id
 
 GitHub's user API has no `sub`, so a `login` alias made the username the
@@ -492,6 +507,20 @@ otherwise the sign-in is treated as a new user, and
 `docs/authentication/providers.md` describes how to re-link the account.
 Upstream has the same bug. Files: `src/service/oauth/{mod.rs,user_info.rs}`,
 `src/api/client/session/sso.rs`.
+
+### SSO sign-in skips usernames reserved by an appservice
+
+A new SSO account took its username from the identity's claims, such as
+`preferred_username` or the email's local part, without checking appservice
+namespaces, while `/register` and native OIDC registration refuse a username
+an appservice reserves exclusively. Signing in with an email like
+`whatsapp_<number>@example.com` on a server with public SSO and a WhatsApp
+bridge registered the bridge's ghost user ID, and the bridge later took that
+account as its own ghost. A claim inside an exclusive namespace is now skipped
+like a forbidden username, so the next claim or the identity's fallback
+username is used. Upstream has the same bug. File:
+`src/api/client/session/sso.rs`; test in
+`src/main/tests/sso_fallback_account.rs`.
 
 ### Knock state is checked before it is stored
 
@@ -544,6 +573,16 @@ to a joined or invited user, or to anyone while the room is world-readable, as
 in Synapse; the restricted-room and guest checks are unchanged, and an invitee
 is now admitted under every history visibility. Upstream has the same bug.
 File: `src/api/client/room/summary.rs`; test in
+`src/main/tests/state_departed_member.rs`.
+
+### Former members do not list a room's aliases
+
+`GET /rooms/{roomId}/aliases` admitted a former member under `shared` history
+visibility, so a user who had left or been kicked or banned kept listing the
+room's current local aliases. The aliases now go only to a joined user, or to
+anyone while the room is world-readable. The check is upstream `750dbc0b9`
+from `main`, carried as a cherry-pick until the fork's base contains it. File:
+`src/api/client/room/aliases.rs`; test in
 `src/main/tests/state_departed_member.rs`.
 
 ### `/context` keeps current state from requesters who may not read it
