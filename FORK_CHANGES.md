@@ -471,9 +471,10 @@ federation response limit first. Upstream has the same bug. Files:
 
 The walk over an incoming event's missing prev events queued a fetch for every
 prev event of each event it walked, up to 20 each, but counted only the walked
-events against `max_fetch_prev_events`. The queued fetches all run at once and
-keep their results, so one incoming event could start about 20 times that many.
-The walk now counts every event it queues. The `/get_missing_events` batch
+events against `max_fetch_prev_events`. Every queued event is fetched in the
+end, so one incoming event could start about 20 times that many fetches. The
+walk now counts every event it queues, and runs at most 32 of their fetches at
+once (see the next entry). The `/get_missing_events` batch
 fetched before the walk asks for 10 events but stored every event the remote
 server answered with; it now stores at most 10. Each auth chain fetch started
 for the incoming event, for its own auth events, for each prev event the walk
@@ -482,6 +483,18 @@ fetches and for each event of that batch, also had its own limit of
 bugs. Files: `src/service/rooms/event_handler/fetch_prev.rs`,
 `src/service/rooms/event_handler/fetch_auth.rs`,
 `src/service/rooms/event_handler/handle_incoming_pdu.rs`; tests in
+`src/main/tests/auth_chain_fetch_budget.rs`.
+
+### A prev event walk runs a few fetches at once
+
+The walk over an incoming event's missing prev events started every fetch it
+queued at once, up to `max_fetch_prev_events` (default 1024). The fetcher runs
+at most 256 fetches for all rooms together, so one walk over a wide gap whose
+server answered slowly could take all of them, and fetches for every other
+room waited behind it. A walk now runs at most 32 of its fetches at once, more
+than the 20 prev events one event may name, and starts the rest as those
+finish, so a wide gap still fills completely. Upstream has the same bug. File:
+`src/service/rooms/event_handler/fetch_prev.rs`; test in
 `src/main/tests/auth_chain_fetch_budget.rs`.
 
 ### Federation bodies and incoming PDUs are parsed after their checks
