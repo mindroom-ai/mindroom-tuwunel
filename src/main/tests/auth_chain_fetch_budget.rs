@@ -28,7 +28,8 @@ use tuwunel_core::{
 	pdu::PduBuilder,
 	ruma::{
 		CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, RoomId, ServerName,
-		UserId, events::room::message::RoomMessageEventContent,
+		UserId,
+		events::{StateEventType, room::message::RoomMessageEventContent},
 	},
 	utils::stream::IterStream,
 };
@@ -78,6 +79,9 @@ struct Peer {
 	/// The `/get_missing_events` answer.
 	missing: Vec<CanonicalJsonObject>,
 
+	/// The `/state_ids` answer.
+	state_ids: Vec<OwnedEventId>,
+
 	/// How long each `/event` answer takes.
 	delay: Duration,
 
@@ -108,7 +112,8 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	auth_event_walks_share_one_size_limit(&client, &user_id).await?;
 	prev_event_walks_share_one_size_limit(&client, &user_id).await?;
 	prev_event_walk_counts_queued_fetches(&client, &user_id).await?;
-	missing_events_beyond_the_limit_are_dropped(&client, &user_id).await
+	missing_events_beyond_the_limit_are_dropped(&client, &user_id).await?;
+	state_ids_repeats_are_walked_once(&client, &user_id).await
 }
 
 /// The walks fetching an incoming event's missing auth events share one limit
@@ -205,6 +210,45 @@ async fn missing_events_beyond_the_limit_are_dropped(
 
 	let stored = count_stored(services, &ids).await;
 	assert_eq!(stored, 10, "more missing events were stored than asked for");
+
+	Ok(())
+}
+
+/// An event a `/state_ids` answer names more than once is walked once, so the
+/// answer gives the same state as one naming it once.
+async fn state_ids_repeats_are_walked_once(client: &Client<'_>, user_id: &UserId) -> Result {
+	let services = client.services;
+	let room_id = client.create_room(&json!({})).await?;
+
+	let mut state_ids = Vec::new();
+	for (event_type, state_key) in [
+		(StateEventType::RoomCreate, ""),
+		(StateEventType::RoomPowerLevels, ""),
+		(StateEventType::RoomMember, user_id.as_str()),
+	] {
+		let event_id = services
+			.state_accessor
+			.room_state_get_id(&room_id, &event_type, state_key)
+			.await?;
+
+		state_ids.extend([event_id.clone(), event_id]);
+	}
+
+	let unknown = [EventId::parse("$auth-chain-fetch-budget-state-ids")?];
+	let (event_id, pdu) =
+		sign_message(services, user_id, &room_id, "hello", Some(("prev_events", &unknown)))
+			.await?;
+
+	deliver(services, &room_id, &event_id, pdu, Peer { state_ids, ..Peer::default() }).await?;
+
+	assert!(
+		services
+			.timeline
+			.non_outlier_pdu_exists(&event_id)
+			.await
+			.is_ok(),
+		"the event was refused for the repeated state ids"
+	);
 
 	Ok(())
 }
@@ -351,6 +395,7 @@ async fn serve_peer(listener: TcpListener, peer: Arc<Peer>) -> Result {
 	let app = Router::new()
 		.route("/_matrix/federation/v1/event/{event_id}", get(event))
 		.route("/_matrix/federation/v1/get_missing_events/{room_id}", post(missing_events))
+		.route("/_matrix/federation/v1/state_ids/{room_id}", get(state_ids))
 		.with_state(peer);
 
 	from_tcp_rustls(listener, config)?
@@ -382,4 +427,8 @@ async fn event(State(peer): State<Arc<Peer>>, Path(event_id): Path<OwnedEventId>
 
 async fn missing_events(State(peer): State<Arc<Peer>>) -> Json<Value> {
 	Json(json!({"events": peer.missing}))
+}
+
+async fn state_ids(State(peer): State<Arc<Peer>>) -> Json<Value> {
+	Json(json!({"auth_chain_ids": [], "pdu_ids": peer.state_ids}))
 }
