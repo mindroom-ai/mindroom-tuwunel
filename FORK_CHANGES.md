@@ -83,8 +83,9 @@ The history keeps the v1.9.1 ownership layout of eight commits (shared test
 infrastructure, five runtime features with their tests and compatibility
 changes, CI, and docs), followed by the squash-merged fork PRs that upstream
 does not contain, in merge order (#15 to #105), with the v1.9.3 and upstream
-main rebase records after #64 and this rebase's documentation last. No upstream
-backports are carried.
+main rebase records after #64 and this rebase's documentation last. That
+rebase carried no upstream backports; upstream `750dbc0b9` from `main` is
+carried since (see "Former members do not list a room's aliases").
 See the [current ownership and rebase procedure](docs/rebase-v1.9.4-2026-10-11.md).
 Earlier rebase records remain historical snapshots.
 
@@ -560,6 +561,16 @@ to a joined or invited user, or to anyone while the room is world-readable, as
 in Synapse; the restricted-room and guest checks are unchanged, and an invitee
 is now admitted under every history visibility. Upstream has the same bug.
 File: `src/api/client/room/summary.rs`; test in
+`src/main/tests/state_departed_member.rs`.
+
+### Former members do not list a room's aliases
+
+`GET /rooms/{roomId}/aliases` admitted a former member under `shared` history
+visibility, so a user who had left or been kicked or banned kept listing the
+room's current local aliases. The aliases now go only to a joined user, or to
+anyone while the room is world-readable. The check is upstream `750dbc0b9`
+from `main`, carried as a cherry-pick until the fork's base contains it. File:
+`src/api/client/room/aliases.rs`; test in
 `src/main/tests/state_departed_member.rs`.
 
 ### `/context` keeps current state from requesters who may not read it
