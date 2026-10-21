@@ -520,7 +520,7 @@ fn register_server_misc_routes(router: Router<State>) -> Router<State> {
 	// SS endpoints not related to federation
 	router
 		.ruma_route(&server::well_known_server)
-		.ruma_route(&server::get_openid_userinfo_route)
+		.route("/_matrix/federation/v1/openid/userinfo", get(server::get_openid_userinfo_route))
 }
 
 fn register_federation_routes(router: Router<State>, allow_federation: bool) -> Router<State> {
