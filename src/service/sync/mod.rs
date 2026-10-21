@@ -196,7 +196,7 @@ const LIST_FILTER_MAX: usize = 16;
 /// The most ranges one list uses.
 ///
 /// Each range is selected from the rooms of the window, so only the first this
-/// many ranges of a list are kept.
+/// many distinct ranges of a list are kept.
 const RANGES_MAX: usize = 16;
 
 /// The most rooms one extension filter names.
@@ -649,7 +649,7 @@ fn update_cache_lists(request: &Request, cached: &mut Self) -> bool {
 
 #[implement(Connection)]
 fn update_cache_list(request: &request::List, cached: &mut request::List) -> bool {
-	let ranges = &request.ranges[..request.ranges.len().min(RANGES_MAX)];
+	let ranges = first_distinct(&request.ranges, RANGES_MAX);
 	let ranges_changed = ranges != cached.ranges.as_slice();
 	let timeline_limit_changed =
 		request.room_details.timeline_limit != cached.room_details.timeline_limit;
