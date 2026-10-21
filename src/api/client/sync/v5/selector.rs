@@ -1,4 +1,7 @@
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{
+	cmp::Ordering,
+	collections::{BTreeMap, BTreeSet},
+};
 
 use futures::{
 	FutureExt, StreamExt,
@@ -349,6 +352,8 @@ where
 
 	let SyncInfo { services, sender_user, .. } = sync_info;
 
+	// A room is copied once, however many lists and ranges select it.
+	let mut selected = BTreeSet::new();
 	let selections = conn
 		.lists
 		.iter()
@@ -365,7 +370,9 @@ where
 				.map(apply!(2, usize_from_ruma))
 				.map(move |range| (id, range))
 		})
-		.flat_map(|(id, (start, end))| select_list_range(rooms.clone(), id, start, end).cloned())
+		.flat_map(|(id, (start, end))| select_list_range(rooms.clone(), id, start, end))
+		.filter(move |&room| selected.insert(&room.room_id))
+		.cloned()
 		.stream();
 
 	let indexed_subscriptions = (conn.subscriptions.len() > 1).then(|| {
