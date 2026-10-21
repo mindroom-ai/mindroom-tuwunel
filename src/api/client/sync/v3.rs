@@ -927,6 +927,7 @@ async fn load_left_room(
 	let since_shortstatehash = services
 		.timeline
 		.next_shortstatehash(room_id, PduCount::Normal(since))
+		.map_ok(|snapshot| clamp_to_departure(PduCount::Normal(since), snapshot))
 		.ok();
 
 	let horizon_shortstatehash = timeline_pdus
