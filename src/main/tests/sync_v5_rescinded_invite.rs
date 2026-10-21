@@ -215,8 +215,9 @@ async fn left_history(&self, History { joined, unreadable }: History) -> Result 
 		let state = &after["rooms"]["leave"][room_id.as_str()]["org.matrix.msc4222.state_after"]
 			["events"];
 
-		// MindRoom fork: a left room's state goes only to a user who joined it.
-		assert_eq!(has_event(state, &name), joined && unreadable, "state bound: {after}");
+		// MindRoom fork: a left room's state goes only to a user who joined it
+		// and whose departure is found.
+		assert!(!has_event(state, &name), "state bound: {after}");
 
 		let resumed = client
 			.sync_v3(Some(field(&reply, "next_batch")?))

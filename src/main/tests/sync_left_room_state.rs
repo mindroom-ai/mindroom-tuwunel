@@ -82,7 +82,17 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.iter()
 		.any(|event| event["type"] == "m.room.topic");
 
+	let own_membership = state
+		.iter()
+		.find(|event| event["state_key"] == member_id.as_str())
+		.map(|event| &event["content"]["membership"]);
+
 	assert!(topic, "{member_id} lacks the room's state: {state:?}");
+	assert_eq!(
+		own_membership,
+		Some(&json!("join")),
+		"{member_id}'s state is not from before its leave: {state:?}"
+	);
 
 	Ok(())
 }
