@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 mod admin;
+mod appservice;
 
 #[expect(
 	dead_code,
@@ -39,6 +40,7 @@ use tuwunel_service::{
 
 use self::{
 	admin::{accepted, refused},
+	appservice::{Bridge, register_appservice},
 	fixture::boot,
 };
 
@@ -59,7 +61,8 @@ static LOGS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 /// while her identity binding cannot be read, a user-wide delete keeps her
 /// session and a forced association is refused. Alice's provider-verified
 /// address is bound to her new account, and Carol's registration leaves the
-/// identical address with Alice.
+/// identical address with Alice. Dave
+/// claims a username an appservice reserves, so he gets his fallback account.
 #[test]
 fn sso_fallback_account() -> Result {
 	let provider = TcpListener::bind(("127.0.0.1", 0))?;
@@ -275,6 +278,21 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.await?;
 
 	assert_unlogged(&session);
+
+	let bridge = Bridge {
+		id: "sso-fallback-bridge",
+		token: "sso-fallback-bridge-token",
+		sender_localpart: "bridge",
+		users: "^@bridge_.*:.*$",
+		aliases: None,
+	};
+
+	register_appservice(services, &bridge).await?;
+
+	let dave = unique_id_sub((&provider, "dave"))?;
+	let response = sign_in(&client, base, "dave", "bridge_dave").await?;
+
+	assert_eq!(fallback_localpart(&dave), signed_in(services, &response).await?.localpart());
 
 	Ok(())
 }
