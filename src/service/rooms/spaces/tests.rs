@@ -1,4 +1,5 @@
 use std::{
+	iter::empty,
 	str::FromStr,
 	sync::Arc,
 	time::{Duration, UNIX_EPOCH},
@@ -397,6 +398,95 @@ async fn state_install_evicts_local_cache() -> Result {
 	assert_eq!(summary.children_state.len(), 1);
 
 	Ok(())
+}
+
+/// A redaction can remove state the summary shows, so it evicts the summary as
+/// a state change does.
+#[tokio::test]
+async fn redaction_evicts_local_cache() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let room = room_id!("!redacted:localhost");
+	let user = user_id!("@member:localhost");
+	let (create_id, name_id) =
+		(event_id!("$redacted-create:localhost"), event_id!("$redacted-name:localhost"));
+	let events = [
+		(StateEventType::RoomCreate, create_id, json!({"room_version": "11"})),
+		(StateEventType::RoomName, name_id, json!({"name": "removed later"})),
+	];
+
+	let mut compressed = Vec::with_capacity(events.len());
+
+	for (event_type, event_id, content) in events {
+		let event = state_event(event_id, room, user, &event_type, &content);
+		let key = services
+			.short
+			.get_or_create_shortstatekey(&event_type, "")
+			.await;
+
+		services.db["eventid_outlierpdu"].raw_put(event_id, Json(event));
+		compressed.push(
+			services
+				.state_compressor
+				.compress_state_event(key, event_id)
+				.await,
+		);
+	}
+
+	let state = Arc::new(compressed.into_iter().collect());
+	let hash = services
+		.state
+		.set_event_state(name_id, room, state)
+		.await?;
+
+	let lock = services.state.mutex.lock(room).await;
+
+	services.state.set_room_state(room, hash, &lock);
+	services
+		.short
+		.get_or_create_shortroomid(room)
+		.await;
+	transition(services, room, user, MembershipState::Join).await?;
+
+	let redaction = json!({
+		"event_id": "$redaction:localhost", "room_id": room, "sender": user,
+		"type": "m.room.redaction", "content": {"redacts": name_id},
+		"origin": "localhost", "origin_server_ts": 2, "depth": 2,
+		"prev_events": [], "auth_events": [], "signatures": {},
+		"hashes": {"sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+	});
+
+	assert_eq!(local_name(services, room, user).await?.as_deref(), Some("removed later"));
+
+	services
+		.timeline
+		.append_pdu(
+			&serde_json::from_value(redaction.clone())?,
+			serde_json::from_value(redaction)?,
+			empty(),
+			&lock,
+		)
+		.await?;
+
+	assert_eq!(local_name(services, room, user).await?, None);
+
+	Ok(())
+}
+
+async fn local_name(services: &Services, room: &RoomId, user: &UserId) -> Result<Option<String>> {
+	let result = services
+		.spaces
+		.get_summary_and_children_local(room, &Identifier::UserId(user))
+		.await?;
+
+	let Accessibility::Accessible(summary) = result else {
+		return Err!("local summary was inaccessible");
+	};
+
+	Ok(summary.summary.name)
 }
 
 async fn install_changed_summary(services: &Services, room: &RoomId, sender: &UserId) -> Result {

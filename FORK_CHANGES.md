@@ -146,9 +146,11 @@ is now replaced by its redacted form, with the original retained as for
 timeline events. Upgrading it into the timeline later reuses that copy, and a
 redacted copy fetched again, as peers that applied the redaction serve it, is
 refused as already known, so the event stays redacted. A peer still serving the
-unredacted original can bring it back when it is fetched again.
-Upstream has the same bug. File: `src/service/rooms/timeline/redact.rs`; test
-in the same file.
+unredacted original can bring it back when it is fetched again. Any redaction
+now also evicts the room's cached hierarchy summary, as a state change does, so
+the summary stops showing a removed name or topic. Upstream has the same bug.
+Files: `src/service/rooms/timeline/{redact.rs,append.rs}`; tests in `redact.rs`
+and `src/service/rooms/spaces/tests.rs`.
 
 ### Sliding sync looks up delivered required state selectors in a set
 

@@ -334,8 +334,9 @@ async fn append_pdu_effects(
 		| _ => {},
 	}
 
-	// The cached hierarchy summary projects room state; evict on any state change.
-	if pdu.state_key().is_some() {
+	// The cached hierarchy summary projects room state; evict on any state change,
+	// and on a redaction, which can remove the content of a state event.
+	if pdu.state_key().is_some() || *pdu.kind() == TimelineEventType::RoomRedaction {
 		self.services.spaces.cache_evict(pdu.room_id());
 	}
 
