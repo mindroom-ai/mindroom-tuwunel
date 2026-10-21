@@ -83,8 +83,9 @@ The history keeps the v1.9.1 ownership layout of eight commits (shared test
 infrastructure, five runtime features with their tests and compatibility
 changes, CI, and docs), followed by the squash-merged fork PRs that upstream
 does not contain, in merge order (#15 to #105), with the v1.9.3 and upstream
-main rebase records after #64 and this rebase's documentation last. No upstream
-backports are carried.
+main rebase records after #64 and this rebase's documentation last. That
+rebase carried no upstream backports; upstream `750dbc0b9` from `main` is
+carried since (see "Former members do not list a room's aliases").
 See the [current ownership and rebase procedure](docs/rebase-v1.9.4-2026-10-11.md).
 Earlier rebase records remain historical snapshots.
 
@@ -187,6 +188,18 @@ naming the room. Upstream has the same bug. Files: `src/service/sync/mod.rs`,
 `src/api/client/sync/v5/filter.rs`; tests in `src/service/sync/tests.rs` and
 `src/main/tests/sync_v5_list_filters.rs`.
 
+### Sliding sync copies each window room once
+
+Each pass copied a room, with the IDs of the lists it matched, once for every
+list and range that selected it, and a list kept a range repeated in a request
+as often as it was sent. The window holds each room once, so 64 lists of 16
+identical full ranges copied every room about a thousand times in a pass that
+does not yield, and kept a worker busy for seconds with a thousand rooms. A
+list now keeps each distinct range once, and the window copies a room the
+first time a range selects it. Upstream has the same bug. Files:
+`src/service/sync/mod.rs`, `src/api/client/sync/v5/selector.rs`; test in
+`src/service/sync/tests.rs`.
+
 ### Sliding sync long polls wait when only fallback key types are new
 
 The e2ee extension reports the device's unused fallback key types on every
@@ -216,6 +229,34 @@ size. Files:
 `src/api/client/{dehydrated_device.rs,keys/upload_keys.rs,keys/upload_signing_keys.rs}`,
 `src/service/sending/{mod.rs,sender/mod.rs}`; test in
 `src/main/tests/edu_content_size.rs`.
+
+### Presence status messages are bounded in size
+
+A presence `status_msg` was stored at any size the request body limit allows
+(24 MiB by default), from a local client or in a federated presence EDU. Every
+user sharing a room with its sender then received it in each sync that carried
+the sender's presence, decoded and encoded again per sync, so one large status
+used a large share of the server's memory once the room's members synced. A
+local status message over 4 KiB is now refused with 413 `M_TOO_LARGE`, and a
+longer one in a federated update is dropped while the rest of the update
+applies. Status messages are a line of text: the MSC4426 profile status allows
+256 bytes, and a MindRoom agent's status, naming its model, role and tools,
+takes a few hundred. Upstream has the same bug. File:
+`src/service/presence/pipeline.rs`; test in
+`src/main/tests/presence_status_size.rs`.
+
+### The ignored user list is bounded in size
+
+A user's `m.ignored_user_list` was stored at any size the request limit allowed
+(24 MiB by default). The whole list is read and parsed for every event another
+user sends in a room the owner is in, and no later change on the server reaches
+`/sync` until that is done. A list of 24 MiB took about 0.2 s to parse, so each
+such event held up sync for everyone. The list is now refused with 413
+`M_TOO_LARGE` over 1 MiB, which holds about 4,000 user IDs of the maximum
+length and over 30,000 of ordinary length, and parses in a few milliseconds.
+Upstream has the same bug; it bounds push rules, which are matched per event
+the same way, since v1.9.0. File: `src/api/client/account_data/mod.rs`; test in
+`src/main/tests/ignored_user_list_size.rs`.
 
 ### Federated read receipts need a joined user
 
@@ -318,6 +359,29 @@ then a new invite. Knock state, which leaves member events out, likewise keeps
 the member events the room's state has for other local users. Upstream has the
 same bug. Files: `src/service/membership/{join.rs,knock.rs}`; tests in
 `src/service/membership/{join,knock}/tests.rs`.
+
+### send_join answers an old join only while its user is joined
+
+`send_join` answered with the room's current state and auth chain for a join
+event this server already had, without looking at it again. A server whose
+user had once joined could send that join again after the user left, was
+kicked or was banned, and read the room's current state each time. A join this
+server already has is now answered only while its user is still joined, as a
+retry of a join that still stands, and refused otherwise. New joins are
+unchanged. Upstream has the same bug. File: `src/api/server/send_join.rs`;
+test in `src/main/tests/federation_membership_refusal.rs`.
+
+### A restricted join refused here is not authorised by a local user
+
+When a user's join to a restricted room this server is in fails the allow list
+here, the join asks a server from `via` for a `make_join` template and signs
+it. The template's `join_authorised_via_users_server` was kept even when it
+named a joined user of this server, so this server's signature authorised the
+join it had just refused, and the remote server could complete it. The join
+now fails with the local refusal when the template names a local authoriser;
+a template naming the remote server's own user is still signed and sent.
+Upstream has the same bug. File: `src/service/membership/join.rs`; test in
+`src/main/tests/restricted_join_fallback.rs`.
 
 ### The state before an incoming event comes only from its room
 
@@ -484,6 +548,20 @@ Files: `src/service/fetcher/{mod.rs,transport.rs,validate.rs}`,
 `src/service/rooms/event_handler/fetch_prev.rs`; test in
 `src/main/tests/federation_event_response_limit.rs`.
 
+### A `/state_ids` answer walks each event once
+
+When the state before an incoming event is taken from the sending server's
+`/state_ids` answer, every id in the answer started a walk, and an id named
+more than once started one for each copy. A walk for an event we hold loads
+the whole event, outside the size limit the walks share for fetched events, and
+all walks keep their results until the last one ends; only then was the second
+copy refused as a repeated state key. An answer of up to 64 MiB can name one
+large stored event over a million times. Each event of the answer is now walked
+once, and an answer naming an event more than once gives the state it would
+give naming it once. Upstream has the same bug. File:
+`src/service/rooms/event_handler/fetch_state.rs`; test in
+`src/main/tests/auth_chain_fetch_budget.rs`.
+
 ### GitHub sign-in uses the account id
 
 GitHub's user API has no `sub`, so a `login` alias made the username the
@@ -498,6 +576,20 @@ otherwise the sign-in is treated as a new user, and
 `docs/authentication/providers.md` describes how to re-link the account.
 Upstream has the same bug. Files: `src/service/oauth/{mod.rs,user_info.rs}`,
 `src/api/client/session/sso.rs`.
+
+### SSO sign-in skips usernames reserved by an appservice
+
+A new SSO account took its username from the identity's claims, such as
+`preferred_username` or the email's local part, without checking appservice
+namespaces, while `/register` and native OIDC registration refuse a username
+an appservice reserves exclusively. Signing in with an email like
+`whatsapp_<number>@example.com` on a server with public SSO and a WhatsApp
+bridge registered the bridge's ghost user ID, and the bridge later took that
+account as its own ghost. A claim inside an exclusive namespace is now skipped
+like a forbidden username, so the next claim or the identity's fallback
+username is used. Upstream has the same bug. File:
+`src/api/client/session/sso.rs`; test in
+`src/main/tests/sso_fallback_account.rs`.
 
 ### Knock state is checked before it is stored
 
@@ -533,12 +625,12 @@ room's current state, so a user who had left or been kicked or banned kept
 seeing later renames, topics, power levels and new members. A former member
 now reads the state as of their leave or ban, as the spec requires and as
 `/initialSync` already did. Knocking again, or withdrawing that knock, does not
-move this point: these routes and `/initialSync` serve the state after the
-leave or ban that ended the user's last join, found by the same walk that
-bounds their history. Upstream has the same bug. Files:
+move this point: these routes, `/initialSync` and a left room in `/sync` serve
+the state after the leave or ban that ended the user's last join, found by the
+same walk that bounds their history. Upstream has the same bug. Files:
 `src/service/rooms/state_accessor/user_can.rs`,
-`src/api/client/{state.rs,membership/members.rs,room/initial_sync.rs}`; tests
-in `src/main/tests/{state_departed_member.rs,knock_withdrawal_history.rs}`.
+`src/api/client/{state.rs,membership/members.rs,room/initial_sync.rs,sync/v3.rs}`;
+tests in `src/main/tests/{state_departed_member.rs,knock_withdrawal_history.rs}`.
 
 ### The room summary is not given to former members
 
@@ -550,6 +642,16 @@ to a joined or invited user, or to anyone while the room is world-readable, as
 in Synapse; the restricted-room and guest checks are unchanged, and an invitee
 is now admitted under every history visibility. Upstream has the same bug.
 File: `src/api/client/room/summary.rs`; test in
+`src/main/tests/state_departed_member.rs`.
+
+### Former members do not list a room's aliases
+
+`GET /rooms/{roomId}/aliases` admitted a former member under `shared` history
+visibility, so a user who had left or been kicked or banned kept listing the
+room's current local aliases. The aliases now go only to a joined user, or to
+anyone while the room is world-readable. The check is upstream `750dbc0b9`
+from `main`, carried as a cherry-pick until the fork's base contains it. File:
+`src/api/client/room/aliases.rs`; test in
 `src/main/tests/state_departed_member.rs`.
 
 ### `/context` keeps current state from requesters who may not read it
@@ -658,6 +760,22 @@ Behavior:
   Backends and clients that already send audiences keep working while the option is off, because the server ignores both fields.
   Turn the option on only after MindRoom backends with audience support (mindroom-ai/mindroom#2775) and MindRoom Chat clients that send audiences, including the iOS app (mindroom-ai/mindroom-chat#442), are live.
   Turning it off again restores upstream behavior, including for tokens issued bound.
+
+### OpenID userinfo can confirm room membership
+
+Files: `src/api/server/openid.rs`, `src/api/router.rs`; test in
+`src/mindroom-tests/tests/openid_room_membership.rs`.
+
+`GET /_matrix/federation/v1/openid/userinfo` reads an optional
+`io.mindroom.room_id` query parameter. With it, the token verifies only while
+its user is joined to that room: the response is
+`{"sub": ..., "io.mindroom.room_joined": true}`, and a user who is not joined
+gets 403 `M_FORBIDDEN`. A server that ignores the parameter never sends
+`io.mindroom.room_joined`, so a relying party such as the MatrixRTC
+authorization service can refuse calls for non-members instead of trusting
+such a server. Without the parameter the response is unchanged. The
+route is registered as a plain axum route because ruma's response type has no
+room for the extra field.
 
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
@@ -945,7 +1063,8 @@ sweep command and its retry after a storage failure
 device-key immutability/cleanup/
 concurrency, real gateway stream/invite notifications, and audience-bound
 OpenID tokens with the option on and off (`openid_audience.rs`,
-`openid_audience_disabled.rs`). Stream classification
+`openid_audience_disabled.rs`), and OpenID userinfo room membership
+(`openid_room_membership.rs`). Stream classification
 also has unit tests in `src/service/pusher/tests.rs`.
 
 The v1.9.3 rebase adds pins for its semantic overlaps:

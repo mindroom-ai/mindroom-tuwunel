@@ -26,9 +26,9 @@ const NEWCOMER_TOKEN: &str = "state-departed-member-newcomer-access-token";
 /// The kicked member's `/state` and `/members` still show the room as it was
 /// at the kick, while the owner reads the current state. An `at` token on
 /// `/members` reads that token's snapshot, except that a former member reads
-/// no later than their departure. The room summary, which shows the current
-/// state, is refused to the kicked member but given to the owner and to the
-/// invited newcomer.
+/// no later than their departure. The room summary and aliases, which show the
+/// room as it is now, are refused to the kicked member; the owner reads both,
+/// and the invited newcomer reads the summary.
 #[test]
 fn departed_member_reads_state_at_departure() -> Result {
 	let options: [&str; 0] = [];
@@ -75,6 +75,9 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.await?;
 
 	let member_summary = member.summary(&room_id).await?;
+	let aliases_path = format!("rooms/{room_id}/aliases");
+	let member_aliases = member.status(&aliases_path).await?;
+	let owner_aliases = owner.status(&aliases_path).await?;
 	let owner_summary: Value = owner.summary(&room_id).await?.json().await?;
 	let newcomer_summary: Value = newcomer.summary(&room_id).await?.json().await?;
 
@@ -144,6 +147,8 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		StatusCode::FORBIDDEN,
 		"kicked member reads the current summary"
 	);
+	assert_eq!(member_aliases, StatusCode::FORBIDDEN, "kicked member reads the aliases");
+	assert_eq!(owner_aliases, StatusCode::OK, "owner is refused the aliases");
 	assert_eq!(
 		owner_summary["name"], "after",
 		"owner's summary lacks the new name: {owner_summary}"
@@ -191,6 +196,24 @@ async fn get(&self, path: &str) -> Result<Value> {
 		.await?;
 
 	Ok(response)
+}
+
+/// Get one endpoint path as this user and keep only the reply's status.
+///
+/// A refusal is a status to assert, not an error.
+#[implement(Client, params = "<'_>")]
+async fn status(&self, path: &str) -> Result<StatusCode> {
+	let response = self
+		.services
+		.client
+		.clients
+		.default
+		.get(self.url(path))
+		.bearer_auth(self.token)
+		.send()
+		.await?;
+
+	Ok(response.status())
 }
 
 /// Request a room's summary as this user and keep the raw reply.
