@@ -16,7 +16,7 @@ use ruma::{
 	},
 };
 use serde_json::{Value as JsonValue, from_slice};
-use tuwunel_core::{Error, Result, err, implement, utils::string::EMPTY};
+use tuwunel_core::{Err, Error, Result, err, implement, utils::string::EMPTY};
 use tuwunel_service::{Services, appservice::RegistrationInfo};
 
 use super::{
@@ -28,8 +28,9 @@ use crate::State;
 
 /// Extracts a typed Ruma request and its authentication context.
 ///
-/// Administrator-only routes defer JSON errors until authorization succeeds.
-/// Ordinary routes reject malformed JSON before authentication.
+/// Only a federation request's body, which its signature covers, is parsed
+/// before authentication. Other bodies are parsed once the caller is
+/// authenticated, and authorized on administrator-only routes.
 #[derive(Debug)]
 pub struct Args<T, const ADMIN: bool = false> {
 	/// Request struct body
@@ -58,10 +59,17 @@ pub struct Args<T, const ADMIN: bool = false> {
 	pub rate_limit_ip: Result<IpAddr, &'static str>,
 }
 
-/// Requires administrator authorization before returning request body errors.
+/// Requires administrator authorization before the request body is parsed.
 ///
-/// Routes opt in through this alias; the default extractor retains its ordering.
+/// Routes opt in through this alias.
 pub type ArgsAdmin<T> = Args<T, true>;
+
+/// Marks a request the MAS extractor authenticated with the shared secret.
+///
+/// That extractor runs before the body extractor, which then treats the
+/// request as authenticated.
+#[derive(Clone, Copy, Debug)]
+pub struct MasAuthenticated;
 
 /// Returns the user authenticated for a route requiring a user identity.
 ///
@@ -131,22 +139,21 @@ where
 	) -> Result<Self, Self::Rejection> {
 		let route = TypeId::of::<T>();
 		let mut request = request_from(services, request).await?;
+		let federation = T::Authentication::SCHEME == Scheme::ServerSignatures;
 
 		// A federation request waits for its origin's key before its body is
 		// parsed, so a slow key fetch holds only the raw body. The signature
 		// check uses this key rather than looking it up again.
-		if T::Authentication::SCHEME == Scheme::ServerSignatures {
+		let json_body = if federation {
 			let origin_key = origin_key(services, &mut request).await?;
 			request.parts.extensions.insert(origin_key);
-		}
-
-		let json_body = match ADMIN {
-			| true => parse_json(&request, route),
-			| false => Ok(parse_json(&request, route)?),
+			parse_json(&request, route)?
+		} else {
+			None
 		};
 
-		let json = json_body.as_ref().ok().and_then(Option::as_ref);
-		let (request, auth) = authenticate::<T>(request, services, json, route).await?;
+		let (request, auth) =
+			authenticate::<T>(request, services, json_body.as_ref(), route).await?;
 
 		_ = request
 			.parts
@@ -162,7 +169,27 @@ where
 			require_admin(services, sender).await?;
 		}
 
-		make_args(services, request, json_body?, auth)
+		let json_body = match federation {
+			| true => json_body,
+			| false => {
+				let anonymous = auth.sender_user.is_none()
+					&& request
+						.parts
+						.extensions
+						.get::<MasAuthenticated>()
+						.is_none();
+
+				if anonymous && json_tokens(&request.body) > MAX_ANONYMOUS_JSON_TOKENS {
+					return Err!(Request(TooLarge(
+						"Request body has too many JSON values for an unauthenticated request."
+					)));
+				}
+
+				parse_json(&request, route)?
+			},
+		};
+
+		make_args(services, request, json_body, auth)
 	}
 }
 
@@ -185,6 +212,16 @@ fn record_auth_context(span: &tracing::Span, auth: &Auth) {
 		span.record("origin", origin.as_str());
 	});
 }
+
+/// Most brackets, commas and colons in the body of a request without an
+/// authenticated user or MAS.
+///
+/// Such requests (login, registration, token refresh, email and phone token
+/// requests, rendezvous) send flat objects of a few dozen values. A parsed tree
+/// can take about a hundred times the text of small values, so this bounds the
+/// structure of such a body's tree to a few hundred KiB on top of the bytes of
+/// its strings.
+const MAX_ANONYMOUS_JSON_TOKENS: usize = 1024;
 
 /// Parses canonical JSON while retaining ordinary JSON for typed deserialization.
 ///
@@ -225,6 +262,25 @@ fn parse_json(request: &Request, route: TypeId) -> Result<Option<CanonicalJsonVa
 /// here too, so its bytes are stored and served exactly as sent.
 fn takes_raw_body(route: TypeId) -> bool {
 	route == TypeId::of::<UploadRequest>() || route == TypeId::of::<AsyncUploadRequest>()
+}
+
+/// Counts the brackets, commas and colons outside strings without parsing.
+///
+/// Every value but the outermost follows one of them, so the count bounds the
+/// values and members a parse would build.
+fn json_tokens(body: &[u8]) -> usize {
+	let (mut tokens, mut string, mut escaped) = (0_usize, false, false);
+	for &byte in body {
+		match byte {
+			| _ if escaped => escaped = false,
+			| b'\\' if string => escaped = true,
+			| b'"' => string = !string,
+			| b'[' | b'{' | b',' | b':' if !string => tokens = tokens.saturating_add(1),
+			| _ => {},
+		}
+	}
+
+	tokens
 }
 
 /// Authenticates a request while retaining the headers consumed by extraction.

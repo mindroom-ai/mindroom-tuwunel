@@ -22,7 +22,7 @@ use axum_extra::{
 };
 use http::request::Parts;
 use ruma::{OwnedUserId, UserId};
-use tuwunel_api::router::{Ruma, State};
+use tuwunel_api::router::{MasAuthenticated, Ruma, State};
 use tuwunel_core::{Err, Error, Result, err, mod_ctor, mod_dtor};
 
 pub(crate) use self::{
@@ -39,6 +39,9 @@ pub(crate) use self::{
 /// Asserts a request originates from MAS by matching its bearer token against
 /// the configured shared secret, the equivalent of Synapse's
 /// `assert_request_is_from_mas`. Rejects with 403 on mismatch or no secret.
+///
+/// An accepted request carries [`MasAuthenticated`] in its extensions, so the
+/// body extractor that runs next treats the request as authenticated.
 pub(crate) struct Mas;
 
 impl FromRequestParts<State> for Mas {
@@ -65,7 +68,10 @@ impl FromRequestParts<State> for Mas {
 			.map(|TypedHeader(Authorization(bearer))| bearer.token());
 
 		match (secret, token) {
-			| (Some(secret), Some(token)) if secret == token => Ok(Self),
+			| (Some(secret), Some(token)) if secret == token => {
+				parts.extensions.insert(MasAuthenticated);
+				Ok(Self)
+			},
 			| _ => Err!(Request(Forbidden("This endpoint may only be called by MAS"))),
 		}
 	}
