@@ -495,6 +495,20 @@ otherwise the sign-in is treated as a new user, and
 Upstream has the same bug. Files: `src/service/oauth/{mod.rs,user_info.rs}`,
 `src/api/client/session/sso.rs`.
 
+### SSO sign-in skips usernames reserved by an appservice
+
+A new SSO account took its username from the identity's claims, such as
+`preferred_username` or the email's local part, without checking appservice
+namespaces, while `/register` and native OIDC registration refuse a username
+an appservice reserves exclusively. Signing in with an email like
+`whatsapp_<number>@example.com` on a server with public SSO and a WhatsApp
+bridge registered the bridge's ghost user ID, and the bridge later took that
+account as its own ghost. A claim inside an exclusive namespace is now skipped
+like a forbidden username, so the next claim or the identity's fallback
+username is used. Upstream has the same bug. File:
+`src/api/client/session/sso.rs`; test in
+`src/main/tests/sso_fallback_account.rs`.
+
 ### Knock state is checked before it is stored
 
 A knock on a room this server is not in stored every non-member
