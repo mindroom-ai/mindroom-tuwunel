@@ -1105,6 +1105,26 @@ Behavior:
   environment setting remains in the CI owner after dropping the full-state
   sync fix now supplied by upstream.
 
+### 7) `admin: rename a local user in place (query user-id-rewrite)`
+Files:
+- `src/admin/query/user_id_rewrite/{mod,plan,scan,apply}.rs`, `src/admin/query/mod.rs`
+- `docs/user-id-rewrite.md`
+
+Behavior:
+- `query user-id-rewrite scan --from <id> --to <id> --report <path>` reports
+  every occurrence of a local user ID and the planned action per database map,
+  without writing. `apply` with the same IDs plus `--confirm-offline-clone`
+  rewrites the ID in place and scans again; `--rewrite-event-graph` also
+  rewrites historical events. Both run on a stopped server through `--execute`.
+- Maps are classed raw replace, clear (the user's devices, tokens and keys),
+  clear own keys only, event graph, skip (`tokenids`) or unknown; a match in an
+  unknown map, or a value-only match in an own-keys map, blocks `apply`.
+- Not upstream. Rewritten events no longer match their hashes and signatures,
+  so the command is only for rooms not shared with other servers.
+- Used on `mindroom.chat` on 2026-10-19 to rename an agent account: scan
+  43 s, apply 68 s, Tuwunel down 2 min 44 s. Operator
+  guide: [docs/user-id-rewrite.md](docs/user-id-rewrite.md).
+
 ## Tests
 
 Fork integration tests live in the `mindroom-tests` crate
