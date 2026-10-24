@@ -74,6 +74,10 @@ pub(super) async fn auth<A: AuthDispatch>(
 	};
 
 	let token = match find_token(services, access_token).await? {
+		// Refresh tokens share the access token map, but only /refresh redeems them.
+		| Token::User(_) if access_token.is_some_and(|token| token.starts_with("refresh_")) =>
+			Token::Invalid,
+
 		| Token::User((_, _, expires_at))
 			if expires_at.is_some_and(is_less_than!(SystemTime::now())) =>
 			Token::Expired(access_token.unwrap_or_default().into()),

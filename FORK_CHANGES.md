@@ -764,6 +764,18 @@ Upstream has the same bug. Files: `src/service/users/device.rs`,
 `src/main/tests/refresh_removed_device.rs` and
 `src/main/tests/refresh_concurrent.rs`.
 
+### A refresh token does not authenticate requests
+
+Refresh tokens are stored in the same token map as access tokens, so request
+authentication accepted a refresh token as a bearer token. Used that way it
+stayed valid until the device next rotated it, since refresh tokens carry no
+expiry under the default `refresh_token_ttl = 0`, and it never went through the
+rotation and reuse detection that `/refresh` applies. A presented token with
+the `refresh_` prefix every refresh token carries now authenticates nothing and
+gets `M_UNKNOWN_TOKEN`; `/refresh` still redeems it, and OIDC revocation still
+accepts either kind. Upstream has the same bug. Files:
+`src/api/router/auth.rs`; test in `src/main/tests/refresh_token_bearer.rs`.
+
 ### OpenID tokens can be bound to a relying party audience
 
 Files:
