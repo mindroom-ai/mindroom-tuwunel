@@ -77,6 +77,11 @@ pub(super) async fn auth<A: AuthDispatch>(
 
 	// An expired token can still sign out, so a client can end a session it cannot resume.
 	let token = match find_token(services, access_token).await? {
+		// Refresh tokens share the access token map, but only the refresh
+		// endpoints redeem them.
+		| Token::User(_) if access_token.is_some_and(|token| token.starts_with("refresh_")) =>
+			Token::Invalid,
+
 		| Token::User((_, _, expires_at))
 			if deadline_has_passed(expires_at) && !is_logout(route) =>
 			Token::Expired,
