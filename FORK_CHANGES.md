@@ -771,10 +771,11 @@ authentication accepted a refresh token as a bearer token. Used that way it
 stayed valid until the device next rotated it, since refresh tokens carry no
 expiry under the default `refresh_token_ttl = 0`, and it never went through the
 rotation and reuse detection that `/refresh` applies. A presented token with
-the `refresh_` prefix every refresh token carries now authenticates nothing and
-gets `M_UNKNOWN_TOKEN`; `/refresh` still redeems it, and OIDC revocation still
-accepts either kind. Upstream has the same bug. Files:
-`src/api/router/auth.rs`; test in `src/main/tests/refresh_token_bearer.rs`.
+the `refresh_` prefix every refresh token carries now authenticates no client
+API request, and routes that need a token answer `M_UNKNOWN_TOKEN`; `/refresh`
+and the OIDC token endpoint still redeem it, and OIDC revocation still accepts
+either kind. Upstream has the same bug. File: `src/api/router/auth.rs`; test in
+`src/main/tests/refresh_token_bearer.rs`.
 
 ### OpenID tokens can be bound to a relying party audience
 

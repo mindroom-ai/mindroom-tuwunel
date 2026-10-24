@@ -74,7 +74,8 @@ pub(super) async fn auth<A: AuthDispatch>(
 	};
 
 	let token = match find_token(services, access_token).await? {
-		// Refresh tokens share the access token map, but only /refresh redeems them.
+		// Refresh tokens share the access token map, but only the refresh
+		// endpoints redeem them.
 		| Token::User(_) if access_token.is_some_and(|token| token.starts_with("refresh_")) =>
 			Token::Invalid,
 
