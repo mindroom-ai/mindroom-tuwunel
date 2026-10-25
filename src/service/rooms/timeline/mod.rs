@@ -152,22 +152,23 @@ pub async fn replace_pdu(&self, pdu_id: &RawPduId, pdu_json: &CanonicalJsonObjec
 	Ok(())
 }
 
-/// Replaces a redacted event and its optional thread root in one batch.
+/// Replaces a redacted event and the rows it changes in one batch.
 ///
-/// The caller retains the room guard through this write. The redacted row is
+/// Those rows are its thread root and the state event that replaced it. The
+/// caller retains the room guard through this write. The redacted row is
 /// staged last so it wins when a reply names itself as its root.
 #[implement(Service)]
-#[tracing::instrument(skip(self, pdu, root), level = "debug")]
+#[tracing::instrument(skip(self, pdu, related), level = "debug")]
 pub(super) async fn replace_redacted_pdu(
 	&self,
 	pdu_id: &RawPduId,
 	pdu: &CanonicalJsonObject,
-	root: Option<(RawPduId, CanonicalJsonObject)>,
+	related: &[(RawPduId, CanonicalJsonObject)],
 ) -> Result {
 	self.require_pdu(pdu_id).await?;
-	root.as_ref()
+	related
+		.iter()
 		.map(|(id, json)| (id, json))
-		.into_iter()
 		.chain([(pdu_id, pdu)])
 		.fold(self.db.db.txn(), |mut txn, (id, json)| {
 			self.stage_replace_pdu(&mut txn, id, json);

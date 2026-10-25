@@ -1,10 +1,13 @@
 use std::{
-	collections::HashMap, iter::once, num::NonZeroUsize, sync::atomic::AtomicUsize,
+	collections::{HashMap, VecDeque},
+	iter::once,
+	num::NonZeroUsize,
+	sync::atomic::AtomicUsize,
 	time::Duration,
 };
 
 use futures::{
-	FutureExt, StreamExt, TryStreamExt,
+	StreamExt, TryStreamExt,
 	stream::{FuturesOrdered, FuturesUnordered},
 };
 use ruma::{
@@ -36,6 +39,10 @@ pub(super) type Pdus = HashMap<OwnedEventId, (PduEvent, CanonicalJsonObject)>;
 
 /// Events requested by the `/get_missing_events` batch before the walk.
 const MISSING_EVENTS_LIMIT: NonZeroUsize = NonZeroUsize::new(10).unwrap();
+
+/// Fetches one walk runs at once. This covers every prev event of one event,
+/// at most 20, and leaves most of the fetcher's 256 slots to other rooms.
+const PREV_FETCH_WIDTH: usize = 32;
 
 /// An incoming event's missing previous events, walked backwards.
 ///
@@ -109,7 +116,7 @@ where
 		})
 		.await;
 
-	let mut todo_outlier_stack: FuturesOrdered<_> = initial_set
+	let mut waiting: VecDeque<OwnedEventId> = initial_set
 		.try_stream()
 		.map_ok(ToOwned::to_owned)
 		.try_filter_map(async |event_id| {
@@ -125,27 +132,40 @@ where
 				| Err(_) => Ok(Some(event_id)),
 			}
 		})
-		.map_ok(async |event_id| {
-			let events = once(event_id.as_ref());
-			let auth = self
-				.fetch_auth(origin, room_id, events, room_version, recursion_level, held_bytes)
-				.await;
-
-			(event_id, auth)
-		})
-		.map_ok(FutureExt::boxed) // heterogeneous FuturesOrdered
 		.try_collect()
 		.await?;
 
-	// Queued fetches all run at once and hold their results until they are
-	// popped, so the cap counts every queued event, not only the walked ones.
+	let fetch = async |event_id: OwnedEventId| {
+		let events = once(event_id.as_ref());
+		let auth = self
+			.fetch_auth(origin, room_id, events, room_version, recursion_level, held_bytes)
+			.await;
+
+		(event_id, auth)
+	};
+
+	// Every queued event is fetched in the end, so the cap counts them all, not
+	// only the walked ones.
 	let limit = usize::from(self.services.server.config.max_fetch_prev_events);
-	let mut queued = todo_outlier_stack.len();
+	let mut queued = waiting.len();
 	let mut capped = false;
 	let mut pdus = HashMap::new();
-	let mut graph: HashMap<OwnedEventId, _> = HashMap::with_capacity(todo_outlier_stack.len());
+	let mut graph: HashMap<OwnedEventId, _> = HashMap::with_capacity(waiting.len());
+	let mut todo_outlier_stack = FuturesOrdered::new();
 
-	while let Some((prev_event_id, mut outlier)) = todo_outlier_stack.next().await {
+	loop {
+		// A finished fetch counts until it is popped, so at most PREV_FETCH_WIDTH
+		// run at once.
+		let free = PREV_FETCH_WIDTH
+			.saturating_sub(todo_outlier_stack.len())
+			.min(waiting.len());
+
+		todo_outlier_stack.extend(waiting.drain(..free).map(&fetch));
+
+		let Some((prev_event_id, mut outlier)) = todo_outlier_stack.next().await else {
+			break;
+		};
+
 		self.services.server.check_running()?;
 
 		let Some((pdu, mut json_opt)) = outlier.pop() else {
@@ -190,23 +210,7 @@ where
 				}
 
 				queued = queued.saturating_add(1);
-				let prev_prev = prev_prev.to_owned();
-				let fetch = async move {
-					let fetch = self
-						.fetch_auth(
-							origin,
-							room_id,
-							once(prev_prev.as_ref()),
-							room_version,
-							recursion_level,
-							held_bytes,
-						)
-						.await;
-
-					(prev_prev, fetch)
-				};
-
-				todo_outlier_stack.push_back(fetch.boxed()); // heterogeneous FuturesOrdered
+				waiting.push_back(prev_prev.to_owned());
 			}
 
 			graph.insert(
