@@ -1,4 +1,6 @@
-use futures::{Stream, StreamExt, TryStreamExt};
+use std::cmp::Reverse;
+
+use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt, stream};
 use ruma::{
 	EventId, OwnedUserId, UserId,
 	api::Direction,
@@ -7,7 +9,7 @@ use ruma::{
 use tuwunel_core::{
 	PduId, Result,
 	arrayvec::ArrayVec,
-	implement, is_equal_to,
+	debug_warn, implement, is_equal_to,
 	matrix::{Event, Pdu, PduCount, RawPduId, event::RelationTypeEqual},
 	utils::{
 		result::NotFound,
@@ -20,6 +22,9 @@ use super::Service;
 use crate::rooms::short::ShortRoomId;
 
 type StartKey = ArrayVec<u8, 16>;
+
+/// Most relation rows one recursive walk reads.
+const RECURSIVE_ROW_LIMIT: usize = 65_536;
 
 /// Parameters controlling a relation-row query.
 ///
@@ -189,6 +194,100 @@ pub fn try_get_relations_limited<'a>(
 		limit,
 	}: RelationQuery<'a>,
 ) -> impl Stream<Item = Result<(PduCount, Pdu)>> + Send + '_ {
+	self.relation_counts(target, from, dir)
+		.take(limit)
+		.wide_and_then(move |count| self.load_relation(shortroomid, count, user_id))
+		.ready_try_filter_map(Ok)
+}
+
+/// Walks the events relating to `target` directly, at depth zero, and through
+/// up to `max_depth` further relations, in `dir` order after `from`.
+///
+/// The positions of the whole tree are read from the relation rows before any
+/// event is loaded, so `from` applies to every depth alike and the walk is in
+/// position order however deep each event is. At most
+/// `RECURSIVE_ROW_LIMIT` rows are read; a larger tree is cut short.
+#[implement(Service)]
+pub fn get_relations_recursive<'a>(
+	&'a self,
+	shortroomid: ShortRoomId,
+	target: PduCount,
+	from: Option<PduCount>,
+	dir: Direction,
+	user_id: Option<&'a UserId>,
+	max_depth: usize,
+) -> impl Stream<Item = (usize, PduCount, Pdu)> + Send + 'a {
+	self.relation_tree(target, from, dir, max_depth)
+		.map(|tree| stream::iter(tree).map(Ok))
+		.flatten_stream()
+		.wide_and_then(move |(depth, count)| {
+			self.load_relation(shortroomid, count, user_id)
+				.map_ok(move |relation| relation.map(|(count, pdu)| (depth, count, pdu)))
+		})
+		.ready_try_filter_map(Ok)
+		.ignore_err()
+}
+
+/// Positions and depths of the events relating to `target` up to `max_depth`,
+/// ordered in `dir` after `from`.
+#[implement(Service)]
+async fn relation_tree(
+	&self,
+	target: PduCount,
+	from: Option<PduCount>,
+	dir: Direction,
+	max_depth: usize,
+) -> Vec<(usize, PduCount)> {
+	// An event relates only to an event stored before it, so it is newer than
+	// all its ancestors. Walking backward, nothing below an event at or past
+	// `from` comes before `from`, so `from` bounds every level. Walking forward,
+	// an event before `from` can have descendants after it.
+	let bound = from.filter(|_| dir == Direction::Backward);
+
+	let mut tree = Vec::new();
+	let mut parents = vec![target];
+	for depth in 0..=max_depth {
+		let level: Vec<PduCount> = stream::iter(&parents)
+			.map(|&parent| self.relation_counts(parent, bound, dir))
+			.flatten()
+			.ignore_err()
+			.take(RECURSIVE_ROW_LIMIT.saturating_sub(tree.len()))
+			.collect()
+			.await;
+
+		tree.extend(level.iter().map(|&count| (depth, count)));
+		parents = level;
+	}
+
+	if tree.len() >= RECURSIVE_ROW_LIMIT {
+		debug_warn!(?target, "Recursive relations walk cut short at {RECURSIVE_ROW_LIMIT} rows");
+	}
+
+	tree.retain(|&(_, count)| match (from, dir) {
+		| (None, _) => true,
+		| (Some(from), Direction::Backward) => count < from,
+		| (Some(from), Direction::Forward) => count > from,
+	});
+
+	match dir {
+		| Direction::Backward => tree.sort_unstable_by_key(|&(_, count)| Reverse(count)),
+		| Direction::Forward => tree.sort_unstable_by_key(|&(_, count)| count),
+	}
+
+	// An event relating to two events of the tree is reached twice.
+	tree.dedup_by_key(|&mut (_, count)| count);
+	tree
+}
+
+/// Walks the positions of the events relating to `target` in `dir` order after
+/// `from`, without loading the events.
+#[implement(Service)]
+fn relation_counts(
+	&self,
+	target: PduCount,
+	from: Option<PduCount>,
+	dir: Direction,
+) -> impl Stream<Item = Result<PduCount>> + Send + '_ {
 	let target = target.to_be_bytes();
 	let from = from
 		.map(|from| from.saturating_inc(dir))
@@ -219,23 +318,29 @@ pub fn try_get_relations_limited<'a>(
 			.right_stream(),
 	}
 	.ready_try_take_while(move |key| Ok(key.starts_with(&target)))
-	.take(limit)
 	.map_ok(|to_from| u64_from_u8(&to_from[8..16]))
 	.map_ok(PduCount::from_unsigned)
-	.map_ok(move |count| (user_id, shortroomid, count))
-	.wide_and_then(async |(user_id, shortroomid, count)| {
-		let pdu_id: RawPduId = PduId { shortroomid, count }.into();
+}
 
-		self.services
-			.timeline
-			.get_pdu_from_id(&pdu_id)
-			.await
-			.optional()?
-			.map(|pdu| {
-				pdu.without_transaction_id_unless_sender(user_id)
-					.map(|pdu| (count, pdu))
-			})
-			.transpose()
-	})
-	.ready_try_filter_map(Ok)
+/// Loads the relating event at `count`, without the transaction ID unless
+/// `user_id` sent it. A missing event is `None`.
+#[implement(Service)]
+async fn load_relation(
+	&self,
+	shortroomid: ShortRoomId,
+	count: PduCount,
+	user_id: Option<&UserId>,
+) -> Result<Option<(PduCount, Pdu)>> {
+	let pdu_id: RawPduId = PduId { shortroomid, count }.into();
+
+	self.services
+		.timeline
+		.get_pdu_from_id(&pdu_id)
+		.await
+		.optional()?
+		.map(|pdu| {
+			pdu.without_transaction_id_unless_sender(user_id)
+				.map(|pdu| (count, pdu))
+		})
+		.transpose()
 }

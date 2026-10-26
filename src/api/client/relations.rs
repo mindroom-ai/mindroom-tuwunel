@@ -1,11 +1,5 @@
-use std::iter::once;
-
 use axum::extract::State;
-use futures::{
-	FutureExt, StreamExt, TryFutureExt,
-	future::try_join3,
-	stream::{select_all, unfold},
-};
+use futures::{FutureExt, StreamExt, TryFutureExt, future::try_join3};
 use ruma::{
 	EventId, RoomId, UInt, UserId,
 	api::{
@@ -181,25 +175,35 @@ async fn paginate_relations_with_filter(
 		}));
 	}
 
-	let fetch = |depth: usize, count: PduCount| {
-		services
+	let mut events = match recurse {
+		| false => services
 			.pdu_metadata
-			.get_relations(shortroomid, count, from, dir, Some(sender_user))
-			.map(move |(count, pdu)| (depth, count, pdu))
-			.ready_filter(|(_, count, _)| matches!(count, PduCount::Normal(_)))
-			.boxed()
-	};
+			.get_relations(shortroomid, target.count, from, dir, Some(sender_user))
+			.map(|(count, pdu)| (0, count, pdu))
+			.left_stream(),
 
-	let mut events = unfold(select_all(once(fetch(0, target.count))), async |mut relations| {
-		let (depth, count, pdu) = relations.next().await?;
-
-		if depth < max_depth {
-			relations.push(fetch(depth.saturating_add(1), count));
-		}
-
-		Some(((depth, count, pdu), relations))
+		| true => services
+			.pdu_metadata
+			.get_relations_recursive(
+				shortroomid,
+				target.count,
+				from,
+				dir,
+				Some(sender_user),
+				max_depth,
+			)
+			.right_stream(),
+	}
+	.ready_filter(|(_, count, _)| matches!(count, PduCount::Normal(_)))
+	.ready_take_while(|&(_, count, _)| match to {
+		// The recursive walk is in position order, so it ends at the first
+		// event past `to`, whether or not `to` is one of its events.
+		| Some(to) if recurse => match dir {
+			| Direction::Backward => count > to,
+			| Direction::Forward => count < to,
+		},
+		| to => Some(count) != to,
 	})
-	.ready_take_while(|&(_, count, _)| Some(count) != to)
 	.ready_filter(|(_, _, pdu)| {
 		filter_event_type
 			.as_ref()
