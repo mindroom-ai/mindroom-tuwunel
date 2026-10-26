@@ -1,9 +1,11 @@
+use std::{collections::HashSet, mem::take};
+
 use axum::extract::State;
 use futures::{
-	StreamExt,
+	Stream, StreamExt,
 	future::Either::{Left, Right},
+	pin_mut,
 };
-use itertools::Itertools;
 use ruma::{
 	EventId, RoomId, UInt, UserId,
 	api::{
@@ -16,9 +18,8 @@ use ruma::{
 	events::{TimelineEventType, relation::RelationType},
 };
 use tuwunel_core::{
-	Err, Result, at, err,
+	Err, Result, at, debug_warn, err,
 	utils::{
-		extended,
 		math::usize_from_ruma_bounded,
 		result::FlatOk,
 		stream::{IterStream, ReadyExt, WidebandExt},
@@ -33,8 +34,22 @@ use tuwunel_service::{Services, rooms::pdu_metadata::RequesterQuery};
 
 use crate::{Ruma, is_ignored_pdu};
 
-/// The next level's targets and the events retained so far in a recursive walk.
-type Level = (Vec<PduCount>, Vec<(PduCount, Pdu)>);
+/// Limits on one recursive `/relations` walk.
+#[derive(Clone, Copy)]
+struct WalkLimits {
+	events: usize,
+	rows: usize,
+}
+
+const WALK_LIMITS: WalkLimits = WalkLimits { events: 32_768, rows: 262_144 };
+
+/// Progress carried across levels of a recursive `/relations` walk.
+struct WalkState<T> {
+	frontier: Vec<PduCount>,
+	events: Vec<(PduCount, T)>,
+	seen: HashSet<PduCount>,
+	rows: usize,
+}
 
 /// How much of the room's history a requester may read through its relations.
 ///
@@ -147,7 +162,6 @@ async fn paginate_relations_with_filter(
 	recurse: bool,
 	dir: Direction,
 ) -> Result<Response> {
-	let recursion_depth = recurse.then(|| UInt::from(RECURSION_DEPTH));
 	let from: Option<PduCount> = from.map(str::parse).transpose()?;
 
 	let to: Option<PduCount> = to.map(str::parse).flat_ok();
@@ -172,7 +186,7 @@ async fn paginate_relations_with_filter(
 
 	let PduCount::Normal(_) = target.count else {
 		return Ok(Response {
-			recursion_depth,
+			recursion_depth: recurse.then(|| UInt::from(RECURSION_DEPTH)),
 			..Response::new(Vec::new())
 		});
 	};
@@ -199,19 +213,36 @@ async fn paginate_relations_with_filter(
 		ignored: ignored.as_ref(),
 	};
 
-	let relations = if recurse {
-		let relations = walk_relations(services, query, &filter)
-			.await
-			.stream();
+	let walked = match recurse {
+		| true => Some(
+			walk_relations(
+				query,
+				WALK_LIMITS,
+				move |target, row_room| {
+					services.pdu_metadata.requester_relation_rows(
+						RequesterQuery { target, from: None, to: None, ..query },
+						row_room,
+					)
+				},
+				&filter,
+			)
+			.await,
+		),
+		| false => None,
+	};
 
-		Left(relations)
-	} else {
-		let relations = services
-			.pdu_metadata
-			.requester_relations(query)
-			.ready_filter(&filter);
-
-		Right(relations)
+	let (recursion_depth, relations) = match walked {
+		| Some(Some((depth, events))) =>
+			(Some(UInt::from(depth)), Left(events.into_iter().stream())),
+		| fallback => (
+			fallback.map(|_| UInt::from(0_u32)),
+			Right(
+				services
+					.pdu_metadata
+					.requester_relations(query)
+					.ready_filter(&filter),
+			),
+		),
 	};
 
 	let mut events = relations
@@ -370,64 +401,250 @@ async fn served(
 	}
 }
 
-/// Walks matching relations by level and returns the requested window in count order.
-///
-/// Descent ignores from/to because an outside parent can have children inside.
-/// Only matching children are descended through, and only those inside are retained.
-async fn walk_relations(
-	services: &Services,
+/// Walks matching relations by level within `limits` and returns the depth
+/// reached and the requested window in count order, or `None` when depth 1
+/// overflows so the caller can fall back to direct relations lazily.
+async fn walk_relations<T, F, S, P>(
 	query: RequesterQuery<'_>,
-	filter: &(impl Fn(&(PduCount, Pdu)) -> bool + Sync),
-) -> impl Iterator<Item = (PduCount, Pdu)> {
-	let (_, events) = (1..=RECURSION_DEPTH)
-		.stream()
-		.fold((vec![query.target], Vec::new()), async |state, depth| {
-			walk_level(services, query, filter, state, depth).await
-		})
-		.await;
+	limits: WalkLimits,
+	fetch: F,
+	filter: &P,
+) -> Option<(u32, Vec<(PduCount, T)>)>
+where
+	T: Send,
+	F: Fn(PduCount, usize) -> S + Send + Sync,
+	S: Stream<Item = Option<(PduCount, T)>> + Send,
+	P: Fn(&(PduCount, T)) -> bool + Sync,
+{
+	let mut state = WalkState {
+		frontier: vec![query.target],
+		events: Vec::new(),
+		seen: HashSet::from([query.target]),
+		rows: 0,
+	};
+	let mut reached = RECURSION_DEPTH;
 
-	events
-		.into_iter()
-		.sorted_unstable_by(|(a, _), (b, _)| match query.dir {
+	for depth in 1..=RECURSION_DEPTH {
+		if state.frontier.is_empty() {
+			break;
+		}
+		if !walk_level(query, limits, &fetch, filter, &mut state, depth).await {
+			debug_warn!(
+				target = ?query.target,
+				depth,
+				"Recursive relations walk dropped a level over its limits",
+			);
+			reached = depth.checked_sub(1).filter(|&d| d > 0)?;
+			break;
+		}
+	}
+
+	state
+		.events
+		.sort_unstable_by(|(a, _), (b, _)| match query.dir {
 			| Direction::Forward => a.cmp(b),
 			| Direction::Backward => b.cmp(a),
-		})
+		});
+
+	Some((reached, state.events))
 }
 
-async fn walk_level(
-	services: &Services,
+async fn walk_level<T, F, S, P>(
 	query: RequesterQuery<'_>,
-	filter: &(impl Fn(&(PduCount, Pdu)) -> bool + Sync),
-	(frontier, events): Level,
+	limits: WalkLimits,
+	fetch: &F,
+	filter: &P,
+	state: &mut WalkState<T>,
 	depth: u32,
-) -> Level {
-	let accumulate =
-		|(frontier, events), (child, event)| (extended(frontier, child), extended(events, event));
-
-	frontier
+) -> bool
+where
+	T: Send,
+	F: Fn(PduCount, usize) -> S + Sync,
+	S: Stream<Item = Option<(PduCount, T)>> + Send,
+	P: Fn(&(PduCount, T)) -> bool + Sync,
+{
+	let frontier = take(&mut state.frontier);
+	let row_room = limits
+		.rows
+		.saturating_sub(state.rows)
+		.saturating_add(1);
+	let stream = frontier
 		.into_iter()
 		.stream()
-		.flat_map(|target| {
-			services
-				.pdu_metadata
-				.requester_relations(RequesterQuery { target, from: None, to: None, ..query })
-		})
-		.ready_filter(filter)
-		.map(|(count, pdu)| {
-			let child = depth.lt(&RECURSION_DEPTH).then_some(count);
+		.flat_map(|target| fetch(target, row_room))
+		.take(row_room);
 
-			let event = query
-				.from
-				.is_none_or(|from| from.is_before(count, query.dir))
-				.then_some((count, pdu))
-				.filter(|(count, _)| {
-					query
-						.to
-						.is_none_or(|to| count.is_before(to, query.dir))
-				});
+	pin_mut!(stream);
 
-			(child, event)
-		})
-		.ready_fold((Vec::new(), events), accumulate)
-		.await
+	let mut rows = state.rows;
+	let (mut next_frontier, mut level_events) = (Vec::new(), Vec::new());
+	while let Some(item) = stream.next().await {
+		rows = rows.saturating_add(1);
+		if rows > limits.rows {
+			return false;
+		}
+		let Some((count, event)) = item.filter(filter) else {
+			continue;
+		};
+		if !state.seen.insert(count) {
+			continue;
+		}
+		if state.seen.len().saturating_sub(1) > limits.events {
+			return false;
+		}
+		if depth < RECURSION_DEPTH {
+			next_frontier.push(count);
+		}
+		if query
+			.from
+			.is_none_or(|from| from.is_before(count, query.dir))
+			&& query
+				.to
+				.is_none_or(|to| count.is_before(to, query.dir))
+		{
+			level_events.push((count, event));
+		}
+	}
+
+	state.frontier = next_frontier;
+	state.events.extend(level_events);
+	state.rows = rows;
+	true
+}
+
+#[cfg(test)]
+mod tests {
+	use std::collections::HashMap;
+
+	use ruma::user_id;
+
+	use super::*;
+
+	type Graph = HashMap<u64, Vec<Option<u64>>>;
+
+	fn sample_graph() -> Graph {
+		// Depth 1 (under 1): 2, 3, None (unservable), 4 -> 4 rows, 3 events
+		// Depth 2 (under 2, 3, 4): 5, 6, None, 7 -> 4 rows, 3 events
+		// Depth 3 (under 5): 8 -> 1 row, 1 event
+		HashMap::from([
+			(1, vec![Some(2), Some(3), None, Some(4)]),
+			(2, vec![Some(5), None]),
+			(3, vec![Some(6)]),
+			(4, vec![Some(7)]),
+			(5, vec![Some(8)]),
+		])
+	}
+
+	fn test_query(from: Option<PduCount>, dir: Direction) -> RequesterQuery<'static> {
+		RequesterQuery {
+			shortroomid: 1,
+			target: PduCount::Normal(1),
+			from,
+			to: None,
+			dir,
+			user_id: user_id!("@alice:localhost"),
+			ignored: None,
+		}
+	}
+
+	async fn run(
+		graph: &Graph,
+		query: RequesterQuery<'_>,
+		limits: WalkLimits,
+	) -> Option<(u32, Vec<u64>)> {
+		let fetch = |target: PduCount, row_room: usize| {
+			let rows: Vec<_> = graph
+				.get(&target.into_unsigned())
+				.into_iter()
+				.flatten()
+				.take(row_room)
+				.map(|opt| opt.map(|n| (PduCount::Normal(n), ())))
+				.collect();
+			rows.into_iter().stream()
+		};
+
+		walk_relations(query, limits, fetch, &|_| true)
+			.await
+			.map(|(depth, events)| {
+				(
+					depth,
+					events
+						.into_iter()
+						.map(|(c, ())| c.into_unsigned())
+						.collect(),
+				)
+			})
+	}
+
+	#[tokio::test]
+	async fn walk_relations_drops_levels_over_event_or_row_limits() {
+		let graph = sample_graph();
+		let full = test_query(None, Direction::Forward);
+
+		assert_eq!(
+			run(&graph, full, WalkLimits { events: 7, rows: 9 }).await,
+			Some((3, vec![2, 3, 4, 5, 6, 7, 8])),
+			"exact budget keeps all three levels",
+		);
+		assert_eq!(
+			run(&graph, full, WalkLimits { events: 6, rows: usize::MAX }).await,
+			Some((2, vec![2, 3, 4, 5, 6, 7])),
+			"event cap drops depth 3 whole",
+		);
+		assert_eq!(
+			run(&graph, full, WalkLimits { events: 5, rows: usize::MAX }).await,
+			Some((1, vec![2, 3, 4])),
+			"event cap drops depth 2 whole",
+		);
+		assert_eq!(
+			run(&graph, full, WalkLimits { events: 2, rows: usize::MAX }).await,
+			None,
+			"depth 1 event overflow triggers lazy depth-0 fallback",
+		);
+		assert_eq!(
+			run(&graph, full, WalkLimits { events: usize::MAX, rows: 8 }).await,
+			Some((2, vec![2, 3, 4, 5, 6, 7])),
+			"row cap counts unservable rows and drops depth 3",
+		);
+		assert_eq!(
+			run(&graph, full, WalkLimits { events: usize::MAX, rows: 7 }).await,
+			Some((1, vec![2, 3, 4])),
+			"row cap drops depth 2 whole",
+		);
+		assert_eq!(
+			run(&graph, full, WalkLimits { events: usize::MAX, rows: 3 }).await,
+			None,
+			"depth 1 row overflow triggers lazy depth-0 fallback",
+		);
+	}
+
+	#[tokio::test]
+	async fn walk_relations_dedups_event_reached_under_two_parents() {
+		let mut graph = sample_graph();
+		// Event 9 relates to both 3 and 4, and has child 10.
+		graph.entry(3).or_default().push(Some(9));
+		graph.entry(4).or_default().push(Some(9));
+		graph.insert(9, vec![Some(10)]);
+
+		let full = test_query(None, Direction::Forward);
+		// 9 distinct events (2..=10), 12 raw rows (incl. duplicate row for 9).
+		assert_eq!(
+			run(&graph, full, WalkLimits { events: 9, rows: usize::MAX }).await,
+			Some((3, vec![2, 3, 4, 5, 6, 7, 8, 9, 10])),
+			"event reached twice is served once, counted once, and walked once",
+		);
+	}
+
+	#[tokio::test]
+	async fn walk_relations_level_cut_does_not_depend_on_window() {
+		let graph = sample_graph();
+		let paged = test_query(Some(PduCount::Normal(3)), Direction::Forward);
+
+		// Depth 2 overflows events=5 regardless of `from`, so only depth 1's 4 returns.
+		assert_eq!(
+			run(&graph, paged, WalkLimits { events: 5, rows: usize::MAX }).await,
+			Some((1, vec![4])),
+			"level cut must stay consistent across pages",
+		);
+	}
 }
