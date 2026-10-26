@@ -1,11 +1,5 @@
-use std::iter::once;
-
 use axum::extract::State;
-use futures::{
-	FutureExt, StreamExt, TryFutureExt,
-	future::try_join3,
-	stream::{select_all, unfold},
-};
+use futures::{FutureExt, StreamExt, TryFutureExt, future::try_join3};
 use ruma::{
 	EventId, RoomId, UInt, UserId,
 	api::{
@@ -159,8 +153,15 @@ async fn paginate_relations_with_filter(
 
 	let (shortroomid, target, ()) = try_join3(shortroomid, target, visible).await?;
 
+	// A target without indexed relations gets an empty page, and a walk of
+	// nothing is complete at any depth.
+	let mut nothing = get_relating_events::v1::Response::new(Vec::new());
+	nothing.recursion_depth = recurse
+		.then(|| max_depth.try_into())
+		.transpose()?;
+
 	let Ok(target) = target else {
-		return Ok(get_relating_events::v1::Response::new(Vec::new()));
+		return Ok(nothing);
 	};
 
 	if shortroomid != target.shortroomid {
@@ -168,7 +169,7 @@ async fn paginate_relations_with_filter(
 	}
 
 	if let PduCount::Backfilled(_) = target.count {
-		return Ok(get_relating_events::v1::Response::new(Vec::new()));
+		return Ok(nothing);
 	}
 
 	if let Ok(target_pdu) = services.timeline.get_pdu(target_event_id).await
@@ -181,85 +182,102 @@ async fn paginate_relations_with_filter(
 		}));
 	}
 
-	let fetch = |depth: usize, count: PduCount| {
-		services
-			.pdu_metadata
-			.get_relations(shortroomid, count, from, dir, Some(sender_user))
-			.map(move |(count, pdu)| (depth, count, pdu))
-			.ready_filter(|(_, count, _)| matches!(count, PduCount::Normal(_)))
-			.boxed()
+	let (recursion_depth, relations) = match recurse {
+		| false => {
+			let relations = services.pdu_metadata.get_relations(
+				shortroomid,
+				target.count,
+				from,
+				dir,
+				Some(sender_user),
+			);
+
+			(None, relations.left_stream())
+		},
+		| true => {
+			let (depth, relations) = services
+				.pdu_metadata
+				.get_relations_recursive(
+					shortroomid,
+					target.count,
+					from,
+					dir,
+					Some(sender_user),
+					max_depth,
+				)
+				.await;
+
+			(Some(depth), relations.right_stream())
+		},
 	};
 
-	let mut events = unfold(select_all(once(fetch(0, target.count))), async |mut relations| {
-		let (depth, count, pdu) = relations.next().await?;
+	let mut events = relations
+		.ready_filter(|(count, _)| matches!(count, PduCount::Normal(_)))
+		.ready_take_while(|&(count, _)| match to {
+			// The recursive walk is in position order, so it ends at the first
+			// event past `to`, whether or not `to` is one of its events.
+			| Some(to) if recurse => match dir {
+				| Direction::Backward => count > to,
+				| Direction::Forward => count < to,
+			},
+			| to => Some(count) != to,
+		})
+		.ready_filter(|(_, pdu)| {
+			filter_event_type
+				.as_ref()
+				.is_none_or(|kind| kind == pdu.kind())
+		})
+		.ready_filter(|(_, pdu)| {
+			filter_rel_type
+				.as_ref()
+				.is_none_or(|rel_type| rel_type.relation_type_equal(pdu))
+		})
+		.wide_filter_map(async |(count, pdu)| {
+			services
+				.state_accessor
+				.user_can_see_event(sender_user, &pdu)
+				.await
+				.then_some((count, pdu))
+		})
+		// One event past the page shows whether another page follows.
+		.take(limit.saturating_add(1))
+		.wide_then(async |(count, pdu)| {
+			let pdu = services
+				.pdu_metadata
+				.bundle_aggregations(sender_user, pdu)
+				.await;
 
-		if depth < max_depth {
-			relations.push(fetch(depth.saturating_add(1), count));
-		}
-
-		Some(((depth, count, pdu), relations))
-	})
-	.ready_take_while(|&(_, count, _)| Some(count) != to)
-	.ready_filter(|(_, _, pdu)| {
-		filter_event_type
-			.as_ref()
-			.is_none_or(|kind| kind == pdu.kind())
-	})
-	.ready_filter(|(_, _, pdu)| {
-		filter_rel_type
-			.as_ref()
-			.is_none_or(|rel_type| rel_type.relation_type_equal(pdu))
-	})
-	.wide_filter_map(async |(depth, count, pdu)| {
-		services
-			.state_accessor
-			.user_can_see_event(sender_user, &pdu)
-			.await
-			.then_some((depth, count, pdu))
-	})
-	// One event past the page shows whether another page follows.
-	.take(limit.saturating_add(1))
-	.wide_then(async |(depth, count, pdu)| {
-		let pdu = services
-			.pdu_metadata
-			.bundle_aggregations(sender_user, pdu)
-			.await;
-
-		(depth, count, pdu)
-	})
-	.collect::<Vec<_>>()
-	.await;
+			(count, pdu)
+		})
+		.collect::<Vec<_>>()
+		.await;
 
 	let more = events.len() > limit;
 	events.truncate(limit);
 
 	Ok(get_relating_events::v1::Response {
-		recursion_depth: max_depth
-			.gt(&0)
-			.then(|| events.iter().map(at!(0)))
-			.into_iter()
-			.flatten()
-			.max()
+		// The depth the walk reached, the same on every page of it.
+		recursion_depth: recursion_depth
 			.map(TryInto::try_into)
 			.transpose()?,
 
 		next_batch: events
 			.last()
 			.filter(|_| more)
-			.map(at!(1))
+			.map(at!(0))
 			.as_ref()
 			.map(ToString::to_string),
 
 		prev_batch: events
 			.first()
-			.map(at!(1))
+			.map(at!(0))
 			.or(from)
 			.as_ref()
 			.map(ToString::to_string),
 
 		chunk: events
 			.into_iter()
-			.map(at!(2))
+			.map(at!(1))
 			.map(Event::into_format)
 			.collect(),
 	})

@@ -745,6 +745,46 @@ relation exists, in both directions and with `recurse`. Upstream has the same
 bug. File: `src/api/client/relations.rs`; test in
 `src/main/tests/relations_next_batch.rs`.
 
+### Recursive `/relations` pages give each event once, in order
+
+With `recurse=true`, the walk began reading an event's own relations only once
+it had served that event, and it merged the per-event reads in whatever order
+they answered, so a page was not in position order. The next page applied the
+`next_batch` of the last served event to every level of the walk: an edit or
+reaction whose parent was on an earlier page was never served, and a page
+ending on an edit served replies again. Paginating `dir=b` through a thread of
+about 220 replies (419 events), pages of 30 missed 63 events and pages of 10
+missed 47 and repeated 56; every lost event was below a direct reply.
+
+The walk now reads the positions of the whole tree from the relation rows, to
+the same depth (the target's relations and three levels below them), before it
+loads any event, keeping only rows whose event is stored in the room: rows left
+by edits the purge deleted and rows from events in other rooms are neither
+served nor walked, as before. It then applies `from`, orders the positions in
+the requested direction, stops at `to` (at the first event past it, whether or
+not `to` names one of them), and loads events only until the page is full, so
+every event is served once and in position order, in both directions. An event
+relating to two events of the tree is kept once, at its shallowest depth, and
+counts once against the limits. `recursion_depth` is the
+depth the walk reached, the same on every page. A walk keeps at most 32,768
+events and reads at most 262,144 relation rows, unservable ones included. A
+level that does not fit is dropped whole, with the levels below it, and
+`recursion_depth` says how deep the walk went; if the target's own relations
+do not fit, they are served as without recursion, at depth 0. The decision
+does not depend on `from`, so every page of a walk serves the same levels.
+A backfilled target gets an empty page with `recursion_depth`.
+A backfilled `from` (zero or negative, as `/messages` hands out) comes before
+every relation, since relations are only indexed for normal events: forward
+pages start at the first relation and backward pages are empty, with or
+without `recurse`. The non-recursive read compared it as an unsigned key, so
+its forward pages were empty, its backward pages returned every relation, and
+a `from` of 0 hit a debug assertion. Otherwise nothing changes without
+`recurse`. Upstream has the same bugs. Files:
+`src/api/client/relations.rs`,
+`src/service/rooms/pdu_metadata/{mod.rs,relations.rs}`; tests in
+`src/main/tests/relations_recurse_order.rs` and
+`src/service/rooms/pdu_metadata/tests.rs`.
+
 ### A device's tokens rotate under its device lock
 
 Refresh-token rotation read the token a device points at, removed it, and wrote
