@@ -175,95 +175,102 @@ async fn paginate_relations_with_filter(
 		}));
 	}
 
-	let mut events = match recurse {
-		| false => services
-			.pdu_metadata
-			.get_relations(shortroomid, target.count, from, dir, Some(sender_user))
-			.map(|(count, pdu)| (0, count, pdu))
-			.left_stream(),
-
-		| true => services
-			.pdu_metadata
-			.get_relations_recursive(
+	let (recursion_depth, relations) = match recurse {
+		| false => {
+			let relations = services.pdu_metadata.get_relations(
 				shortroomid,
 				target.count,
 				from,
 				dir,
 				Some(sender_user),
-				max_depth,
-			)
-			.right_stream(),
-	}
-	.ready_filter(|(_, count, _)| matches!(count, PduCount::Normal(_)))
-	.ready_take_while(|&(_, count, _)| match to {
-		// The recursive walk is in position order, so it ends at the first
-		// event past `to`, whether or not `to` is one of its events.
-		| Some(to) if recurse => match dir {
-			| Direction::Backward => count > to,
-			| Direction::Forward => count < to,
-		},
-		| to => Some(count) != to,
-	})
-	.ready_filter(|(_, _, pdu)| {
-		filter_event_type
-			.as_ref()
-			.is_none_or(|kind| kind == pdu.kind())
-	})
-	.ready_filter(|(_, _, pdu)| {
-		filter_rel_type
-			.as_ref()
-			.is_none_or(|rel_type| rel_type.relation_type_equal(pdu))
-	})
-	.wide_filter_map(async |(depth, count, pdu)| {
-		services
-			.state_accessor
-			.user_can_see_event(sender_user, &pdu)
-			.await
-			.then_some((depth, count, pdu))
-	})
-	// One event past the page shows whether another page follows.
-	.take(limit.saturating_add(1))
-	.wide_then(async |(depth, count, pdu)| {
-		let pdu = services
-			.pdu_metadata
-			.bundle_aggregations(sender_user, pdu)
-			.await;
+			);
 
-		(depth, count, pdu)
-	})
-	.collect::<Vec<_>>()
-	.await;
+			(None, relations.left_stream())
+		},
+		| true => {
+			let (depth, relations) = services
+				.pdu_metadata
+				.get_relations_recursive(
+					shortroomid,
+					target.count,
+					from,
+					dir,
+					Some(sender_user),
+					max_depth,
+				)
+				.await;
+
+			(Some(depth), relations.right_stream())
+		},
+	};
+
+	let mut events = relations
+		.ready_filter(|(count, _)| matches!(count, PduCount::Normal(_)))
+		.ready_take_while(|&(count, _)| match to {
+			// The recursive walk is in position order, so it ends at the first
+			// event past `to`, whether or not `to` is one of its events.
+			| Some(to) if recurse => match dir {
+				| Direction::Backward => count > to,
+				| Direction::Forward => count < to,
+			},
+			| to => Some(count) != to,
+		})
+		.ready_filter(|(_, pdu)| {
+			filter_event_type
+				.as_ref()
+				.is_none_or(|kind| kind == pdu.kind())
+		})
+		.ready_filter(|(_, pdu)| {
+			filter_rel_type
+				.as_ref()
+				.is_none_or(|rel_type| rel_type.relation_type_equal(pdu))
+		})
+		.wide_filter_map(async |(count, pdu)| {
+			services
+				.state_accessor
+				.user_can_see_event(sender_user, &pdu)
+				.await
+				.then_some((count, pdu))
+		})
+		// One event past the page shows whether another page follows.
+		.take(limit.saturating_add(1))
+		.wide_then(async |(count, pdu)| {
+			let pdu = services
+				.pdu_metadata
+				.bundle_aggregations(sender_user, pdu)
+				.await;
+
+			(count, pdu)
+		})
+		.collect::<Vec<_>>()
+		.await;
 
 	let more = events.len() > limit;
 	events.truncate(limit);
 
 	Ok(get_relating_events::v1::Response {
-		recursion_depth: max_depth
-			.gt(&0)
-			.then(|| events.iter().map(at!(0)))
-			.into_iter()
-			.flatten()
-			.max()
+		// The depth the walk reached, the same on every page of it.
+		recursion_depth: recursion_depth
 			.map(TryInto::try_into)
 			.transpose()?,
 
 		next_batch: events
 			.last()
 			.filter(|_| more)
-			.map(at!(1))
+			.map(at!(0))
 			.as_ref()
 			.map(ToString::to_string),
 
 		prev_batch: events
 			.first()
-			.map(at!(1))
+			.map(at!(0))
 			.or(from)
 			.as_ref()
 			.map(ToString::to_string),
 
 		chunk: events
 			.into_iter()
-			.map(at!(2))
+			.map(at!(1))
 			.map(Event::into_format)
 			.collect(),
 	})

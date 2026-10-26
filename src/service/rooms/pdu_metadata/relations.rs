@@ -1,6 +1,6 @@
 use std::cmp::Reverse;
 
-use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt, stream};
+use futures::{Stream, StreamExt, TryStreamExt, stream};
 use ruma::{
 	EventId, OwnedUserId, UserId,
 	api::Direction,
@@ -9,22 +9,41 @@ use ruma::{
 use tuwunel_core::{
 	PduId, Result,
 	arrayvec::ArrayVec,
-	debug_warn, implement, is_equal_to,
+	implement, is_equal_to,
 	matrix::{Event, Pdu, PduCount, RawPduId, event::RelationTypeEqual},
 	utils::{
+		IterStream,
 		result::NotFound,
 		stream::{ReadyExt, TryIgnore, TryReadyExt, TryWidebandExt},
 		u64_from_u8,
 	},
+	warn,
 };
+use tuwunel_database::Get;
 
 use super::Service;
 use crate::rooms::short::ShortRoomId;
 
 type StartKey = ArrayVec<u8, 16>;
 
-/// Most relation rows one recursive walk reads.
-const RECURSIVE_ROW_LIMIT: usize = 65_536;
+/// Most events one recursive walk keeps.
+const RECURSIVE_EVENT_LIMIT: usize = 32_768;
+
+/// Most relation rows one recursive walk reads, including rows it cannot serve.
+const RECURSIVE_ROW_LIMIT: usize = 262_144;
+
+/// How deep a recursive walk goes and how much it may read.
+#[derive(Clone, Copy)]
+pub(super) struct Walk {
+	/// Levels walked below the target's own relations.
+	pub(super) depth: usize,
+
+	/// Most events kept.
+	pub(super) events: usize,
+
+	/// Most relation rows read, including rows that cannot be served.
+	pub(super) rows: usize,
+}
 
 /// Parameters controlling a relation-row query.
 ///
@@ -200,15 +219,17 @@ pub fn try_get_relations_limited<'a>(
 		.ready_try_filter_map(Ok)
 }
 
-/// Walks the events relating to `target` directly, at depth zero, and through
-/// up to `max_depth` further relations, in `dir` order after `from`.
+/// Walks the events relating to `target` directly and through up to
+/// `max_depth` further relations, in `dir` order after `from`, with the depth
+/// the walk reached.
 ///
 /// The positions of the whole tree are read from the relation rows before any
 /// event is loaded, so `from` applies to every depth alike and the walk is in
-/// position order however deep each event is. At most
-/// `RECURSIVE_ROW_LIMIT` rows are read; a larger tree is cut short.
+/// position order however deep each event is. A walk keeps at most
+/// `RECURSIVE_EVENT_LIMIT` events and reads at most `RECURSIVE_ROW_LIMIT` rows;
+/// past either, it serves only the levels above the one that did not fit.
 #[implement(Service)]
-pub fn get_relations_recursive<'a>(
+pub async fn get_relations_recursive<'a>(
 	&'a self,
 	shortroomid: ShortRoomId,
 	target: PduCount,
@@ -216,67 +237,117 @@ pub fn get_relations_recursive<'a>(
 	dir: Direction,
 	user_id: Option<&'a UserId>,
 	max_depth: usize,
-) -> impl Stream<Item = (usize, PduCount, Pdu)> + Send + 'a {
-	self.relation_tree(target, from, dir, max_depth)
-		.map(|tree| stream::iter(tree).map(Ok))
-		.flatten_stream()
-		.wide_and_then(move |(depth, count)| {
-			self.load_relation(shortroomid, count, user_id)
-				.map_ok(move |relation| relation.map(|(count, pdu)| (depth, count, pdu)))
-		})
-		.ready_try_filter_map(Ok)
-		.ignore_err()
+) -> (usize, impl Stream<Item = (PduCount, Pdu)> + Send + 'a) {
+	let walk = Walk {
+		depth: max_depth,
+		events: RECURSIVE_EVENT_LIMIT,
+		rows: RECURSIVE_ROW_LIMIT,
+	};
+
+	self.walk_relations(shortroomid, target, from, dir, user_id, walk)
+		.await
 }
 
-/// Positions and depths of the events relating to `target` up to `max_depth`,
-/// ordered in `dir` after `from`.
+/// `get_relations_recursive` with the depth and limits of `walk`.
+///
+/// When even the target's own relations do not fit, they are walked lazily as
+/// without recursion, at depth zero.
 #[implement(Service)]
-async fn relation_tree(
-	&self,
+pub(super) async fn walk_relations<'a>(
+	&'a self,
+	shortroomid: ShortRoomId,
 	target: PduCount,
 	from: Option<PduCount>,
 	dir: Direction,
-	max_depth: usize,
-) -> Vec<(usize, PduCount)> {
-	// An event relates only to an event stored before it, so it is newer than
-	// all its ancestors. Walking backward, nothing below an event at or past
-	// `from` comes before `from`, so `from` bounds every level. Walking forward,
-	// an event before `from` can have descendants after it.
-	let bound = from.filter(|_| dir == Direction::Backward);
+	user_id: Option<&'a UserId>,
+	walk: Walk,
+) -> (usize, impl Stream<Item = (PduCount, Pdu)> + Send + 'a) {
+	let tree = self
+		.relation_tree(shortroomid, target, walk)
+		.await;
 
-	let mut tree = Vec::new();
-	let mut parents = vec![target];
-	for depth in 0..=max_depth {
-		let level: Vec<PduCount> = stream::iter(&parents)
-			.map(|&parent| self.relation_counts(parent, bound, dir))
-			.flatten()
-			.ignore_err()
-			.take(RECURSIVE_ROW_LIMIT.saturating_sub(tree.len()))
-			.collect()
-			.await;
+	let Some((depth, mut events)) = tree else {
+		let relations = self.get_relations(shortroomid, target, from, dir, user_id);
 
-		tree.extend(level.iter().map(|&count| (depth, count)));
-		parents = level;
-	}
+		return (0, relations.right_stream());
+	};
 
-	if tree.len() >= RECURSIVE_ROW_LIMIT {
-		debug_warn!(?target, "Recursive relations walk cut short at {RECURSIVE_ROW_LIMIT} rows");
-	}
-
-	tree.retain(|&(_, count)| match (from, dir) {
+	events.retain(|&count| match (from, dir) {
 		| (None, _) => true,
 		| (Some(from), Direction::Backward) => count < from,
 		| (Some(from), Direction::Forward) => count > from,
 	});
 
 	match dir {
-		| Direction::Backward => tree.sort_unstable_by_key(|&(_, count)| Reverse(count)),
-		| Direction::Forward => tree.sort_unstable_by_key(|&(_, count)| count),
+		| Direction::Backward => events.sort_unstable_by_key(|&count| Reverse(count)),
+		| Direction::Forward => events.sort_unstable(),
 	}
 
 	// An event relating to two events of the tree is reached twice.
-	tree.dedup_by_key(|&mut (_, count)| count);
-	tree
+	events.dedup();
+
+	let relations = stream::iter(events)
+		.map(Ok)
+		.wide_and_then(move |count| self.load_relation(shortroomid, count, user_id))
+		.ready_try_filter_map(Ok)
+		.ignore_err();
+
+	(depth, relations.left_stream())
+}
+
+/// Positions of the events relating to `target` in its room, level by level
+/// down to `walk.depth`, with the deepest level kept.
+///
+/// A level that would take the walk past `walk.events` events or `walk.rows`
+/// relation rows is dropped with the levels below it; `None` means the
+/// target's own relations do not fit. A row whose event was deleted or is in
+/// another room counts as a row read, but is neither kept nor walked.
+#[implement(Service)]
+async fn relation_tree(
+	&self,
+	shortroomid: ShortRoomId,
+	target: PduCount,
+	walk: Walk,
+) -> Option<(usize, Vec<PduCount>)> {
+	let (mut events, mut read) = (Vec::new(), 0_usize);
+	let mut parents = vec![target];
+	for depth in 0..=walk.depth {
+		// One row or event past a limit shows that the level does not fit.
+		let rows: Vec<PduCount> = stream::iter(&parents)
+			.map(|&parent| self.relation_counts(parent, None, Direction::Forward))
+			.flatten()
+			.ignore_err()
+			.take(walk.rows.saturating_sub(read).saturating_add(1))
+			.collect()
+			.await;
+
+		read = read.saturating_add(rows.len());
+		let level: Vec<PduCount> = rows
+			.iter()
+			.map(|&count| RawPduId::from(PduId { shortroomid, count }))
+			.stream()
+			.get(&self.db.pduid_pdu)
+			.zip(rows.iter().stream())
+			.ready_filter_map(|(stored, &count)| stored.is_ok().then_some(count))
+			.take(
+				walk.events
+					.saturating_sub(events.len())
+					.saturating_add(1),
+			)
+			.collect()
+			.await;
+
+		if read > walk.rows || events.len().saturating_add(level.len()) > walk.events {
+			warn!(?target, depth, "Recursive relations walk dropped a level over its limits");
+
+			return depth.checked_sub(1).map(|depth| (depth, events));
+		}
+
+		events.extend(&level);
+		parents = level;
+	}
+
+	Some((walk.depth, events))
 }
 
 /// Walks the positions of the events relating to `target` in `dir` order after
