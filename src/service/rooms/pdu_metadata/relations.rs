@@ -1,4 +1,6 @@
-use futures::{Stream, StreamExt, TryStreamExt};
+use std::{cmp::Reverse, collections::HashSet};
+
+use futures::{Stream, StreamExt, TryStreamExt, future::ready, stream};
 use ruma::{
 	EventId, OwnedUserId, UserId,
 	api::Direction,
@@ -9,17 +11,39 @@ use tuwunel_core::{
 	arrayvec::ArrayVec,
 	implement, is_equal_to,
 	utils::{
+		IterStream,
 		result::NotFound,
 		stream::{ReadyExt, TryIgnore, TryReadyExt, TryWidebandExt},
 		u64_from_u8,
 	},
+	warn,
 };
+use tuwunel_database::Get;
 use tuwunel_matrix::{Event, Pdu, PduCount, PduId, RawPduId, event::RelationTypeEqual};
 
 use super::Service;
 use crate::rooms::short::ShortRoomId;
 
 type StartKey = ArrayVec<u8, 16>;
+
+/// Most events one recursive walk keeps.
+const RECURSIVE_EVENT_LIMIT: usize = 32_768;
+
+/// Most relation rows one recursive walk reads, including rows it cannot serve.
+const RECURSIVE_ROW_LIMIT: usize = 262_144;
+
+/// How deep a recursive walk goes and how much it may read.
+#[derive(Clone, Copy)]
+pub(super) struct Walk {
+	/// Levels walked below the target's own relations.
+	pub(super) depth: usize,
+
+	/// Most events kept.
+	pub(super) events: usize,
+
+	/// Most relation rows read, including rows that cannot be served.
+	pub(super) rows: usize,
+}
 
 /// Parameters controlling a relation-row query.
 ///
@@ -194,6 +218,147 @@ pub fn try_get_relations_limited<'a>(
 		.ready_try_filter_map(Ok)
 }
 
+/// Walks the events relating to `target` directly and through up to
+/// `max_depth` further relations, in `dir` order after `from`, with the depth
+/// the walk reached.
+///
+/// The positions of the whole tree are read from the relation rows before any
+/// event is loaded, so `from` applies to every depth alike and the walk is in
+/// position order however deep each event is. A walk keeps at most
+/// `RECURSIVE_EVENT_LIMIT` events and reads at most `RECURSIVE_ROW_LIMIT` rows;
+/// past either, it serves only the levels above the one that did not fit.
+#[implement(Service)]
+pub async fn get_relations_recursive<'a>(
+	&'a self,
+	shortroomid: ShortRoomId,
+	target: PduCount,
+	from: Option<PduCount>,
+	dir: Direction,
+	user_id: Option<&'a UserId>,
+	max_depth: usize,
+) -> (usize, impl Stream<Item = (PduCount, Pdu)> + Send + 'a) {
+	let walk = Walk {
+		depth: max_depth,
+		events: RECURSIVE_EVENT_LIMIT,
+		rows: RECURSIVE_ROW_LIMIT,
+	};
+
+	self.walk_relations(shortroomid, target, from, dir, user_id, walk)
+		.await
+}
+
+/// `get_relations_recursive` with the depth and limits of `walk`.
+///
+/// When even the target's own relations do not fit, they are walked lazily as
+/// without recursion, at depth zero.
+#[implement(Service)]
+pub(super) async fn walk_relations<'a>(
+	&'a self,
+	shortroomid: ShortRoomId,
+	target: PduCount,
+	from: Option<PduCount>,
+	dir: Direction,
+	user_id: Option<&'a UserId>,
+	walk: Walk,
+) -> (usize, impl Stream<Item = (PduCount, Pdu)> + Send + 'a) {
+	let tree = self
+		.relation_tree(shortroomid, target, walk)
+		.await;
+
+	let Some((depth, mut events)) = tree else {
+		let relations = self.get_relations(shortroomid, target, from, dir, user_id);
+
+		return (0, relations.right_stream());
+	};
+
+	events.retain(|&count| match (from, dir) {
+		| (None, _) => true,
+		| (Some(from), Direction::Backward) => count < from,
+		| (Some(from), Direction::Forward) => count > from,
+	});
+
+	match dir {
+		| Direction::Backward => events.sort_unstable_by_key(|&count| Reverse(count)),
+		| Direction::Forward => events.sort_unstable(),
+	}
+
+	let relations = stream::iter(events)
+		.map(Ok)
+		.wide_and_then(move |count| self.related_pdu(user_id, shortroomid, count))
+		.ready_try_filter_map(Ok)
+		.ignore_err();
+
+	(depth, relations.left_stream())
+}
+
+/// Positions of the events relating to `target` in its room, level by level
+/// down to `walk.depth`, with the deepest level kept.
+///
+/// A level that would take the walk past `walk.events` events or `walk.rows`
+/// relation rows is dropped with the levels below it; `None` means the
+/// target's own relations do not fit. A row whose event was deleted or is in
+/// another room, or was kept already, counts as a row read, but is neither
+/// kept nor walked again.
+#[implement(Service)]
+async fn relation_tree(
+	&self,
+	shortroomid: ShortRoomId,
+	target: PduCount,
+	walk: Walk,
+) -> Option<(usize, Vec<PduCount>)> {
+	let (mut events, mut read) = (Vec::new(), 0_usize);
+	let mut parents = vec![target];
+
+	// An event relating to two events of the tree is kept once, at its
+	// shallowest depth.
+	let mut kept = HashSet::from([target]);
+	for depth in 0..=walk.depth {
+		// One row or event past a limit shows that the level does not fit.
+		let rows: Vec<PduCount> = stream::iter(&parents)
+			.map(|&parent| self.relation_counts(parent, None, Direction::Forward, usize::MAX))
+			.flatten()
+			.ignore_err()
+			.take(walk.rows.saturating_sub(read).saturating_add(1))
+			.collect()
+			.await;
+
+		// Past the row limit, the level is dropped without looking its rows up.
+		read = read.saturating_add(rows.len());
+		let level = match read > walk.rows {
+			| true => None,
+			| false => Some(
+				rows.iter()
+					.map(|&count| RawPduId::from(PduId { shortroomid, count }))
+					.stream()
+					.get(&self.db.pduid_pdu)
+					.zip(rows.iter().stream())
+					.filter_map(|(stored, &count)| {
+						ready((stored.is_ok() && kept.insert(count)).then_some(count))
+					})
+					.take(
+						walk.events
+							.saturating_sub(events.len())
+							.saturating_add(1),
+					)
+					.collect::<Vec<_>>()
+					.await,
+			),
+		}
+		.filter(|level| events.len().saturating_add(level.len()) <= walk.events);
+
+		let Some(level) = level else {
+			warn!(?target, depth, "Recursive relations walk dropped a level over its limits");
+
+			return depth.checked_sub(1).map(|depth| (depth, events));
+		};
+
+		events.extend(&level);
+		parents = level;
+	}
+
+	Some((walk.depth, events))
+}
+
 /// Walks the positions of at most `limit` events related to a target.
 ///
 /// `from` is exclusive, and without one the walk starts at the end `dir` leads
@@ -208,7 +373,11 @@ pub fn relation_counts(
 	limit: usize,
 ) -> impl Stream<Item = Result<PduCount>> + Send + '_ {
 	let target = target.to_be_bytes();
+
+	// Rows hold only normal positions, which all come after a backfilled one,
+	// so a backfilled `from` stands for the start of the normal timeline.
 	let from = from
+		.map(PduCount::into_normal)
 		.map(|from| from.saturating_inc(dir))
 		.unwrap_or_else(|| match dir {
 			| Direction::Backward => PduCount::max(),
