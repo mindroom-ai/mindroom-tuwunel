@@ -1,6 +1,6 @@
-use std::cmp::Reverse;
+use std::{cmp::Reverse, collections::HashSet};
 
-use futures::{Stream, StreamExt, TryStreamExt, stream};
+use futures::{Stream, StreamExt, TryStreamExt, future::ready, stream};
 use ruma::{
 	EventId, OwnedUserId, UserId,
 	api::Direction,
@@ -283,9 +283,6 @@ pub(super) async fn walk_relations<'a>(
 		| Direction::Forward => events.sort_unstable(),
 	}
 
-	// An event relating to two events of the tree is reached twice.
-	events.dedup();
-
 	let relations = stream::iter(events)
 		.map(Ok)
 		.wide_and_then(move |count| self.load_relation(shortroomid, count, user_id))
@@ -301,7 +298,8 @@ pub(super) async fn walk_relations<'a>(
 /// A level that would take the walk past `walk.events` events or `walk.rows`
 /// relation rows is dropped with the levels below it; `None` means the
 /// target's own relations do not fit. A row whose event was deleted or is in
-/// another room counts as a row read, but is neither kept nor walked.
+/// another room, or was kept already, counts as a row read, but is neither
+/// kept nor walked again.
 #[implement(Service)]
 async fn relation_tree(
 	&self,
@@ -311,6 +309,10 @@ async fn relation_tree(
 ) -> Option<(usize, Vec<PduCount>)> {
 	let (mut events, mut read) = (Vec::new(), 0_usize);
 	let mut parents = vec![target];
+
+	// An event relating to two events of the tree is kept once, at its
+	// shallowest depth.
+	let mut kept = HashSet::from([target]);
 	for depth in 0..=walk.depth {
 		// One row or event past a limit shows that the level does not fit.
 		let rows: Vec<PduCount> = stream::iter(&parents)
@@ -328,7 +330,9 @@ async fn relation_tree(
 			.stream()
 			.get(&self.db.pduid_pdu)
 			.zip(rows.iter().stream())
-			.ready_filter_map(|(stored, &count)| stored.is_ok().then_some(count))
+			.filter_map(|(stored, &count)| {
+				ready((stored.is_ok() && kept.insert(count)).then_some(count))
+			})
 			.take(
 				walk.events
 					.saturating_sub(events.len())

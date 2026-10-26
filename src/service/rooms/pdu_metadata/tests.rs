@@ -216,7 +216,8 @@ async fn recursive_walk_serves_whole_levels() -> Result {
 	Ok(())
 }
 
-/// An event relating to two events of the tree is served once.
+/// An event relating to two events of the tree is served once and counts once
+/// against the event limit.
 #[tokio::test]
 async fn recursive_walk_serves_an_event_reached_twice_once() -> Result {
 	let Some(fixture) = fixture(Figment::new()).await? else {
@@ -228,7 +229,7 @@ async fn recursive_walk_serves_an_event_reached_twice_once() -> Result {
 
 	store(services, 15, ROOM, &[3, 4]);
 	events.push(15);
-	check_walk(services, root, (usize::MAX, usize::MAX), 3, &events).await;
+	check_walk(services, root, (events.len(), usize::MAX), 3, &events).await;
 
 	Ok(())
 }

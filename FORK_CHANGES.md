@@ -764,7 +764,8 @@ served nor walked, as before. It then applies `from`, orders the positions in
 the requested direction, stops at `to` (at the first event past it, whether or
 not `to` names one of them), and loads events only until the page is full, so
 every event is served once and in position order, in both directions. An event
-relating to two events of the tree is served once. `recursion_depth` is the
+relating to two events of the tree is kept once, at its shallowest depth, and
+counts once against the limits. `recursion_depth` is the
 depth the walk reached, the same on every page. A walk keeps at most 32,768
 events and reads at most 262,144 relation rows, unservable ones included. A
 level that does not fit is dropped whole, with the levels below it, and
