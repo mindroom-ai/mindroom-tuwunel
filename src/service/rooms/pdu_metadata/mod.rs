@@ -31,6 +31,7 @@ struct Data {
 	relatesto_typed: Arc<Map>,
 	referencedevents: Arc<Map>,
 	softfailedeventids: Arc<Map>,
+	pduid_pdu: Arc<Map>,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +79,7 @@ impl crate::Service for Service {
 				relatesto_typed: args.db["relatesto_typed"].clone(),
 				referencedevents: args.db["referencedevents"].clone(),
 				softfailedeventids: args.db["softfailedeventids"].clone(),
+				pduid_pdu: args.db["pduid_pdu"].clone(),
 			},
 		}))
 	}
