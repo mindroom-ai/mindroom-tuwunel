@@ -153,8 +153,15 @@ async fn paginate_relations_with_filter(
 
 	let (shortroomid, target, ()) = try_join3(shortroomid, target, visible).await?;
 
+	// A target without indexed relations gets an empty page, and a walk of
+	// nothing is complete at any depth.
+	let mut nothing = get_relating_events::v1::Response::new(Vec::new());
+	nothing.recursion_depth = recurse
+		.then(|| max_depth.try_into())
+		.transpose()?;
+
 	let Ok(target) = target else {
-		return Ok(get_relating_events::v1::Response::new(Vec::new()));
+		return Ok(nothing);
 	};
 
 	if shortroomid != target.shortroomid {
@@ -162,7 +169,7 @@ async fn paginate_relations_with_filter(
 	}
 
 	if let PduCount::Backfilled(_) = target.count {
-		return Ok(get_relating_events::v1::Response::new(Vec::new()));
+		return Ok(nothing);
 	}
 
 	if let Ok(target_pdu) = services.timeline.get_pdu(target_event_id).await

@@ -103,17 +103,17 @@ fn store(services: &Services, count: u64, room: u64, parents: &[u64]) {
 	}
 }
 
-/// Page through the recursive walk of `root`, `page` events at a time, with
-/// the given limits. Returns the depth each page reported and the positions in
-/// the order the pages served them.
+/// Page through the recursive walk of `root` after `start`, `page` events at a
+/// time, with the given limits. Returns the depth each page reported and the
+/// positions in the order the pages served them.
 async fn walk(
 	services: &Services,
 	root: u64,
-	dir: Direction,
+	(dir, start): (Direction, Option<PduCount>),
 	(events, rows): (usize, usize),
 	page: usize,
 ) -> (Vec<usize>, Vec<u64>) {
-	let (mut depths, mut served, mut from) = (Vec::new(), Vec::new(), None);
+	let (mut depths, mut served, mut from) = (Vec::new(), Vec::new(), start);
 
 	loop {
 		let walk = Walk { depth: 3, events, rows };
@@ -151,7 +151,7 @@ async fn check_walk(
 ) {
 	for page in 1..=events.len().saturating_add(1) {
 		for dir in [Direction::Forward, Direction::Backward] {
-			let (depths, served) = walk(services, root, dir, limits, page).await;
+			let (depths, served) = walk(services, root, (dir, None), limits, page).await;
 			let expected: Vec<_> = match dir {
 				| Direction::Forward => events.to_vec(),
 				| Direction::Backward => events.iter().rev().copied().collect(),
@@ -230,6 +230,58 @@ async fn recursive_walk_serves_an_event_reached_twice_once() -> Result {
 	store(services, 15, ROOM, &[3, 4]);
 	events.push(15);
 	check_walk(services, root, (events.len(), usize::MAX), 3, &events).await;
+
+	Ok(())
+}
+
+/// Relations are only indexed for normal events, which all come after any
+/// backfilled position. From a backfilled position, a forward walk serves
+/// everything and a backward walk nothing, whether the walk recurses, falls
+/// back to the target's own relations, or does not recurse.
+#[tokio::test]
+async fn walk_from_a_backfilled_position() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let services = &fixture.services;
+	let (root, events) = thread(services);
+	let direct = async |from, dir| -> Vec<u64> {
+		services
+			.pdu_metadata
+			.get_relations(ROOM, PduCount::Normal(root), Some(from), dir, None)
+			.map(|(count, _)| count.into_unsigned())
+			.collect()
+			.await
+	};
+
+	for from in [PduCount::Backfilled(-5), PduCount::Backfilled(0)] {
+		// The full walk, and the fallback when the target's relations overflow.
+		for (limits, depth, expected) in
+			[((usize::MAX, usize::MAX), 3, events.as_slice()), ((2, 9), 0, &events[..3])]
+		{
+			for page in [1, 2, events.len()] {
+				let case = format!("from {from}, limits {limits:?}, by {page}");
+				let forward = (Direction::Forward, Some(from));
+				let (depths, served) = walk(services, root, forward, limits, page).await;
+
+				assert_eq!(served, expected, "{case}: forward");
+				assert!(depths.iter().all(|&d| d == depth), "{case}: depths {depths:?}");
+
+				let backward = (Direction::Backward, Some(from));
+				let (_, served) = walk(services, root, backward, limits, page).await;
+
+				assert_eq!(served, Vec::<u64>::new(), "{case}: backward");
+			}
+		}
+
+		assert_eq!(direct(from, Direction::Forward).await, events[..3], "from {from}: direct");
+		assert_eq!(
+			direct(from, Direction::Backward).await,
+			Vec::<u64>::new(),
+			"from {from}: direct backward"
+		);
+	}
 
 	Ok(())
 }

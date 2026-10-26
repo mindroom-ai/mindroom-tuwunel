@@ -32,7 +32,8 @@ const REPLIES: usize = 6;
 /// exactly once, in the order it was sent (reversed for `dir=b`), nothing past
 /// the depth limit, and the same `recursion_depth` on every page. A `to` ends
 /// the walk before the position it names, whether it is one of the thread's
-/// events or not. Without recursion only the replies come back.
+/// events or not, and a backfilled position comes before all of them. Without
+/// recursion only the replies come back.
 #[test]
 fn relations_recurse_pages_each_event_once() -> Result {
 	boot("relations-recurse-order", ["log_enable=false"], exercise)
@@ -193,6 +194,26 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		let until: Vec<_> = until.events.iter().map(name).collect();
 
 		assert_eq!(until, in_order(dir, expected), "dir={dir} to a position outside the thread");
+	}
+
+	// Backfilled positions come before every event of the thread, which are
+	// all normal, so a walk from one goes forward over everything and backward
+	// over nothing, with or without recursion.
+	for from in ["-5", "0"] {
+		for (recurse, events) in [("true", &tree), ("false", &replies)] {
+			for dir in ["f", "b"] {
+				let query =
+					[("dir", dir), ("recurse", recurse), ("limit", "100"), ("from", from)];
+				let page = client.page(&room_id, &root, &query).await?;
+				let served: Vec<_> = page.events.iter().map(name).collect();
+				let expected = match dir {
+					| "f" => events.clone(),
+					| _ => Vec::new(),
+				};
+
+				assert_eq!(served, expected, "dir={dir} recurse={recurse} from={from}");
+			}
+		}
 	}
 
 	Ok(())

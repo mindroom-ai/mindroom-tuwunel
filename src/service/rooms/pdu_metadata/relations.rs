@@ -323,29 +323,35 @@ async fn relation_tree(
 			.collect()
 			.await;
 
+		// Past the row limit, the level is dropped without looking its rows up.
 		read = read.saturating_add(rows.len());
-		let level: Vec<PduCount> = rows
-			.iter()
-			.map(|&count| RawPduId::from(PduId { shortroomid, count }))
-			.stream()
-			.get(&self.db.pduid_pdu)
-			.zip(rows.iter().stream())
-			.filter_map(|(stored, &count)| {
-				ready((stored.is_ok() && kept.insert(count)).then_some(count))
-			})
-			.take(
-				walk.events
-					.saturating_sub(events.len())
-					.saturating_add(1),
-			)
-			.collect()
-			.await;
+		let level = match read > walk.rows {
+			| true => None,
+			| false => Some(
+				rows.iter()
+					.map(|&count| RawPduId::from(PduId { shortroomid, count }))
+					.stream()
+					.get(&self.db.pduid_pdu)
+					.zip(rows.iter().stream())
+					.filter_map(|(stored, &count)| {
+						ready((stored.is_ok() && kept.insert(count)).then_some(count))
+					})
+					.take(
+						walk.events
+							.saturating_sub(events.len())
+							.saturating_add(1),
+					)
+					.collect::<Vec<_>>()
+					.await,
+			),
+		}
+		.filter(|level| events.len().saturating_add(level.len()) <= walk.events);
 
-		if read > walk.rows || events.len().saturating_add(level.len()) > walk.events {
+		let Some(level) = level else {
 			warn!(?target, depth, "Recursive relations walk dropped a level over its limits");
 
 			return depth.checked_sub(1).map(|depth| (depth, events));
-		}
+		};
 
 		events.extend(&level);
 		parents = level;
@@ -364,7 +370,11 @@ fn relation_counts(
 	dir: Direction,
 ) -> impl Stream<Item = Result<PduCount>> + Send + '_ {
 	let target = target.to_be_bytes();
+
+	// Rows hold only normal positions, which all come after a backfilled one,
+	// so a backfilled `from` stands for the start of the normal timeline.
 	let from = from
+		.map(PduCount::into_normal)
 		.map(|from| from.saturating_inc(dir))
 		.unwrap_or_else(|| match dir {
 			| Direction::Backward => PduCount::max(),

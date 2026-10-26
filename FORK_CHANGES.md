@@ -772,7 +772,14 @@ level that does not fit is dropped whole, with the levels below it, and
 `recursion_depth` says how deep the walk went; if the target's own relations
 do not fit, they are served as without recursion, at depth 0. The decision
 does not depend on `from`, so every page of a walk serves the same levels.
-Without `recurse` nothing changes. Upstream has the same bug. Files:
+A backfilled target gets an empty page with `recursion_depth`.
+A backfilled `from` (zero or negative, as `/messages` hands out) comes before
+every relation, since relations are only indexed for normal events: forward
+pages start at the first relation and backward pages are empty, with or
+without `recurse`. The non-recursive read compared it as an unsigned key, so
+its forward pages were empty, its backward pages returned every relation, and
+a `from` of 0 hit a debug assertion. Otherwise nothing changes without
+`recurse`. Upstream has the same bugs. Files:
 `src/api/client/relations.rs`,
 `src/service/rooms/pdu_metadata/{mod.rs,relations.rs}`; tests in
 `src/main/tests/relations_recurse_order.rs` and
