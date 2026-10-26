@@ -16,6 +16,7 @@ mod short;
 mod storage;
 mod sync;
 mod threepid;
+mod user_id_rewrite;
 mod users;
 
 use clap::Subcommand;
@@ -27,7 +28,8 @@ use self::{
 	presence::PresenceCommand, pusher::PusherCommand, raw::RawCommand, resolver::ResolverCommand,
 	room_alias::RoomAliasCommand, room_state_cache::RoomStateCacheCommand,
 	room_timeline::RoomTimelineCommand, sending::SendingCommand, short::ShortCommand,
-	storage::StorageCommand, sync::SyncCommand, threepid::ThreepidCommand, users::UsersCommand,
+	storage::StorageCommand, sync::SyncCommand, threepid::ThreepidCommand,
+	user_id_rewrite::UserIdRewriteCommand, users::UsersCommand,
 };
 use crate::{
 	admin_command_dispatch,
@@ -117,4 +119,8 @@ pub(super) enum QueryCommand {
 	/// - raw service
 	#[command(subcommand)]
 	Raw(RawCommand),
+
+	/// - in-place rename of one local user ID on an offline database copy
+	#[command(subcommand)]
+	UserIdRewrite(UserIdRewriteCommand),
 }
