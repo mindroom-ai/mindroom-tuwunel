@@ -1,3 +1,5 @@
+use std::convert::identity;
+
 use futures::{
 	Stream, StreamExt, TryFutureExt, TryStreamExt,
 	future::{
@@ -19,7 +21,7 @@ use tuwunel_core::{
 	implement, is_equal_to,
 	utils::{
 		result::NotFound,
-		stream::{ReadyExt, TryIgnore, TryReadyExt, TryWidebandExt},
+		stream::{ReadyExt, TryIgnore, TryReadyExt, TryWidebandExt, WidebandExt},
 		u64_from_u8,
 	},
 };
@@ -192,6 +194,17 @@ pub async fn has_incoming_relation(
 #[implement(Service)]
 pub fn requester_relations<'a>(
 	&'a self,
+	query: RequesterQuery<'a>,
+) -> impl Stream<Item = (PduCount, Pdu)> + Send + 'a {
+	self.requester_relation_rows(query, usize::MAX)
+		.ready_filter_map(identity)
+}
+
+/// Walks at most `limit` raw relation rows for a requester, yielding `None`
+/// for rows whose event is missing, redacted, or from an ignored sender.
+#[implement(Service)]
+pub fn requester_relation_rows<'a>(
+	&'a self,
 	RequesterQuery {
 		shortroomid,
 		target,
@@ -201,10 +214,17 @@ pub fn requester_relations<'a>(
 		user_id,
 		ignored,
 	}: RequesterQuery<'a>,
-) -> impl Stream<Item = (PduCount, Pdu)> + Send + 'a {
-	self.get_relations(shortroomid, target, from, dir, Some(user_id))
-		.ready_take_while(move |(count, _)| to.is_none_or(|to| count.is_before(to, dir)))
-		.ready_filter(move |(_, pdu)| !pdu.is_redacted() && !is_ignored_event(ignored, pdu))
+	limit: usize,
+) -> impl Stream<Item = Option<(PduCount, Pdu)>> + Send + 'a {
+	self.relation_counts(target, from, dir, limit)
+		.ignore_err()
+		.ready_take_while(move |count| to.is_none_or(|to| count.is_before(to, dir)))
+		.wide_then(move |count| self.related_pdu(Some(user_id), shortroomid, count))
+		.map(move |res| {
+			res.ok()
+				.flatten()
+				.filter(|(_, pdu)| !pdu.is_redacted() && !is_ignored_event(ignored, pdu))
+		})
 }
 
 #[implement(Service)]
@@ -349,7 +369,11 @@ fn relation_keys(
 	dir: Direction,
 ) -> impl Stream<Item = Result<Key<'_>>> + Send + '_ {
 	let target = target.to_be_bytes();
+
+	// Rows hold only normal positions, which all come after a backfilled one,
+	// so a backfilled `from` stands for the start of the normal timeline.
 	let from = from
+		.map(PduCount::into_normal)
 		.map(|from| from.saturating_inc(dir))
 		.unwrap_or_else(|| match dir {
 			| Direction::Backward => PduCount::max(),
