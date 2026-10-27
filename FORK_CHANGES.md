@@ -817,6 +817,14 @@ endpoint still redeem it, and OIDC revocation still accepts either kind.
 Upstream has the same bug. File: `src/api/router/auth.rs`; test in
 `src/main/tests/refresh_token_bearer.rs`.
 
+### CORS allows the Cloudflare Access token header
+
+MindRoom Chat on iOS reaches a homeserver behind Cloudflare Access by sending its
+Access token in a `cf-access-token` header on every Matrix request, because its
+web view cannot hold the Access cookie. Access passes CORS preflights through to
+the origin, so the homeserver answers every preflight and must allow that header.
+The homeserver ignores the header. File: `src/router/layers.rs`.
+
 ### OpenID tokens can be bound to a relying party audience
 
 Files:

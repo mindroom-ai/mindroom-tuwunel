@@ -209,7 +209,7 @@ fn cors_layer(server: &Server) -> CorsLayer {
 		Method::PUT,
 	];
 
-	let headers: [HeaderName; 7] = [
+	let headers: [HeaderName; 8] = [
 		header::ACCEPT,
 		header::AUTHORIZATION,
 		CONTENT_TYPE,
@@ -217,6 +217,9 @@ fn cors_layer(server: &Server) -> CorsLayer {
 		IF_NONE_MATCH,
 		header::ORIGIN,
 		HeaderName::from_static("x-requested-with"),
+		// Native clients of a homeserver behind Cloudflare Access send their Access
+		// token in this header; the homeserver itself ignores it.
+		HeaderName::from_static("cf-access-token"),
 	];
 
 	let allow_origin_list = server
