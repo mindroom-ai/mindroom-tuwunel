@@ -145,6 +145,22 @@ fn rate_limits_31st_event_in_one_second() {
 }
 
 #[test]
+fn retried_transaction_is_answered_in_a_full_window() {
+	let mut buffer = Buffer::default();
+	for count in 1..=30 {
+		let txn_id = count.to_string();
+
+		send(&mut buffer, T0, count, new(room(), &txn_id, 1));
+	}
+
+	assert_eq!(send(&mut buffer, T0 + 100, 31, new(room(), "7", 1)), SendOutcome::Duplicate);
+	assert!(matches!(
+		send(&mut buffer, T0 + 100, 32, new(room(), "31", 1)),
+		SendOutcome::RateLimited { .. }
+	));
+}
+
+#[test]
 fn sweep_removes_expired_rooms() {
 	let mut buffer = Buffer::default();
 

@@ -238,6 +238,18 @@ impl Buffer {
 			self.sweep(now);
 		}
 
+		let room = self
+			.rooms
+			.entry(new.room_id.to_owned())
+			.or_default();
+
+		// A retried transaction that already landed is answered before the rate
+		// window, so a retry never turns an accepted send into a refusal.
+		room.expire(now);
+		if room.entries.iter().any(|entry| entry.is(&new)) {
+			return Err(SendOutcome::Duplicate);
+		}
+
 		let window = self
 			.rates
 			.entry((new.room_id.to_owned(), new.sender.to_owned()))
@@ -250,16 +262,6 @@ impl Buffer {
 			return Err(SendOutcome::RateLimited {
 				retry_after_ms: window_end.saturating_sub(now),
 			});
-		}
-
-		let room = self
-			.rooms
-			.entry(new.room_id.to_owned())
-			.or_default();
-
-		room.expire(now);
-		if room.entries.iter().any(|entry| entry.is(&new)) {
-			return Err(SendOutcome::Duplicate);
 		}
 
 		window.events = window.events.saturating_add(1);
