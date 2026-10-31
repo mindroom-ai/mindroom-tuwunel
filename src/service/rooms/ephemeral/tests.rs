@@ -1,9 +1,9 @@
 #![cfg(test)]
 
-use ruma::{DeviceId, RoomId, TransactionId, UserId};
+use ruma::{DeviceId, RoomId, TransactionId, UserId, api::client::filter::RoomEventFilter};
 use serde_json::{json, value::to_raw_value};
 
-use super::{Buffer, New, SendOutcome};
+use super::{Buffer, New, SendOutcome, opts_into};
 
 const ROOM: &str = "!room:example.com";
 const OTHER_ROOM: &str = "!other:example.com";
@@ -161,4 +161,34 @@ fn sweep_removes_expired_rooms() {
 			.contains_key(&(room().to_owned(), sender().to_owned()))
 	);
 	assert!(buffer.rooms.contains_key(other_room()));
+}
+
+fn filter(types: Option<&[&str]>, not_types: &[&str]) -> RoomEventFilter {
+	serde_json::from_value(json!({ "types": types, "not_types": not_types })).unwrap()
+}
+
+#[test]
+fn opt_in_needs_the_type_listed() {
+	assert!(!opts_into(&filter(None, &[]), EVENT_TYPE));
+	assert!(!opts_into(&filter(Some(&[]), &[]), EVENT_TYPE));
+	assert!(!opts_into(&filter(Some(&["m.typing", "m.receipt"]), &[]), EVENT_TYPE));
+	assert!(opts_into(&filter(Some(&["m.typing", EVENT_TYPE]), &[]), EVENT_TYPE));
+}
+
+#[test]
+fn opt_in_matches_wildcards() {
+	for pattern in ["*", "io.mindroom.*", "io.*.live", "*.live", "io.mindroom.live*"] {
+		assert!(opts_into(&filter(Some(&[pattern]), &[]), EVENT_TYPE), "{pattern}");
+	}
+
+	for pattern in ["m.*", "io.mindroom", "*.lives", "io.*.mindroom.*"] {
+		assert!(!opts_into(&filter(Some(&[pattern]), &[]), EVENT_TYPE), "{pattern}");
+	}
+}
+
+#[test]
+fn not_types_override_types() {
+	assert!(!opts_into(&filter(Some(&["*"]), &[EVENT_TYPE]), EVENT_TYPE));
+	assert!(!opts_into(&filter(Some(&[EVENT_TYPE]), &["io.mindroom.*"]), EVENT_TYPE));
+	assert!(opts_into(&filter(Some(&["*"]), &["m.*"]), EVENT_TYPE));
 }

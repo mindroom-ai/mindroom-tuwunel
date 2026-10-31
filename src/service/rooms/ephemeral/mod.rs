@@ -15,7 +15,7 @@ use std::{
 
 use ruma::{
 	DeviceId, MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedRoomId, OwnedTransactionId,
-	OwnedUserId, RoomId, TransactionId, UInt, UserId,
+	OwnedUserId, RoomId, TransactionId, UInt, UserId, api::client::filter::RoomEventFilter,
 };
 use serde_json::value::RawValue as RawJsonValue;
 use tokio::sync::broadcast;
@@ -177,6 +177,46 @@ impl Service {
 			.expect("locked for reading")
 			.between(room_id, since, until, millis_since_unix_epoch())
 	}
+}
+
+/// Whether a sync filter opts into ephemeral events of `event_type`.
+///
+/// `room.ephemeral.types` must list the type, and `not_types` must not. Unlike
+/// standard filter semantics, an absent `types` opts into nothing, so syncs
+/// that never asked for custom ephemeral events neither get them nor wake for
+/// them.
+#[must_use]
+pub fn opts_into(filter: &RoomEventFilter, event_type: &str) -> bool {
+	let matches = |pattern: &String| type_matches(pattern, event_type);
+
+	filter
+		.types
+		.as_ref()
+		.is_some_and(|types| types.iter().any(matches))
+		&& !filter.not_types.iter().any(matches)
+}
+
+/// Matrix filter type matching, where each `*` matches any run of characters.
+fn type_matches(pattern: &str, event_type: &str) -> bool {
+	let mut parts = pattern.split('*');
+	let first = parts.next().unwrap_or_default();
+	let Some(mut rest) = event_type.strip_prefix(first) else {
+		return false;
+	};
+
+	let Some(last) = parts.next_back() else {
+		return rest.is_empty();
+	};
+
+	for part in parts {
+		let Some((_, after)) = rest.split_once(part) else {
+			return false;
+		};
+
+		rest = after;
+	}
+
+	rest.ends_with(last)
 }
 
 impl Buffer {

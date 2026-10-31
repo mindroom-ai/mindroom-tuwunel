@@ -9,9 +9,10 @@ use futures::{
 	future::{join, join3, join4, join5, try_join},
 };
 use ruma::{
-	DeviceId, EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
+	DeviceId, EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, OwnedUserId,
+	RoomId, UInt, UserId,
 	api::client::{
-		filter::FilterDefinition,
+		filter::{FilterDefinition, RoomEventFilter},
 		sync::sync_events::{
 			self, DeviceLists, UnreadNotificationsCount,
 			v3::{
@@ -32,6 +33,8 @@ use ruma::{
 	serde::Raw,
 	uint,
 };
+use serde::Serialize;
+use serde_json::value::{RawValue as RawJsonValue, to_raw_value};
 use tokio::time;
 use tuwunel_core::{
 	Error, Result, at, debug,
@@ -62,6 +65,7 @@ use tuwunel_service::{
 	Services,
 	presence::Ping,
 	rooms::{
+		ephemeral::opts_into,
 		lazy_loading,
 		lazy_loading::{Options, Witness},
 		read_receipt::PrivateReadEvents,
@@ -150,6 +154,7 @@ struct BuildJoinedRoom {
 	receipt_events: Vec<(OwnedUserId, Raw<AnySyncEphemeralRoomEvent>)>,
 	typing_events: Vec<Raw<AnySyncEphemeralRoomEvent>>,
 	private_read_events: Option<PrivateReadEvents>,
+	ephemeral_events: Vec<Raw<AnySyncEphemeralRoomEvent>>,
 	state_events: Vec<Raw<AnySyncStateEvent>>,
 	account_data_events: Vec<Raw<AnyRoomAccountDataEvent>>,
 	room_events: Vec<PduEvent>,
@@ -324,7 +329,7 @@ pub(crate) async fn sync_events_route(
 
 		let watchers = services
 			.sync
-			.watch(sender_user, sender_device, watch_rooms)
+			.watch(sender_user, sender_device, watch_rooms, Some(&filter.room.ephemeral))
 			.await;
 
 		let next_batch = services.globals.wait_pending().await?;
@@ -1484,6 +1489,7 @@ struct JoinAggregates {
 	account_data_events: Vec<Raw<AnyRoomAccountDataEvent>>,
 	typing_events: Vec<Raw<AnySyncEphemeralRoomEvent>>,
 	private_read_events: Option<PrivateReadEvents>,
+	ephemeral_events: Vec<Raw<AnySyncEphemeralRoomEvent>>,
 	notification_count: Option<UInt>,
 	highlight_count: Option<UInt>,
 	thread_counts: Option<BTreeMap<OwnedEventId, (u64, u64)>>,
@@ -1519,6 +1525,16 @@ async fn await_join_aggregates(
 
 	let typing_events = gather_typing_events(services, room_id, sender_user, since);
 
+	let ephemeral_events = gather_ephemeral_events(
+		services,
+		room_id,
+		sender_user,
+		since,
+		next_batch,
+		&filter.room.ephemeral,
+		initial,
+	);
+
 	let device_list_updates = gather_device_list_updates(
 		services,
 		sender_user,
@@ -1543,12 +1559,12 @@ async fn await_join_aggregates(
 
 	let (
 		(room_events, account_data_events),
-		(typing_events, private_read_events),
+		(typing_events, private_read_events, ephemeral_events),
 		(notification_count, highlight_count, thread_counts),
 		(device_list_updates, left_encrypted_users),
 	) = join4(
 		join(room_events, account_data_events),
-		join(typing_events, private_read_events),
+		join3(typing_events, private_read_events, ephemeral_events),
 		join3(notification_count, highlight_count, thread_counts),
 		device_list_updates,
 	)
@@ -1560,6 +1576,7 @@ async fn await_join_aggregates(
 		account_data_events,
 		typing_events,
 		private_read_events,
+		ephemeral_events,
 		notification_count,
 		highlight_count,
 		thread_counts,
@@ -1599,6 +1616,7 @@ async fn finalize_joined_room(
 		account_data_events,
 		typing_events,
 		private_read_events,
+		ephemeral_events,
 		notification_count,
 		highlight_count,
 		thread_counts,
@@ -1643,6 +1661,7 @@ async fn finalize_joined_room(
 			receipt_events,
 			typing_events,
 			private_read_events,
+			ephemeral_events,
 			state_events,
 			account_data_events,
 			room_events,
@@ -1667,6 +1686,7 @@ fn build_joined_room(args: BuildJoinedRoom, event_fields: Option<&[String]>) -> 
 		receipt_events,
 		typing_events,
 		private_read_events,
+		ephemeral_events,
 		state_events,
 		account_data_events,
 		room_events,
@@ -1686,6 +1706,7 @@ fn build_joined_room(args: BuildJoinedRoom, event_fields: Option<&[String]>) -> 
 		.map(at!(1))
 		.chain(typing_events)
 		.chain(private_read_events.into_iter().flatten())
+		.chain(ephemeral_events)
 		.collect();
 
 	let state = state_after.wrap(StateEvents { events: state_events });
@@ -2101,6 +2122,64 @@ async fn gather_typing_events(
 		})
 		.unwrap_or(Vec::new())
 		.await
+}
+
+/// The custom ephemeral events (MSC2477) sent in the window whose types the
+/// request opts into, oldest first.
+///
+/// An initial sync gets none, nor do the senders the recipient ignores.
+async fn gather_ephemeral_events(
+	services: &Services,
+	room_id: &RoomId,
+	sender_user: &UserId,
+	since: u64,
+	next_batch: u64,
+	filter: &RoomEventFilter,
+	initial: bool,
+) -> Vec<Raw<AnySyncEphemeralRoomEvent>> {
+	/// The MSC2477 shape of a delivered event, which carries no room ID.
+	#[derive(Serialize)]
+	struct SyncEphemeralEvent<'a> {
+		#[serde(rename = "type")]
+		event_type: &'a str,
+		content: &'a RawJsonValue,
+		sender: &'a UserId,
+		origin_server_ts: MilliSecondsSinceUnixEpoch,
+	}
+
+	if initial {
+		return Vec::new();
+	}
+
+	let events: Vec<_> = services
+		.ephemeral
+		.events_between(room_id, since, next_batch)
+		.into_iter()
+		.filter(|event| opts_into(filter, &event.event_type))
+		.collect();
+
+	if events.is_empty() {
+		return Vec::new();
+	}
+
+	let ignored = services.users.ignored_users(sender_user).await;
+
+	events
+		.iter()
+		.filter(|event| {
+			ignored
+				.as_ref()
+				.is_none_or(|ignored| !ignored.ignored_users.contains_key(&event.sender))
+		})
+		.map(|event| SyncEphemeralEvent {
+			event_type: &event.event_type,
+			content: &event.content,
+			sender: &event.sender,
+			origin_server_ts: event.origin_server_ts,
+		})
+		.filter_map(|event| to_raw_value(&event).ok())
+		.map(Raw::from_json)
+		.collect()
 }
 
 fn timeline_membership_changes(
