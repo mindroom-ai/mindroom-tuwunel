@@ -49,6 +49,14 @@ pub(crate) async fn get_supported_versions_route(
 					.mindroom_openid_audience
 					.then_some("io.mindroom.openid_audience"),
 			)
+			.chain(
+				services
+					.config
+					.mindroom_ephemeral_events_enabled
+					.then_some(["org.matrix.msc2477", "io.mindroom.ephemeral_opt_in"])
+					.into_iter()
+					.flatten(),
+			)
 			.map(Into::into)
 			.zip(once(true).cycle())
 			.collect(),

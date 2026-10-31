@@ -101,7 +101,7 @@ pub(crate) async fn events_route(
 	loop {
 		let watchers = services
 			.sync
-			.watch(sender_user, body.sender_device.as_deref(), once(room_id).stream())
+			.watch(sender_user, body.sender_device.as_deref(), once(room_id).stream(), None)
 			.await;
 
 		let next_batch = services.globals.wait_pending().await?;

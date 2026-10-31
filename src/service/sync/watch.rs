@@ -1,9 +1,14 @@
+use std::collections::HashSet;
+
 use futures::{
 	FutureExt, Stream, StreamExt, future::BoxFuture, pin_mut, stream::FuturesUnordered,
 };
-use ruma::{DeviceId, RoomId, UserId};
+use ruma::{DeviceId, OwnedRoomId, RoomId, UserId, api::client::filter::RoomEventFilter};
+use tokio::sync::broadcast;
 use tuwunel_core::{implement, trace};
 use tuwunel_database::{Interfix, Separator, serialize_key};
+
+use crate::rooms::ephemeral::opts_into;
 
 /// Register all sync watchers for the given user, device, and rooms eagerly,
 /// then return a future that resolves when any watcher fires.
@@ -15,14 +20,19 @@ use tuwunel_database::{Interfix, Separator, serialize_key};
 /// the gap.
 ///
 /// Two-phase by design: outer await registers, inner future awaits a hit.
+///
+/// A custom ephemeral event (MSC2477) in a watched room fires only when
+/// `ephemeral` opts into its type and the user is joined, as only joined rooms
+/// deliver it; without a filter none does.
 #[implement(super::Service)]
-#[tracing::instrument(skip(self, rooms), level = "debug")]
+#[tracing::instrument(skip(self, rooms, ephemeral), level = "debug")]
 #[expect(clippy::async_yields_async)]
 pub async fn watch<'a, Rooms>(
 	&'a self,
 	user_id: &'a UserId,
 	device_id: Option<&'a DeviceId>,
 	rooms: Rooms,
+	ephemeral: Option<&'a RoomEventFilter>,
 ) -> impl Future<Output = ()> + Send + 'a
 where
 	Rooms: Stream<Item = &'a RoomId> + Send + 'a,
@@ -94,6 +104,20 @@ where
 		);
 	}
 
+	// Custom ephemeral events: subscribe now so the receiver is registered
+	// before this fn returns, and only when the filter can opt into a type.
+	let mut ephemeral = ephemeral
+		.filter(|filter| filter.types.is_some())
+		.map(|filter| {
+			let receiver = self
+				.services
+				.ephemeral
+				.ephemeral_update_sender
+				.subscribe();
+
+			(filter, receiver, HashSet::new())
+		});
+
 	// Drive the rooms stream during phase 1 so per-room watchers register
 	// before this fn returns. Stream items are not retained across cursor
 	// advances; the rocksdb slice contract forbids stashing them.
@@ -163,6 +187,17 @@ where
 			}
 			.boxed(),
 		);
+
+		if let Some((_, _, watched)) = &mut ephemeral {
+			watched.insert(room_id.to_owned());
+		}
+	}
+
+	if let Some((filter, receiver, watched)) = ephemeral {
+		futures.push(
+			self.ephemeral_update(user_id, receiver, watched, filter)
+				.boxed(),
+		);
 	}
 
 	// Server shutdown
@@ -176,5 +211,30 @@ where
 		trace!(futures = futures.len(), "watch started");
 		futures.next().await;
 		trace!(futures = futures.len(), "watch finished");
+	}
+}
+
+/// Waits for a custom ephemeral event in one of `rooms` that `user_id` is
+/// joined to and whose type `filter` opts into. A lagged or closed receiver
+/// ends the wait too; a spurious wake is fine.
+#[implement(super::Service)]
+async fn ephemeral_update(
+	&self,
+	user_id: &UserId,
+	mut receiver: broadcast::Receiver<(OwnedRoomId, String)>,
+	rooms: HashSet<OwnedRoomId>,
+	filter: &RoomEventFilter,
+) {
+	while let Ok((room_id, event_type)) = receiver.recv().await {
+		if rooms.contains(&room_id)
+			&& opts_into(filter, &event_type)
+			&& self
+				.services
+				.state_cache
+				.is_joined(user_id, &room_id)
+				.await
+		{
+			return;
+		}
 	}
 }

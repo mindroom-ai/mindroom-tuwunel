@@ -9,9 +9,10 @@ use futures::{
 	future::{join, join3, join4, join5, try_join},
 };
 use ruma::{
-	DeviceId, EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
+	DeviceId, EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, OwnedUserId,
+	RoomId, UInt, UserId,
 	api::client::{
-		filter::FilterDefinition,
+		filter::{FilterDefinition, RoomEventFilter},
 		sync::sync_events::{
 			self, DeviceLists, UnreadNotificationsCount,
 			v3::{
@@ -32,6 +33,8 @@ use ruma::{
 	serde::Raw,
 	uint,
 };
+use serde::Serialize;
+use serde_json::value::{RawValue as RawJsonValue, to_raw_value};
 use tokio::time;
 use tuwunel_core::{
 	Error, Result, at, debug,
@@ -150,6 +153,7 @@ struct BuildJoinedRoom {
 	receipt_events: Vec<(OwnedUserId, Raw<AnySyncEphemeralRoomEvent>)>,
 	typing_events: Vec<Raw<AnySyncEphemeralRoomEvent>>,
 	private_read_events: Option<PrivateReadEvents>,
+	ephemeral_events: Vec<Raw<AnySyncEphemeralRoomEvent>>,
 	state_events: Vec<Raw<AnySyncStateEvent>>,
 	account_data_events: Vec<Raw<AnyRoomAccountDataEvent>>,
 	room_events: Vec<PduEvent>,
@@ -324,7 +328,7 @@ pub(crate) async fn sync_events_route(
 
 		let watchers = services
 			.sync
-			.watch(sender_user, sender_device, watch_rooms)
+			.watch(sender_user, sender_device, watch_rooms, Some(&filter.room.ephemeral))
 			.await;
 
 		let next_batch = services.globals.wait_pending().await?;
@@ -1282,7 +1286,7 @@ async fn load_joined_room(
 		timeline_pdus,
 		joined_sender_member,
 		encrypted,
-		initial,
+		joined_since_last_sync,
 		since,
 		next_batch,
 		last_privateread_update,
@@ -1484,6 +1488,7 @@ struct JoinAggregates {
 	account_data_events: Vec<Raw<AnyRoomAccountDataEvent>>,
 	typing_events: Vec<Raw<AnySyncEphemeralRoomEvent>>,
 	private_read_events: Option<PrivateReadEvents>,
+	ephemeral_events: Vec<Raw<AnySyncEphemeralRoomEvent>>,
 	notification_count: Option<UInt>,
 	highlight_count: Option<UInt>,
 	thread_counts: Option<BTreeMap<OwnedEventId, (u64, u64)>>,
@@ -1500,13 +1505,15 @@ async fn await_join_aggregates(
 	timeline_pdus: Vec<(PduCount, PduEvent)>,
 	joined_sender_member: Option<PduEvent>,
 	encrypted: bool,
-	initial: bool,
+	joined_since_last_sync: bool,
 	since: u64,
 	next_batch: u64,
 	last_privateread_update: u64,
 	send_notification_counts: bool,
 	filter: &FilterDefinition,
 ) -> JoinAggregates {
+	let initial = since == 0;
+
 	let (notification_count, highlight_count, thread_counts) =
 		notification_count_futures(services, sender_user, room_id, send_notification_counts);
 
@@ -1518,6 +1525,16 @@ async fn await_join_aggregates(
 	});
 
 	let typing_events = gather_typing_events(services, room_id, sender_user, since);
+
+	let ephemeral_events = gather_ephemeral_events(
+		services,
+		room_id,
+		sender_user,
+		since,
+		next_batch,
+		&filter.room.ephemeral,
+		initial || joined_since_last_sync,
+	);
 
 	let device_list_updates = gather_device_list_updates(
 		services,
@@ -1543,12 +1560,12 @@ async fn await_join_aggregates(
 
 	let (
 		(room_events, account_data_events),
-		(typing_events, private_read_events),
+		(typing_events, private_read_events, ephemeral_events),
 		(notification_count, highlight_count, thread_counts),
 		(device_list_updates, left_encrypted_users),
 	) = join4(
 		join(room_events, account_data_events),
-		join(typing_events, private_read_events),
+		join3(typing_events, private_read_events, ephemeral_events),
 		join3(notification_count, highlight_count, thread_counts),
 		device_list_updates,
 	)
@@ -1560,6 +1577,7 @@ async fn await_join_aggregates(
 		account_data_events,
 		typing_events,
 		private_read_events,
+		ephemeral_events,
 		notification_count,
 		highlight_count,
 		thread_counts,
@@ -1599,6 +1617,7 @@ async fn finalize_joined_room(
 		account_data_events,
 		typing_events,
 		private_read_events,
+		ephemeral_events,
 		notification_count,
 		highlight_count,
 		thread_counts,
@@ -1643,6 +1662,7 @@ async fn finalize_joined_room(
 			receipt_events,
 			typing_events,
 			private_read_events,
+			ephemeral_events,
 			state_events,
 			account_data_events,
 			room_events,
@@ -1667,6 +1687,7 @@ fn build_joined_room(args: BuildJoinedRoom, event_fields: Option<&[String]>) -> 
 		receipt_events,
 		typing_events,
 		private_read_events,
+		ephemeral_events,
 		state_events,
 		account_data_events,
 		room_events,
@@ -1686,6 +1707,7 @@ fn build_joined_room(args: BuildJoinedRoom, event_fields: Option<&[String]>) -> 
 		.map(at!(1))
 		.chain(typing_events)
 		.chain(private_read_events.into_iter().flatten())
+		.chain(ephemeral_events)
 		.collect();
 
 	let state = state_after.wrap(StateEvents { events: state_events });
@@ -2101,6 +2123,62 @@ async fn gather_typing_events(
 		})
 		.unwrap_or(Vec::new())
 		.await
+}
+
+/// The custom ephemeral events (MSC2477) sent in the window whose types the
+/// request opts into, oldest first.
+///
+/// An initial sync gets none, nor does the first sync after the recipient
+/// joins, nor do the senders the recipient ignores.
+async fn gather_ephemeral_events(
+	services: &Services,
+	room_id: &RoomId,
+	sender_user: &UserId,
+	since: u64,
+	next_batch: u64,
+	filter: &RoomEventFilter,
+	newly_joined: bool,
+) -> Vec<Raw<AnySyncEphemeralRoomEvent>> {
+	/// The MSC2477 shape of a delivered event, which carries no room ID.
+	#[derive(Serialize)]
+	struct SyncEphemeralEvent<'a> {
+		#[serde(rename = "type")]
+		event_type: &'a str,
+		content: &'a RawJsonValue,
+		sender: &'a UserId,
+		origin_server_ts: MilliSecondsSinceUnixEpoch,
+	}
+
+	if newly_joined || filter.types.is_none() {
+		return Vec::new();
+	}
+
+	let events = services
+		.ephemeral
+		.events_between(room_id, since, next_batch, filter);
+
+	if events.is_empty() {
+		return Vec::new();
+	}
+
+	let ignored = services.users.ignored_users(sender_user).await;
+
+	events
+		.iter()
+		.filter(|event| {
+			ignored
+				.as_ref()
+				.is_none_or(|ignored| !ignored.ignored_users.contains_key(&event.sender))
+		})
+		.map(|event| SyncEphemeralEvent {
+			event_type: &event.event_type,
+			content: &event.content,
+			sender: &event.sender,
+			origin_server_ts: event.origin_server_ts,
+		})
+		.filter_map(|event| to_raw_value(&event).ok())
+		.map(Raw::from_json)
+		.collect()
 }
 
 fn timeline_membership_changes(
