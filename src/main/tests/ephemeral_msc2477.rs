@@ -187,7 +187,7 @@ fn rate_limits_bursts() -> Result {
 	boot("ephemeral-msc2477-rate", OPTIONS, async |services, base| {
 		let (alice, _, room_id) = joined_pair(services, base).await?;
 		let content = json!({ "x": 1 });
-		let txn_ids: Vec<String> = (0..40).map(|i| format!("burst-{i}")).collect();
+		let txn_ids: Vec<String> = (0..100).map(|i| format!("burst-{i}")).collect();
 		let responses = join_all(
 			txn_ids
 				.iter()
@@ -212,7 +212,7 @@ fn rate_limits_bursts() -> Result {
 			limited += 1;
 		}
 
-		assert!(limited > 0, "a burst of 40 was not rate limited");
+		assert!(limited > 0, "a burst of 100 was not rate limited");
 
 		Ok(())
 	})

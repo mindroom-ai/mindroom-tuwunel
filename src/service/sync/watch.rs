@@ -25,7 +25,7 @@ use crate::rooms::ephemeral::opts_into;
 /// `ephemeral` opts into its type and the user is joined, as only joined rooms
 /// deliver it; without a filter none does.
 #[implement(super::Service)]
-#[tracing::instrument(skip(self, rooms), level = "debug")]
+#[tracing::instrument(skip(self, rooms, ephemeral), level = "debug")]
 #[expect(clippy::async_yields_async)]
 pub async fn watch<'a, Rooms>(
 	&'a self,
