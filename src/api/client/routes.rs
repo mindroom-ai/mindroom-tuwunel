@@ -189,6 +189,11 @@ fn register_client_room_routes(router: Router<State>) -> Router<State> {
 fn register_client_state_and_sync_routes(router: Router<State>) -> Router<State> {
 	router
 		.ruma_route(&client::send_message_event_route)
+		.route(
+			"/_matrix/client/unstable/org.matrix.msc2477/rooms/{room_id}/ephemeral/{event_type}/\
+			 {txn_id}",
+			put(client::send_ephemeral_route),
+		)
 		.ruma_route(&client::send_state_event_for_key_route)
 		.ruma_route(&client::get_state_events_route)
 		.ruma_route(&client::get_state_events_for_key_route)

@@ -12,6 +12,7 @@ pub(crate) mod context;
 pub(crate) mod dehydrated_device;
 pub(crate) mod device;
 pub(crate) mod directory;
+pub(crate) mod ephemeral;
 pub(crate) mod events;
 pub(crate) mod filter;
 pub(crate) mod keys;
@@ -94,6 +95,7 @@ pub(crate) use self::{
 		get_public_rooms_filtered_route, get_public_rooms_route, get_room_visibility_route,
 		set_room_visibility_route,
 	},
+	ephemeral::send_ephemeral_route,
 	events::events_route,
 	filter::{create_filter_route, get_filter_route},
 	keys::{
