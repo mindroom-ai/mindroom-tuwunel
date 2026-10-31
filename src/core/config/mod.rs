@@ -3990,10 +3990,11 @@ pub struct Config {
 	///
 	/// When enabled, room members send events with
 	/// `PUT /_matrix/client/unstable/org.matrix.msc2477/rooms/{roomId}/ephemeral/{eventType}/{txnId}`.
-	/// They are held in memory for at most 30 seconds, never stored or
-	/// federated, and delivered only to `/sync` requests whose filter lists
-	/// their type in `room.ephemeral.types`. `/_matrix/client/versions`
-	/// advertises `org.matrix.msc2477` and `io.mindroom.ephemeral_opt_in`.
+	/// They live only in memory, are delivered for at most 30 seconds, are
+	/// never stored or federated, and reach only `/sync` requests whose
+	/// filter lists their type in `room.ephemeral.types`.
+	/// `/_matrix/client/versions` advertises `org.matrix.msc2477` and
+	/// `io.mindroom.ephemeral_opt_in`.
 	///
 	/// When disabled, the endpoint answers 404 `M_UNRECOGNIZED` and neither
 	/// feature is advertised.

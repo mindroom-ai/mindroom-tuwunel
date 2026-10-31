@@ -911,26 +911,31 @@ Behavior:
   `/_matrix/client/versions` advertises neither flag below.
 - `PUT /_matrix/client/unstable/org.matrix.msc2477/rooms/{roomId}/ephemeral/{eventType}/{txnId}`
   takes a JSON object body from a joined member and answers `{}`. A type
-  starting with `m.` is 400 `M_UNKNOWN`, a sender who is not joined 403
-  `M_FORBIDDEN`, a body over 65536 bytes 413 `M_TOO_LARGE`, a body that is not
-  an object 400 `M_BAD_JSON`, and more than 30 events from one sender to one
-  room in a one-second window 429 `M_LIMIT_EXCEEDED` with `retry_after_ms`
-  until the window ends. A transaction (type, sender, device, txnId) that is
-  still buffered answers `{}` without a second copy.
+  longer than 255 bytes is 400 `M_INVALID_PARAM`, a type starting with `m.`
+  400 `M_UNKNOWN`, a sender who is not joined 403 `M_FORBIDDEN`, a body over
+  65536 bytes 413 `M_TOO_LARGE`, a body that is not an object 400
+  `M_BAD_JSON`, and more than 30 events from one sender to one room in a
+  one-second window 429 `M_LIMIT_EXCEEDED` with `retry_after_ms` until the
+  window ends. A transaction (type, sender, device, txnId) that is still
+  buffered answers `{}` without a second copy.
 - Events live only in memory. Each room keeps at most 256 events and 1 MiB of
-  content, each for at most 30 seconds, and a restart drops them. Each event
-  takes a global count, as typing does; nothing else reaches the database.
+  content, event types, and transaction IDs. Each event is delivered for at
+  most 30 seconds, the next send after a minute frees its memory, and a
+  restart drops it. Each event takes a global count, as typing does; nothing
+  else reaches the database.
 - v3 `/sync` delivers an event in `rooms.join.{roomId}.ephemeral.events` as
   `{"type", "content", "sender", "origin_server_ts"}`, without `room_id`, when
   the request has a `since` token with `since < count <= next_batch`, the
   recipient is joined and does not ignore the sender, and the request's
-  filter opts in. An initial sync gets none.
+  filter opts in. An initial sync gets none, nor does the first sync after the
+  recipient joins.
 - Opt-in, the fork extension: `room.ephemeral.types` must be present and match
   the type, exactly or with `*` wildcards, and `room.ephemeral.not_types` must
   not match it. Standard filter semantics read an absent `types` as all types;
   here custom ephemeral events need the explicit opt-in, so clients that do not
-  use them (Element, bridges, bots) never receive them. The same rule decides
-  whether a send wakes a long poll, so it never wakes theirs either.
+  use them (Element, bridges, bots) never receive them. The same rule, for a
+  room the recipient is joined to, decides whether a send wakes a long poll,
+  so it never wakes theirs either.
 - `/_matrix/client/versions` lists `org.matrix.msc2477` and
   `io.mindroom.ephemeral_opt_in` in `unstable_features`; the MindRoom runtime
   sends frames only when the server lists `io.mindroom.ephemeral_opt_in`.

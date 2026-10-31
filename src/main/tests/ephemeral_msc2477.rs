@@ -2,13 +2,16 @@
 
 use std::time::{Duration, Instant};
 
-use futures::future::{join, join_all};
+use futures::{
+	StreamExt,
+	future::{join, join_all},
+};
 use reqwest::{Response, StatusCode};
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 use tuwunel_core::{
 	Result, implement,
-	ruma::{OwnedRoomId, RoomId},
+	ruma::{OwnedRoomId, OwnedUserId, RoomId, api::client::filter::RoomEventFilter},
 };
 use tuwunel_service::Services;
 
@@ -134,6 +137,30 @@ fn refuses_oversized_body() -> Result {
 			.await?;
 
 		expect_refusal(response, StatusCode::PAYLOAD_TOO_LARGE, "M_TOO_LARGE").await?;
+
+		Ok(())
+	})
+}
+
+/// The limit is on the event type's bytes: 255 is accepted, one more is not.
+#[test]
+fn refuses_long_event_type() -> Result {
+	boot("ephemeral-msc2477-long-type", OPTIONS, async |services, base| {
+		let (alice, _, room_id) = joined_pair(services, base).await?;
+
+		let fits = format!("io.{}", "a".repeat(252));
+		let response = alice
+			.put_ephemeral(&room_id, &fits, "fits", &json!({ "x": 1 }))
+			.await?;
+
+		assert_eq!(response.status(), StatusCode::OK, "{}", response.text().await?);
+
+		let long = format!("io.{}", "a".repeat(253));
+		let response = alice
+			.put_ephemeral(&room_id, &long, "long", &json!({ "x": 1 }))
+			.await?;
+
+		expect_refusal(response, StatusCode::BAD_REQUEST, "M_INVALID_PARAM").await?;
 
 		Ok(())
 	})
@@ -301,6 +328,47 @@ fn initial_sync_gets_nothing() -> Result {
 	})
 }
 
+/// Events sent while the recipient was only invited stay out of the sync that
+/// first shows the room joined, as they stay out of an initial sync; later
+/// events arrive.
+#[test]
+fn first_sync_after_join_gets_nothing_sent_before() -> Result {
+	boot("ephemeral-msc2477-joined-since", OPTIONS, async |services, base| {
+		let (alice, bob, _, room_id) = invited_pair(services, base).await?;
+		let since = bob.next_batch(Some(&opt_in())).await?;
+
+		alice
+			.put_ephemeral(&room_id, LIVE, "before-join", &json!({ "x": 1 }))
+			.await?
+			.error_for_status()?;
+
+		bob.post(&format!("rooms/{room_id}/join"), &json!({}))
+			.await?;
+
+		let sync = bob.sync(Some(&since), Some(&opt_in()), 0).await?;
+
+		assert!(sync["rooms"]["join"][room_id.as_str()].is_object(), "{sync}");
+		assert!(live_events(&sync, &room_id).is_empty(), "{sync}");
+
+		let since = field(&sync, "next_batch")?;
+
+		alice
+			.put_ephemeral(&room_id, LIVE, "after-join", &json!({ "x": 2 }))
+			.await?
+			.error_for_status()?;
+
+		let sync = bob.sync(Some(since), Some(&opt_in()), 0).await?;
+		let contents: Vec<Value> = live_events(&sync, &room_id)
+			.into_iter()
+			.map(|event| event["content"].clone())
+			.collect();
+
+		assert_eq!(contents, [json!({ "x": 2 })], "{sync}");
+
+		Ok(())
+	})
+}
+
 #[test]
 fn ignored_sender_is_skipped() -> Result {
 	boot("ephemeral-msc2477-ignored", OPTIONS, async |services, base| {
@@ -418,6 +486,37 @@ fn long_poll_stays_asleep_when_not_opted_in() -> Result {
 	})
 }
 
+/// An opted-in watch over a room the user is only invited to stays asleep
+/// through a member's send, since the event is never delivered there.
+#[test]
+fn invited_watch_stays_asleep() -> Result {
+	boot("ephemeral-msc2477-invited-asleep", OPTIONS, async |services, base| {
+		let (alice, _, bob_id, room_id) = invited_pair(services, base).await?;
+		let filter: RoomEventFilter =
+			serde_json::from_value(opt_in()["room"]["ephemeral"].clone())?;
+		let rooms = services
+			.state_cache
+			.rooms_joined(&bob_id)
+			.chain(services.state_cache.rooms_invited(&bob_id));
+
+		let watch = services
+			.sync
+			.watch(&bob_id, None, rooms, Some(&filter))
+			.await;
+
+		alice
+			.put_ephemeral(&room_id, LIVE, "invited", &json!({ "x": 1 }))
+			.await?
+			.error_for_status()?;
+
+		let woke = timeout(Duration::from_millis(1_500), watch).await;
+
+		assert!(woke.is_err(), "the watch woke for an invited room");
+
+		Ok(())
+	})
+}
+
 /// How long a test waits for the other user's long poll to park before it
 /// sends.
 const PARK: Duration = Duration::from_millis(500);
@@ -443,6 +542,19 @@ async fn joined_pair<'a>(
 	services: &'a Services,
 	base: &'a str,
 ) -> Result<(Client<'a>, Client<'a>, OwnedRoomId)> {
+	let (alice, bob, _, room_id) = invited_pair(services, base).await?;
+
+	bob.post(&format!("rooms/{room_id}/join"), &json!({}))
+		.await?;
+
+	Ok((alice, bob, room_id))
+}
+
+/// Register Alice and Bob, and invite Bob to a room Alice creates.
+async fn invited_pair<'a>(
+	services: &'a Services,
+	base: &'a str,
+) -> Result<(Client<'a>, Client<'a>, OwnedUserId, OwnedRoomId)> {
 	register(services, "alice", ALICE_TOKEN).await?;
 	let bob_id = register(services, "bob", BOB_TOKEN).await?;
 
@@ -456,10 +568,7 @@ async fn joined_pair<'a>(
 		.post(&format!("rooms/{room_id}/invite"), &json!({ "user_id": bob_id }))
 		.await?;
 
-	bob.post(&format!("rooms/{room_id}/join"), &json!({}))
-		.await?;
-
-	Ok((alice, bob, room_id))
+	Ok((alice, bob, bob_id, room_id))
 }
 
 /// The `unstable_features` map `/versions` advertises.

@@ -24,7 +24,8 @@ use tuwunel_core::{Result, trace, utils::millis_since_unix_epoch};
 /// Most events one room holds; the oldest is evicted first.
 const MAX_EVENTS: usize = 256;
 
-/// Most content bytes one room holds; the oldest events are evicted first.
+/// Most bytes of content, event types, and transaction IDs one room holds; the
+/// oldest events are evicted first.
 const MAX_BYTES: usize = 1_048_576;
 
 /// Age in milliseconds after which an event is no longer delivered.
@@ -78,7 +79,7 @@ struct Buffer {
 	last_sweep: u64,
 }
 
-/// One room's events in count order, with the sum of their content bytes.
+/// One room's events in count order, with the sum of their sizes.
 #[derive(Default)]
 struct Room {
 	entries: VecDeque<Entry>,
@@ -164,18 +165,20 @@ impl Service {
 		SendOutcome::Accepted
 	}
 
-	/// Unexpired events of a room with `since < count <= until`, oldest first.
+	/// Unexpired events of a room with `since < count <= until` whose types
+	/// `filter` opts into, oldest first.
 	#[must_use]
 	pub fn events_between(
 		&self,
 		room_id: &RoomId,
 		since: u64,
 		until: u64,
+		filter: &RoomEventFilter,
 	) -> Vec<BufferedEphemeral> {
 		self.buffer
 			.read()
 			.expect("locked for reading")
-			.between(room_id, since, until, millis_since_unix_epoch())
+			.between(room_id, since, until, filter, millis_since_unix_epoch())
 	}
 }
 
@@ -287,6 +290,7 @@ impl Buffer {
 		room_id: &RoomId,
 		since: u64,
 		until: u64,
+		filter: &RoomEventFilter,
 		now: u64,
 	) -> Vec<BufferedEphemeral> {
 		self.rooms
@@ -295,6 +299,7 @@ impl Buffer {
 			.flat_map(|room| room.entries.iter())
 			.filter(|entry| entry.event.count > since && entry.event.count <= until)
 			.filter(|entry| !entry.expired(now))
+			.filter(|entry| opts_into(filter, &entry.event.event_type))
 			.map(|entry| entry.event.clone())
 			.collect()
 	}
@@ -335,7 +340,14 @@ impl Room {
 }
 
 impl Entry {
-	fn bytes(&self) -> usize { self.event.content.get().len() }
+	fn bytes(&self) -> usize {
+		self.event
+			.content
+			.get()
+			.len()
+			.saturating_add(self.event.event_type.len())
+			.saturating_add(self.txn_id.as_str().len())
+	}
 
 	fn expired(&self, now: u64) -> bool {
 		let sent = u64::from(self.event.origin_server_ts.get());

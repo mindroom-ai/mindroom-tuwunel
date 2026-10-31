@@ -65,7 +65,6 @@ use tuwunel_service::{
 	Services,
 	presence::Ping,
 	rooms::{
-		ephemeral::opts_into,
 		lazy_loading,
 		lazy_loading::{Options, Witness},
 		read_receipt::PrivateReadEvents,
@@ -1287,7 +1286,7 @@ async fn load_joined_room(
 		timeline_pdus,
 		joined_sender_member,
 		encrypted,
-		initial,
+		joined_since_last_sync,
 		since,
 		next_batch,
 		last_privateread_update,
@@ -1506,13 +1505,15 @@ async fn await_join_aggregates(
 	timeline_pdus: Vec<(PduCount, PduEvent)>,
 	joined_sender_member: Option<PduEvent>,
 	encrypted: bool,
-	initial: bool,
+	joined_since_last_sync: bool,
 	since: u64,
 	next_batch: u64,
 	last_privateread_update: u64,
 	send_notification_counts: bool,
 	filter: &FilterDefinition,
 ) -> JoinAggregates {
+	let initial = since == 0;
+
 	let (notification_count, highlight_count, thread_counts) =
 		notification_count_futures(services, sender_user, room_id, send_notification_counts);
 
@@ -1532,7 +1533,7 @@ async fn await_join_aggregates(
 		since,
 		next_batch,
 		&filter.room.ephemeral,
-		initial,
+		initial || joined_since_last_sync,
 	);
 
 	let device_list_updates = gather_device_list_updates(
@@ -2127,7 +2128,8 @@ async fn gather_typing_events(
 /// The custom ephemeral events (MSC2477) sent in the window whose types the
 /// request opts into, oldest first.
 ///
-/// An initial sync gets none, nor do the senders the recipient ignores.
+/// An initial sync gets none, nor does the first sync after the recipient
+/// joins, nor do the senders the recipient ignores.
 async fn gather_ephemeral_events(
 	services: &Services,
 	room_id: &RoomId,
@@ -2135,7 +2137,7 @@ async fn gather_ephemeral_events(
 	since: u64,
 	next_batch: u64,
 	filter: &RoomEventFilter,
-	initial: bool,
+	newly_joined: bool,
 ) -> Vec<Raw<AnySyncEphemeralRoomEvent>> {
 	/// The MSC2477 shape of a delivered event, which carries no room ID.
 	#[derive(Serialize)]
@@ -2147,16 +2149,13 @@ async fn gather_ephemeral_events(
 		origin_server_ts: MilliSecondsSinceUnixEpoch,
 	}
 
-	if initial {
+	if newly_joined || filter.types.is_none() {
 		return Vec::new();
 	}
 
-	let events: Vec<_> = services
+	let events = services
 		.ephemeral
-		.events_between(room_id, since, next_batch)
-		.into_iter()
-		.filter(|event| opts_into(filter, &event.event_type))
-		.collect();
+		.events_between(room_id, since, next_batch, filter);
 
 	if events.is_empty() {
 		return Vec::new();

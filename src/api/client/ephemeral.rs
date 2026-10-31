@@ -15,6 +15,9 @@ use crate::Ruma;
 /// Largest body, in bytes, one ephemeral event may carry.
 const MAX_BODY_BYTES: usize = 65_536;
 
+/// Longest event type, in bytes, one ephemeral event may have.
+const MAX_EVENT_TYPE_BYTES: usize = 255;
+
 /// # `PUT /_matrix/client/unstable/org.matrix.msc2477/rooms/{roomId}/ephemeral/{eventType}/{txnId}`
 ///
 /// Sends a custom ephemeral event to the room's members whose `/sync` opts
@@ -29,6 +32,10 @@ pub(crate) async fn send_ephemeral_route(
 	}
 
 	let event_type = body.event_type.to_string();
+	if event_type.len() > MAX_EVENT_TYPE_BYTES {
+		return Err!(Request(InvalidParam("Ephemeral event type is longer than 255 bytes.")));
+	}
+
 	if event_type.starts_with("m.") {
 		return Err!(Request(Unknown("Cannot send built-in ephemeral types with this endpoint")));
 	}

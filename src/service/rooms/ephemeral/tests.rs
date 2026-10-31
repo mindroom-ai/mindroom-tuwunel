@@ -40,7 +40,7 @@ fn send(buffer: &mut Buffer, now: u64, count: u64, new: New<'_>) -> SendOutcome 
 
 fn counts(buffer: &Buffer, since: u64, until: u64, now: u64) -> Vec<u64> {
 	buffer
-		.between(room(), since, until, now)
+		.between(room(), since, until, &filter(Some(&["*"]), &[]), now)
 		.into_iter()
 		.map(|event| event.count)
 		.collect()
@@ -71,6 +71,18 @@ fn evicts_oldest_beyond_one_mib() {
 
 	send(&mut buffer, T0, 1, new(room(), "first", 600 * 1024));
 	send(&mut buffer, T0, 2, new(room(), "second", 600 * 1024));
+
+	assert_eq!(counts(&buffer, 0, u64::MAX, T0), [2]);
+}
+
+/// The transaction id is held with the event, so it counts toward the bound.
+#[test]
+fn long_txn_id_counts_toward_one_mib() {
+	let mut buffer = Buffer::default();
+	let long_txn_id = "t".repeat(500 * 1024);
+
+	send(&mut buffer, T0, 1, new(room(), "first", 600 * 1024));
+	send(&mut buffer, T0, 2, new(room(), &long_txn_id, 1));
 
 	assert_eq!(counts(&buffer, 0, u64::MAX, T0), [2]);
 }

@@ -22,7 +22,8 @@ use crate::rooms::ephemeral::opts_into;
 /// Two-phase by design: outer await registers, inner future awaits a hit.
 ///
 /// A custom ephemeral event (MSC2477) in a watched room fires only when
-/// `ephemeral` opts into its type; without a filter none does.
+/// `ephemeral` opts into its type and the user is joined, as only joined rooms
+/// deliver it; without a filter none does.
 #[implement(super::Service)]
 #[tracing::instrument(skip(self, rooms), level = "debug")]
 #[expect(clippy::async_yields_async)]
@@ -193,7 +194,10 @@ where
 	}
 
 	if let Some((filter, receiver, watched)) = ephemeral {
-		futures.push(ephemeral_update(receiver, watched, filter).boxed());
+		futures.push(
+			self.ephemeral_update(user_id, receiver, watched, filter)
+				.boxed(),
+		);
 	}
 
 	// Server shutdown
@@ -210,16 +214,26 @@ where
 	}
 }
 
-/// Waits for a custom ephemeral event in one of `rooms` whose type `filter`
-/// opts into. A lagged or closed receiver ends the wait too; a spurious wake
-/// is fine.
+/// Waits for a custom ephemeral event in one of `rooms` that `user_id` is
+/// joined to and whose type `filter` opts into. A lagged or closed receiver
+/// ends the wait too; a spurious wake is fine.
+#[implement(super::Service)]
 async fn ephemeral_update(
+	&self,
+	user_id: &UserId,
 	mut receiver: broadcast::Receiver<(OwnedRoomId, String)>,
 	rooms: HashSet<OwnedRoomId>,
 	filter: &RoomEventFilter,
 ) {
 	while let Ok((room_id, event_type)) = receiver.recv().await {
-		if rooms.contains(&room_id) && opts_into(filter, &event_type) {
+		if rooms.contains(&room_id)
+			&& opts_into(filter, &event_type)
+			&& self
+				.services
+				.state_cache
+				.is_joined(user_id, &room_id)
+				.await
+		{
 			return;
 		}
 	}
