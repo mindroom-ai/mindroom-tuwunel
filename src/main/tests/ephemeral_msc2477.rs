@@ -117,6 +117,25 @@ fn refuses_non_members() -> Result {
 	})
 }
 
+/// A suspended account stays joined but may not send, as on `/send`.
+#[test]
+fn refuses_suspended_senders() -> Result {
+	boot("ephemeral-msc2477-suspended", OPTIONS, async |services, base| {
+		let (_, bob, bob_id, room_id) = invited_pair(services, base).await?;
+		bob.post(&format!("rooms/{room_id}/join"), &json!({}))
+			.await?;
+
+		services.users.set_suspended(&bob_id, &bob_id);
+		let response = bob
+			.put_ephemeral(&room_id, LIVE, "suspended", &json!({ "x": 1 }))
+			.await?;
+
+		expect_refusal(response, StatusCode::FORBIDDEN, "M_USER_SUSPENDED").await?;
+
+		Ok(())
+	})
+}
+
 /// The limit is on the body's bytes: 65536 is accepted, one more is not.
 #[test]
 fn refuses_oversized_body() -> Result {

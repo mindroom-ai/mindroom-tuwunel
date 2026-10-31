@@ -912,12 +912,12 @@ Behavior:
 - `PUT /_matrix/client/unstable/org.matrix.msc2477/rooms/{roomId}/ephemeral/{eventType}/{txnId}`
   takes a JSON object body from a joined member and answers `{}`. A type
   longer than 255 bytes is 400 `M_INVALID_PARAM`, a type starting with `m.`
-  400 `M_UNKNOWN`, a sender who is not joined 403 `M_FORBIDDEN`, a body over
-  65536 bytes 413 `M_TOO_LARGE`, a body that is not an object 400
-  `M_BAD_JSON`, and more than 30 events from one sender to one room in a
-  one-second window 429 `M_LIMIT_EXCEEDED` with `retry_after_ms` until the
-  window ends. A transaction (type, sender, device, txnId) that is still
-  buffered answers `{}` without a second copy.
+  400 `M_UNKNOWN`, a suspended sender 403 `M_USER_SUSPENDED`, a sender who is
+  not joined 403 `M_FORBIDDEN`, a body over 65536 bytes 413 `M_TOO_LARGE`, a
+  body that is not an object 400 `M_BAD_JSON`, and more than 30 events from
+  one sender to one room in a one-second window 429 `M_LIMIT_EXCEEDED` with
+  `retry_after_ms` until the window ends. A transaction (type, sender, device,
+  txnId) that is still buffered answers `{}` without a second copy.
 - Events live only in memory. Each room keeps at most 256 events and 1 MiB of
   content, event types, and transaction IDs. Each event is delivered for at
   most 30 seconds, the next send after a minute frees its memory, and a

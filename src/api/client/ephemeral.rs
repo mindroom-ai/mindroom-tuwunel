@@ -41,6 +41,10 @@ pub(crate) async fn send_ephemeral_route(
 	}
 
 	let sender_user = body.sender_user();
+	if services.users.is_suspended(sender_user).await {
+		return Err!(Request(UserSuspended("Cannot send ephemeral events while suspended.")));
+	}
+
 	if !services
 		.state_cache
 		.is_joined(sender_user, &body.room_id)
