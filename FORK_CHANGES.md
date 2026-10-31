@@ -891,6 +891,58 @@ such a server. Without the parameter the response is unchanged. The
 route is registered as a plain axum route because ruma's response type has no
 room for the extra field.
 
+### Custom ephemeral room events reach the syncs that opt in
+
+MindRoom streams AI replies to MindRoom Chat as small ephemeral frames instead
+of frequent full-content edits, so the server relays custom ephemeral room
+events: a subset of MSC2477 with a fork-specific opt-in.
+
+Files:
+- `src/service/rooms/ephemeral/mod.rs`, `src/service/services.rs`
+- `src/api/client/ephemeral.rs`, `src/api/router.rs`
+- `src/api/client/sync/v3.rs`, `src/service/sync/watch.rs`
+- `src/api/client/versions.rs`, `src/core/config/mod.rs`, `tuwunel-example.toml`
+- Tests: `src/service/rooms/ephemeral/tests.rs`,
+  `src/main/tests/ephemeral_msc2477.rs`
+
+Behavior:
+- Everything below applies only with `mindroom_ephemeral_events_enabled = true`,
+  the default. With it off, the endpoint answers 404 `M_UNRECOGNIZED` and
+  `/_matrix/client/versions` advertises neither flag below.
+- `PUT /_matrix/client/unstable/org.matrix.msc2477/rooms/{roomId}/ephemeral/{eventType}/{txnId}`
+  takes a JSON object body from a joined member and answers `{}`. A type
+  longer than 255 bytes is 400 `M_INVALID_PARAM`, a type starting with `m.`
+  400 `M_UNKNOWN`, a suspended sender 403 `M_USER_SUSPENDED`, a sender who is
+  not joined 403 `M_FORBIDDEN`, a body over 65536 bytes 413 `M_TOO_LARGE`, a
+  body that is not an object 400 `M_BAD_JSON`, and more than 30 events from
+  one sender to one room in a one-second window 429 `M_LIMIT_EXCEEDED` with
+  `retry_after_ms` until the window ends. A transaction (type, sender, device,
+  txnId) that is still buffered answers `{}` without a second copy.
+- Events live only in memory. Each room keeps at most 256 events and 1 MiB of
+  content, event types, and transaction IDs. Each event is delivered for at
+  most 30 seconds, the next send after a minute frees its memory, and a
+  restart drops it. Each event takes a global count, as typing does; nothing
+  else reaches the database.
+- v3 `/sync` delivers an event in `rooms.join.{roomId}.ephemeral.events` as
+  `{"type", "content", "sender", "origin_server_ts"}`, without `room_id`, when
+  the request has a `since` token with `since < count <= next_batch`, the
+  recipient is joined and does not ignore the sender, and the request's
+  filter opts in. An initial sync gets none, nor does the first sync after the
+  recipient joins.
+- Opt-in, the fork extension: `room.ephemeral.types` must be present and match
+  the type, exactly or with `*` wildcards, and `room.ephemeral.not_types` must
+  not match it. Standard filter semantics read an absent `types` as all types;
+  here custom ephemeral events need the explicit opt-in, so clients that do not
+  use them (Element, bridges, bots) never receive them. The same rule, for a
+  room the recipient is joined to, decides whether a send wakes a long poll,
+  so it never wakes theirs either.
+- `/_matrix/client/versions` lists `org.matrix.msc2477` and
+  `io.mindroom.ephemeral_opt_in` in `unstable_features`; the MindRoom runtime
+  sends frames only when the server lists `io.mindroom.ephemeral_opt_in`.
+- Omitted from MSC2477: federation, appservice delivery, sliding sync, and
+  per-type power levels, which need a new room version. Typing and receipts
+  are unchanged.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
@@ -1222,6 +1274,13 @@ mindroom_edit_purge_dry_run = false
 [global]
 # Off by default; enable only after backends and clients send audiences.
 mindroom_openid_audience = true
+```
+
+### Custom ephemeral events (MSC2477)
+```toml
+[global]
+# On by default; false refuses sends and stops advertising the feature.
+mindroom_ephemeral_events_enabled = true
 ```
 
 ### Native Sign in with Apple

@@ -213,7 +213,12 @@ pub(crate) async fn sync_events_v5_route(
 		let window;
 		let watchers = services
 			.sync
-			.watch(sender_user, sender_device, services.state_cache.rooms_joined(sender_user))
+			.watch(
+				sender_user,
+				sender_device,
+				services.state_cache.rooms_joined(sender_user),
+				None,
+			)
 			.await;
 
 		conn.next_batch = services.globals.wait_pending().await?;
