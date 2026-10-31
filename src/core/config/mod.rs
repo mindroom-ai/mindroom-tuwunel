@@ -3985,6 +3985,23 @@ pub struct Config {
 	#[serde(default)]
 	pub mindroom_openid_audience: bool,
 
+	/// MindRoom: Relay custom ephemeral room events (MSC2477) to v3 `/sync`
+	/// requests that opt in.
+	///
+	/// When enabled, room members send events with
+	/// `PUT /_matrix/client/unstable/org.matrix.msc2477/rooms/{roomId}/ephemeral/{eventType}/{txnId}`.
+	/// They are held in memory for at most 30 seconds, never stored or
+	/// federated, and delivered only to `/sync` requests whose filter lists
+	/// their type in `room.ephemeral.types`. `/_matrix/client/versions`
+	/// advertises `org.matrix.msc2477` and `io.mindroom.ephemeral_opt_in`.
+	///
+	/// When disabled, the endpoint answers 404 `M_UNRECOGNIZED` and neither
+	/// feature is advertised.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub mindroom_ephemeral_events_enabled: bool,
+
 	/// Sets the `Access-Control-Allow-Origin` header included by this server in
 	/// all responses. A list of multiple values can be specified. The default
 	/// is an empty list. The actual header defaults to `*` upon an empty list.
