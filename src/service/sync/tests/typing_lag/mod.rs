@@ -152,7 +152,7 @@ async fn watch_room<'a>(
 ) -> impl Future<Output = ()> + Send + 'a {
 	services
 		.sync
-		.watch(user_id!("@alice:localhost"), None, once(room).stream())
+		.watch(user_id!("@alice:localhost"), None, once(room).stream(), None)
 		.await
 }
 
