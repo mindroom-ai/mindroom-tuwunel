@@ -327,6 +327,24 @@ when that drops visible events. Upstream has the same bug. Files:
 `src/api/client/sync/mod.rs`; test in
 `src/main/tests/sync_history_visibility.rs`.
 
+### Every sync that carries a room lists all its thread counts
+
+MSC3773 gives a room's per-thread counts in `unread_thread_notifications`, and
+a thread may be left out only when it has no notifications, so clients take a
+missing thread as read: matrix-js-sdk zeroes every thread the map leaves out,
+and all of them when the map is absent. On a v3 `/sync` round without timeline
+events, the map listed only the threads whose read position moved in that
+round, and a room sent for another reason, such as another member's receipt or
+typing, carried no map. Reading one thread cleared the other threads' counts in
+the client until the room's next timeline event. Now a room in the response
+always lists the counts of all its threads, read when the room is sent. The
+thread counts never put a room in the response on their own, since a read
+position that moved already does that through the room counts. Sliding sync
+has no per-thread map and sums every thread into the room counts, so it is
+unchanged. Upstream has the same bug (`ced2a51bc`). Files:
+`src/api/client/sync/v3.rs`; test in
+`src/mindroom-tests/tests/sync_thread_counts.rs`.
+
 ### send_join response events are checked before they are stored
 
 Joining a room over federation stored every event of the `send_join` response

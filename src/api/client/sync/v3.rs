@@ -161,7 +161,6 @@ struct BuildJoinedRoom {
 	joined_member_count: Option<u64>,
 	invited_member_count: Option<u64>,
 	unread_notifications: UnreadNotificationsCount,
-	unread_thread_notifications: BTreeMap<OwnedEventId, UnreadNotificationsCount>,
 	state_after: StateAfter,
 	limited: bool,
 	joined_since_last_sync: bool,
@@ -1300,6 +1299,7 @@ async fn load_joined_room(
 	let (joined_room, device_list_updates, left_encrypted_users) = finalize_joined_room(
 		services,
 		sender_user,
+		room_id,
 		filter,
 		state_events,
 		aggregates,
@@ -1307,7 +1307,6 @@ async fn load_joined_room(
 		heroes,
 		joined_member_count,
 		invited_member_count,
-		quiet_round.then_some(&thread_last_reads),
 		send_notification_count_filter,
 		FinalizeJoinFlags {
 			encrypted,
@@ -1315,9 +1314,7 @@ async fn load_joined_room(
 			state_after,
 			limited,
 			joined_since_last_sync,
-			initial,
 		},
-		in_window,
 		prev_batch,
 	)
 	.await;
@@ -1592,13 +1589,13 @@ struct FinalizeJoinFlags {
 	state_after: StateAfter,
 	limited: bool,
 	joined_since_last_sync: bool,
-	initial: bool,
 }
 
 #[expect(clippy::too_many_arguments)]
 async fn finalize_joined_room(
 	services: &Services,
 	sender_user: &UserId,
+	room_id: &RoomId,
 	filter: &FilterDefinition,
 	state_events: impl Iterator<Item = PduEvent> + Send,
 	aggregates: JoinAggregates,
@@ -1606,10 +1603,8 @@ async fn finalize_joined_room(
 	heroes: Option<Vec<OwnedUserId>>,
 	joined_member_count: Option<u64>,
 	invited_member_count: Option<u64>,
-	thread_last_reads: Option<&BTreeMap<OwnedEventId, u64>>,
 	send_notification_count_filter: impl Fn(&UInt) -> bool,
 	flags: FinalizeJoinFlags,
-	in_window: impl Fn(u64) -> bool,
 	prev_batch: Option<PduCount>,
 ) -> (JoinedRoom, HashSet<OwnedUserId>, HashSet<OwnedUserId>) {
 	let JoinAggregates {
@@ -1631,7 +1626,6 @@ async fn finalize_joined_room(
 		state_after,
 		limited,
 		joined_since_last_sync,
-		initial,
 	} = flags;
 
 	let state_events = assemble_join_state_events(
@@ -1646,18 +1640,16 @@ async fn finalize_joined_room(
 	)
 	.await;
 
-	let (unread_notifications, unread_thread_notifications) = assemble_unread_notifications(
+	let want_thread_unread = filter.room.timeline.unread_thread_notifications;
+	let unread_notifications = assemble_unread_notifications(
 		notification_count,
 		highlight_count,
-		thread_counts,
-		thread_last_reads,
+		thread_counts.as_ref(),
 		send_notification_count_filter,
-		filter.room.timeline.unread_thread_notifications,
-		initial,
-		in_window,
+		want_thread_unread,
 	);
 
-	let joined_room = build_joined_room(
+	let mut joined_room = build_joined_room(
 		BuildJoinedRoom {
 			receipt_events,
 			typing_events,
@@ -1670,7 +1662,6 @@ async fn finalize_joined_room(
 			joined_member_count,
 			invited_member_count,
 			unread_notifications,
-			unread_thread_notifications,
 			state_after,
 			limited,
 			joined_since_last_sync,
@@ -1678,6 +1669,33 @@ async fn finalize_joined_room(
 		},
 		filter.event_fields.as_deref(),
 	);
+
+	// MSC3773: a client takes a thread left out of `unread_thread_notifications`
+	// as read, so a room in the response lists the counts of all its threads.
+	// They never put a room in the response on their own: a read position that
+	// moved already does that through the room counts.
+	if want_thread_unread && !joined_room.is_empty() {
+		let thread_counts = match thread_counts {
+			| Some(thread_counts) => thread_counts,
+			| None =>
+				services
+					.pusher
+					.thread_notification_counts(sender_user, room_id)
+					.await,
+		};
+
+		joined_room.unread_thread_notifications = thread_counts
+			.into_iter()
+			.map(|(root, (notifications, highlights))| {
+				let counts = UnreadNotificationsCount {
+					notification_count: UInt::try_from(notifications).ok(),
+					highlight_count: UInt::try_from(highlights).ok(),
+				};
+
+				(root, counts)
+			})
+			.collect();
+	}
 
 	(joined_room, device_list_updates, left_encrypted_users)
 }
@@ -1695,7 +1713,6 @@ fn build_joined_room(args: BuildJoinedRoom, event_fields: Option<&[String]>) -> 
 		joined_member_count,
 		invited_member_count,
 		unread_notifications,
-		unread_thread_notifications,
 		state_after,
 		limited,
 		joined_since_last_sync,
@@ -1737,7 +1754,7 @@ fn build_joined_room(args: BuildJoinedRoom, event_fields: Option<&[String]>) -> 
 				.collect(),
 		},
 		unread_notifications,
-		unread_thread_notifications,
+		unread_thread_notifications: BTreeMap::new(),
 	}
 }
 
@@ -1912,8 +1929,8 @@ fn notification_count_futures<'a>(
 			.unwrap_or(uint!(0))
 	});
 
-	// MSC3773: per-thread counts. Filtered downstream by per-thread last-read
-	// so quiet threads are omitted on rounds where the main cursor advanced.
+	// MSC3773: per-thread counts, summed into the room counts for clients that
+	// do not partition them by thread.
 	let thread_counts = send.then_async(move || {
 		services
 			.pusher
@@ -2265,21 +2282,16 @@ async fn assemble_state_events(
 		.await
 }
 
-#[expect(clippy::too_many_arguments)]
 fn assemble_unread_notifications(
 	notification_count: Option<UInt>,
 	highlight_count: Option<UInt>,
-	thread_counts: Option<BTreeMap<OwnedEventId, (u64, u64)>>,
-	thread_last_reads: Option<&BTreeMap<OwnedEventId, u64>>,
+	thread_counts: Option<&BTreeMap<OwnedEventId, (u64, u64)>>,
 	send_notification_count_filter: impl Fn(&UInt) -> bool,
 	want_thread_unread: bool,
-	initial: bool,
-	in_window: impl Fn(u64) -> bool,
-) -> (UnreadNotificationsCount, BTreeMap<OwnedEventId, UnreadNotificationsCount>) {
-	let thread_counts = thread_counts.unwrap_or_default();
-
+) -> UnreadNotificationsCount {
 	let (thread_total_notifications, thread_total_highlights) = thread_counts
-		.values()
+		.into_iter()
+		.flat_map(BTreeMap::values)
 		.fold((0_u64, 0_u64), |(n, h), &(notifs, hl)| {
 			(n.saturating_add(notifs), h.saturating_add(hl))
 		});
@@ -2295,41 +2307,14 @@ fn assemble_unread_notifications(
 		}
 	};
 
-	let unread_notifications = UnreadNotificationsCount {
+	UnreadNotificationsCount {
 		highlight_count: highlight_count
 			.map(merge_total(thread_total_highlights))
 			.filter(&send_notification_count_filter),
 		notification_count: notification_count
 			.map(merge_total(thread_total_notifications))
 			.filter(&send_notification_count_filter),
-	};
-
-	// On quiet rounds (timeline empty) `thread_last_reads` is `Some`; emit
-	// only threads whose read cursor advanced within the window. When the
-	// timeline carried events `thread_last_reads` is `None`; emit all.
-	// Initial sync (since == 0) is a full snapshot; bypass the gate so
-	// clients with no prior cursor still see existing thread counts.
-	let advanced_in_window = |root: &EventId| {
-		initial
-			|| thread_last_reads
-				.is_none_or(|reads| reads.get(root).copied().is_some_and(&in_window))
-	};
-
-	let unread_thread_notifications = thread_counts
-		.into_iter()
-		.filter(|_| want_thread_unread)
-		.filter(|(root, _)| advanced_in_window(root))
-		.map(|(root, (notifications, highlights))| {
-			let counts = UnreadNotificationsCount {
-				notification_count: UInt::try_from(notifications).ok(),
-				highlight_count: UInt::try_from(highlights).ok(),
-			};
-
-			(root, counts)
-		})
-		.collect();
-
-	(unread_notifications, unread_thread_notifications)
+	}
 }
 
 #[tracing::instrument(
