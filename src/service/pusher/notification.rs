@@ -1,13 +1,13 @@
 use std::{collections::BTreeMap, fmt::Debug};
 
-use futures::{StreamExt, future::join3, stream::select};
+use futures::{FutureExt, StreamExt, future::join3, stream::select};
 use ruma::{EventId, OwnedEventId, RoomId, UserId, events::receipt::ReceiptThread};
 use serde::Serialize;
 use tuwunel_core::{
-	Result, implement, trace,
+	PduCount, Result, implement, trace,
 	utils::{
 		stream::{BroadbandExt, ReadyExt, TryIgnore},
-		u64_from_u8,
+		u64_from_bytes, u64_from_u8,
 	},
 };
 use tuwunel_database::{
@@ -96,14 +96,21 @@ pub async fn reset_thread_notification_counts(
 		.put(roomuser_thread, *count);
 }
 
-/// Clear all per-thread notification state for this user and room.
+/// Clear all per-thread notification counts for this user and room, and the
+/// per-thread last-read stamps at or before `read_through`.
 ///
 /// The `Interfix` prefix excludes the main row. The notification-count sweep
 /// runs under the increment mutex so a concurrent read-modify-write cannot
-/// resurrect a cleared row.
+/// resurrect a cleared row. A later stamp records a thread read that the
+/// reset does not cover, so it stays.
 #[implement(super::Service)]
 #[tracing::instrument(level = "debug", skip(self))]
-pub async fn clear_all_thread_notification_counts(&self, user_id: &UserId, room_id: &RoomId) {
+pub async fn clear_all_thread_notification_counts(
+	&self,
+	user_id: &UserId,
+	room_id: &RoomId,
+	read_through: PduCount,
+) {
 	let userroom_prefix = (user_id, room_id, Interfix);
 	let roomuser_prefix = (room_id, user_id, Interfix);
 
@@ -115,7 +122,21 @@ pub async fn clear_all_thread_notification_counts(&self, user_id: &UserId, room_
 	let last_reads = self
 		.db
 		.roomuserid_lastnotificationread
-		.del_prefix(&roomuser_prefix);
+		.stream_prefix_raw(&roomuser_prefix)
+		.ignore_err()
+		.ready_filter_map(|(key, stamp)| {
+			u64_from_bytes(stamp)
+				.ok()
+				.is_none_or(|stamp| PduCount::Normal(stamp) <= read_through)
+				.then_some(key)
+		})
+		.ready_for_each(|key| {
+			self.db
+				.roomuserid_lastnotificationread
+				.remove(key);
+		})
+		// Unboxed, the borrowed rows make the timeline append future not Send.
+		.boxed();
 
 	let notifications = async {
 		let _lock = self
@@ -137,6 +158,10 @@ pub async fn clear_all_thread_notification_counts(&self, user_id: &UserId, room_
 /// `Unthreaded` clears all room and thread counts; `Main` clears only the
 /// main-timeline counts; `Thread(id)` clears just that thread unless the
 /// acknowledged event is the thread root. `None` denotes a non-receipt reset.
+///
+/// An unthreaded receipt reads every thread up to its event (MSC3771), so it
+/// keeps the last-read stamps of thread reads past that event; a non-receipt
+/// reset (the user's own send) clears them all.
 #[implement(super::Service)]
 pub async fn reset_notification_counts_for_thread(
 	&self,
@@ -154,10 +179,20 @@ pub async fn reset_notification_counts_for_thread(
 			self.reset_thread_notification_counts(user_id, room_id, root)
 				.await,
 		| _ => {
+			let read_through = match acknowledged {
+				| None => PduCount::max(),
+				| Some(event) => self
+					.services
+					.timeline
+					.get_pdu_count(event)
+					.await
+					.unwrap_or(PduCount::min()),
+			};
+
 			self.reset_notification_counts(user_id, room_id)
 				.await;
 
-			self.clear_all_thread_notification_counts(user_id, room_id)
+			self.clear_all_thread_notification_counts(user_id, room_id, read_through)
 				.await;
 		},
 	}

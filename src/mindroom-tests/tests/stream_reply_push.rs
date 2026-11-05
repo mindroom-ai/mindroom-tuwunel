@@ -88,7 +88,8 @@ fn terminal_replies_preserve_highlight_and_gateway_tweaks() -> Result {
 		check_invite_target(&services, &router, &pusher, &mut captured).await?;
 		check_read_reply(&services, &router).await?;
 		check_unthreaded_read(&services, &router).await?;
-		check_private_behind_own_send(&services, &router).await
+		check_private_behind_own_send(&services, &router).await?;
+		check_thread_read_kept(&services, &router).await
 	});
 	gateway.handle.abort();
 	result
@@ -356,29 +357,39 @@ async fn check_unread_thread(
 }
 
 /// MSC3771: an unthreaded receipt, public or private, marks every thread read
-/// up to its event. It clears the thread watermarks along with the counts, so
-/// a reply it covers stays read when its stream finishes, while a reply that
-/// started after its event still counts.
+/// up to its event. It clears the thread counts, so a reply it covers stays
+/// read when its stream finishes, while a reply that started after its event
+/// still counts.
 async fn check_unthreaded_read(services: &Services, router: &Router) -> Result {
-	let room = create_room(router).await;
-	request(router, "POST", &format!("/rooms/{room}/join"), HELPER_TOKEN, json!({})).await;
-	let question = send(
-		router,
-		&room,
-		AUTHOR_TOKEN,
-		"unthreaded-question",
-		json!({"msgtype": "m.text", "body": "What is the answer?"}),
-	)
-	.await;
+	let (room, question) = thread_room(router, "unthreaded").await;
 	let thread = json!({"rel_type": "m.thread", "event_id": question});
 
-	// The user reads the thread, then marks the room read mid-stream.
+	// A receipt on a later event in another thread covers this thread too.
 	let public = send(router, &room, HELPER_TOKEN, "public", stream_reply(&thread)).await;
-	receipt(router, &room, &public, question.as_str()).await;
+	let other = send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"other",
+		json!({"msgtype": "m.text", "body": "Another question"}),
+	)
+	.await;
+	let other_reply = send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"other-reply",
+		json!({
+			"msgtype": "m.text",
+			"body": "Another answer",
+			"m.relates_to": {"rel_type": "m.thread", "event_id": other},
+		}),
+	)
+	.await;
 	request(
 		router,
 		"POST",
-		&format!("/rooms/{room}/receipt/m.read/{public}"),
+		&format!("/rooms/{room}/receipt/m.read/{other_reply}"),
 		AUTHOR_TOKEN,
 		json!({}),
 	)
@@ -514,6 +525,51 @@ async fn check_private_behind_own_send(services: &Services, router: &Router) -> 
 	)
 	.await;
 	assert_eq!(thread_counts(services, &room, &question).await, (0, 0));
+
+	Ok(())
+}
+
+/// An unthreaded receipt on an earlier event leaves a later thread read in
+/// place, for public and private receipts alike.
+async fn check_thread_read_kept(services: &Services, router: &Router) -> Result {
+	for kind in ["m.read", "m.read.private"] {
+		let (room, question) = thread_room(router, kind).await;
+		let earlier = send(
+			router,
+			&room,
+			HELPER_TOKEN,
+			&format!("{kind}-earlier"),
+			json!({"msgtype": "m.text", "body": "Meanwhile"}),
+		)
+		.await;
+		let thread = json!({"rel_type": "m.thread", "event_id": question});
+		let reply = send(router, &room, HELPER_TOKEN, kind, stream_reply(&thread)).await;
+		request(
+			router,
+			"POST",
+			&format!("/rooms/{room}/receipt/{kind}/{reply}"),
+			AUTHOR_TOKEN,
+			json!({"thread_id": question}),
+		)
+		.await;
+		request(
+			router,
+			"POST",
+			&format!("/rooms/{room}/receipt/{kind}/{earlier}"),
+			AUTHOR_TOKEN,
+			json!({}),
+		)
+		.await;
+		send(
+			router,
+			&room,
+			HELPER_TOKEN,
+			&format!("{kind}-done"),
+			terminal_reply("completed", &reply, &question),
+		)
+		.await;
+		assert_eq!(thread_counts(services, &room, &question).await, (0, 0), "{kind}");
+	}
 
 	Ok(())
 }
