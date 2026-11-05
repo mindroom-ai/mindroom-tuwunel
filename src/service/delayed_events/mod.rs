@@ -77,7 +77,8 @@ impl crate::Service for Service {
 }
 
 impl Service {
-	/// Schedules a call membership of a joined user and returns its delay ID.
+	/// Schedules a call membership of a joined, unsuspended user and returns
+	/// its delay ID.
 	pub async fn schedule(
 		&self,
 		user_id: &UserId,
@@ -88,6 +89,9 @@ impl Service {
 	) -> Result<String> {
 		if delay > MAX_DELAY {
 			return Err!(Request(UnstableDelayTooLarge("Delays are limited to 24 hours.")));
+		}
+		if self.services.users.is_suspended(user_id).await {
+			return Err!(Request(UserSuspended("Account is suspended.")));
 		}
 		if !self
 			.services

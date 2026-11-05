@@ -965,9 +965,11 @@ Behavior:
   `org.matrix.msc4140.delay` query parameter, in milliseconds, schedules the
   event and answers `{"delay_id"}`. Only `org.matrix.msc3401.call.member`
   can be delayed, by a joined user, for at most 24 hours, with at most 100
-  scheduled per user; other types are 403 `M_FORBIDDEN`, because the state
-  endpoint validates some of them before sending, such as memberships against
-  room bans and invite blocking.
+  scheduled per user and content of at most 65535 bytes; other types are 403
+  `M_FORBIDDEN`, because the state endpoint validates some of them before
+  sending, such as memberships against room bans and invite blocking. A
+  suspended account is 403 `M_USER_SUSPENDED`, as on the state endpoint; a
+  leave scheduled before the suspension is still sent.
 - `POST /_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delayId}/{action}`,
   which matrix-js-sdk calls, and the same path without `/{action}` and with
   `{"action"}` in the body, which matrix-rust-sdk calls, restart, cancel or

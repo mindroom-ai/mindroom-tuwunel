@@ -6,7 +6,7 @@ mod tests {
 
 	use axum::Router;
 	use serde_json::{Value, json};
-	use tuwunel_core::{Result, http::StatusCode};
+	use tuwunel_core::{Result, http::StatusCode, ruma::user_id};
 
 	use super::support::{
 		Harness,
@@ -25,7 +25,8 @@ mod tests {
 	/// A MatrixRTC client schedules its own leave and keeps restarting it, in
 	/// the path form matrix-js-sdk calls or the body form matrix-rust-sdk calls;
 	/// when the client stops, as on a crash, the server sends the leave. Other
-	/// state, such as a room membership, cannot be delayed.
+	/// state, such as a room membership, cannot be delayed, nor can oversized
+	/// content or a suspended account's membership.
 	#[test]
 	fn delayed_call_member_leave_is_sent_once_restarts_stop() -> Result {
 		let harness = Harness::new("mindroom_delayed_call_membership", [])?;
@@ -85,6 +86,18 @@ mod tests {
 				assert!(Instant::now() < deadline, "the delayed leave was never sent");
 				tokio::time::sleep(Duration::from_millis(50)).await;
 			}
+
+			let delayed = format!("{state}?org.matrix.msc4140.delay=1000");
+			let oversized = json!({"padding": "x".repeat(65_536)});
+			let (status, body) = send(&router, put(&delayed, &oversized)).await;
+			assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "oversized: {body}");
+			assert_eq!(body["errcode"], "M_TOO_LARGE", "oversized: {body}");
+
+			let alice = user_id!("@alice:localhost");
+			services.users.set_suspended(alice, alice);
+			let (status, body) = send(&router, put(&delayed, &json!({}))).await;
+			assert_eq!(status, StatusCode::FORBIDDEN, "suspended: {body}");
+			assert_eq!(body["errcode"], "M_USER_SUSPENDED", "suspended: {body}");
 
 			Ok(())
 		})

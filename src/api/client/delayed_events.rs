@@ -15,7 +15,7 @@ use ruma::{
 		state::send_state_event,
 	},
 };
-use tuwunel_core::{Err, Result, err};
+use tuwunel_core::{Err, Result, err, matrix::pdu::MAX_PDU_BYTES};
 use tuwunel_service::delayed_events::CALL_MEMBER;
 
 use crate::{Ruma, RumaResponse};
@@ -39,7 +39,11 @@ pub(crate) async fn send_state_event_or_delayed_route(
 	if body.event_type.to_string() != CALL_MEMBER {
 		return Err!(Request(Forbidden("Only {CALL_MEMBER} events can be delayed.")));
 	}
-	let content: CanonicalJsonObject = serde_json::from_str(body.body.body.json().get())
+	let content = body.body.body.json().get();
+	if content.len() > MAX_PDU_BYTES {
+		return Err!(Request(TooLarge("Delayed events are limited to {MAX_PDU_BYTES} bytes.")));
+	}
+	let content: CanonicalJsonObject = serde_json::from_str(content)
 		.map_err(|error| err!(Request(BadJson("Invalid state event content: {error}"))))?;
 
 	let delay_id = services
