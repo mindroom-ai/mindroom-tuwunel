@@ -91,6 +91,9 @@ fn sync_lists_every_thread_count() -> Result {
 		let typing = sync(&router, THREADED, Some(&main)).await;
 		assert_eq!(counts(&typing, &room, &first), Some((1, 0)), "typing: {typing}");
 		assert_eq!(counts(&typing, &room, &second), Some((1, 1)), "typing: {typing}");
+		// Stop typing, so the 30 s typing timeout cannot bring the room back into
+		// the quiet round below on a slow run.
+		request(&router, Method::PUT, &path, HELPER_TOKEN, json!({"typing": false})).await;
 
 		// The reader opens the first thread. Read down to zero, it is left out
 		// of the map, which the client takes as read; the second is still
@@ -166,7 +169,8 @@ fn counts(sync: &Value, room: &RoomId, root: &OwnedEventId) -> Option<(u64, u64)
 }
 
 /// The counts a client keeps for a thread after this sync, as matrix-js-sdk
-/// applies it: the listed ones, zero for a thread left out of a room in the
+/// applies it in this unencrypted room (in an encrypted room it resets the
+/// total but keeps highlights it calculated itself): the listed ones, zero for a thread left out of a room in the
 /// response, or `None` when the room is not in the response and nothing
 /// changes.
 fn client_counts(sync: &Value, room: &RoomId, root: &OwnedEventId) -> Option<(u64, u64)> {

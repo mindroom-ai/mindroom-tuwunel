@@ -1931,8 +1931,8 @@ fn notification_count_futures<'a>(
 			.unwrap_or(uint!(0))
 	});
 
-	// MSC3773: per-thread counts, summed into the room counts for clients that
-	// do not partition them by thread.
+	// MSC3773: per-thread counts, listed per thread for clients that partition
+	// them and summed into the room counts for clients that do not.
 	let thread_counts = send.then_async(move || {
 		services
 			.pusher
