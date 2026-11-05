@@ -42,7 +42,7 @@ use url::Url;
 
 use self::badge::SentBadges;
 pub use self::{
-	append::Notified,
+	append::{Notified, UnthreadedReaders},
 	suppressed::{SuppressedPushes, SuppressedRooms},
 };
 

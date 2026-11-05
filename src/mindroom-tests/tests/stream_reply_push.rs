@@ -24,7 +24,7 @@ use tuwunel_core::{
 		user_id,
 	},
 };
-use tuwunel_service::Services;
+use tuwunel_service::{Services, pusher::UnthreadedReaders};
 
 use self::support::Harness;
 
@@ -88,11 +88,13 @@ fn terminal_replies_preserve_highlight_and_gateway_tweaks() -> Result {
 		check_invite_target(&services, &router, &pusher, &mut captured).await?;
 		check_read_reply(&services, &router).await?;
 		check_unthreaded_read(&services, &router).await?;
+		check_unthreaded_on_reply(&services, &router).await?;
 		check_other_receipts(&services, &router).await?;
 		check_private_behind_own_send(&services, &router).await?;
 		check_private_after_completion(&services, &router).await?;
 		check_thread_read_kept(&services, &router).await?;
-		check_shared_readers(&services, &router).await
+		check_shared_readers(&services, &router).await?;
+		check_readers_after_receipt(&services, &router).await
 	});
 	gateway.handle.abort();
 	result
@@ -719,6 +721,71 @@ async fn check_shared_readers(services: &Services, router: &Router) -> Result {
 			"{name}: observer"
 		);
 	}
+
+	Ok(())
+}
+
+/// The reader set one terminal edit shares is read for its first recipient,
+/// while receipts keep landing. A later recipient whose public receipt
+/// completes after that read, but before their own check, still counts as a
+/// reader, in the order the edit's count would meet them.
+async fn check_readers_after_receipt(services: &Services, router: &Router) -> Result {
+	let author = user_id!("@author:localhost");
+	let observer = user_id!("@observer:localhost");
+	let (room, question) = thread_room(router, "late-receipt").await;
+	request(router, "POST", &format!("/rooms/{room}/join"), OBSERVER_TOKEN, json!({})).await;
+	let thread = json!({"rel_type": "m.thread", "event_id": question});
+	let reply = send(router, &room, HELPER_TOKEN, "late-receipt", stream_reply(&thread)).await;
+	let count = services
+		.timeline
+		.get_pdu_count(&reply)
+		.await?
+		.into_unsigned();
+
+	let readers = UnthreadedReaders::default();
+	let pusher = &services.pusher;
+	assert!(
+		!pusher
+			.unthreaded_reader(&readers, observer, &room, count)
+			.await,
+		"observer"
+	);
+
+	let path = format!("/rooms/{room}/receipt/m.read/{reply}");
+	request(router, "POST", &path, AUTHOR_TOKEN, json!({})).await;
+	assert!(
+		pusher
+			.unthreaded_reader(&readers, author, &room, count)
+			.await,
+		"author"
+	);
+	assert!(
+		!pusher
+			.unthreaded_reader(&readers, observer, &room, count)
+			.await,
+		"observer again"
+	);
+
+	Ok(())
+}
+
+/// An unthreaded receipt on the streaming reply itself reaches it. With no
+/// thread watermark and no later own send, only the read-back covers it.
+async fn check_unthreaded_on_reply(services: &Services, router: &Router) -> Result {
+	let (room, question) = thread_room(router, "on-reply").await;
+	let thread = json!({"rel_type": "m.thread", "event_id": question});
+	let reply = send(router, &room, HELPER_TOKEN, "on-reply", stream_reply(&thread)).await;
+	let path = format!("/rooms/{room}/receipt/m.read/{reply}");
+	request(router, "POST", &path, AUTHOR_TOKEN, json!({})).await;
+	send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"on-reply-done",
+		terminal_reply("completed", &reply, &question),
+	)
+	.await;
+	assert_eq!(thread_counts(services, &room, &question).await, (0, 0));
 
 	Ok(())
 }

@@ -109,7 +109,9 @@ pub(crate) async fn set_read_marker_route(
 
 	// Route through the dispatcher so per-thread counts are also cleared;
 	// `/read_markers` predates MSC3771 and carries no thread field. The public
-	// receipt, else the private one, bounds the thread stamps it clears.
+	// receipt, else the private one, bounds the thread stamps it clears. The
+	// public one goes first: if it advanced, its row names that event, and if
+	// not, the stored row is at or past it, so the read-back covers the stamps.
 	if private_advanced || public_advanced {
 		reset_and_refresh_badge(
 			&services,

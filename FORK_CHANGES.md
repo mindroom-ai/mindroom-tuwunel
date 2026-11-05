@@ -1163,7 +1163,9 @@ Behavior:
   back by its event's position: the public one from the receipt rows stored
   after the replaced event, scanned once per terminal edit for all
   recipients and skipping other servers' users before their rows are
-  parsed; the private one from the marker the user's clients announced.
+  parsed (and scanned again for a recipient missing from it whose counts were
+  reset since, as their receipt can land while the edit is counted); the
+  private one from the marker the user's clients announced.
   The server moves the private marker to an own send without announcing it,
   so an explicit private receipt behind such a send is still announced once
   it passes the last announced one, and resets the counts as a public receipt
@@ -1172,8 +1174,11 @@ Behavior:
   its event is: a receipt for the reply's thread (or, for a main-timeline
   reply, the room) that arrives mid-stream covers the reply even when it
   names an earlier event. Only the unthreaded read-back compares event
-  positions. An own send elsewhere still deletes every thread watermark, so
-  a thread reply read before it and finished after it counts once.
+  positions. An own send elsewhere still deletes every thread watermark and
+  moves the private marker out of the thread, so a thread reply read through
+  its thread (a threaded receipt, or the user's own send there) before the
+  user posts elsewhere, and finished after, counts once. An unthreaded
+  receipt that reaches the reply still covers it.
   Clients send no receipt for an edit of a reply they already read, so a
   user who watched a reply finish would otherwise keep a count, and an
   app-icon badge, with nothing left to read. The push itself is still

@@ -16,7 +16,7 @@ use ruma::{
 	serde::Raw,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex;
 use tracing::Level;
 use tuwunel_core::{
 	Result, implement,
@@ -68,10 +68,18 @@ struct Appended<'a> {
 	related_events: Option<&'a Arc<RelatedEvents>>,
 	/// The position of the event a terminal MindRoom stream edit replaces.
 	replaced: Option<PduId>,
-	/// The users whose unthreaded public receipt reaches `replaced`, read on
-	/// first need and shared by every recipient.
-	unthreaded_readers: &'a OnceCell<HashSet<OwnedUserId>>,
+	/// The users whose unthreaded public receipt reaches `replaced`, shared
+	/// by every recipient.
+	unthreaded_readers: &'a UnthreadedReaders,
 }
+
+/// The local users whose unthreaded public receipt reaches a terminal edit's
+/// replaced event.
+///
+/// They are kept with the latest sequence number dispatched before they were
+/// read. One edit reads them on first need for all its recipients.
+#[derive(Default)]
+pub struct UnthreadedReaders(Mutex<Option<(HashSet<OwnedUserId>, u64)>>);
 
 /// Called by timeline append_pdu.
 #[implement(super::Service)]
@@ -125,7 +133,7 @@ pub(crate) async fn append_pdu(&self, pdu_id: RawPduId, pdu: &Pdu) -> Result {
 	)
 	.await;
 
-	let unthreaded_readers = OnceCell::new();
+	let unthreaded_readers = UnthreadedReaders::default();
 	let appended = Appended {
 		pdu_id: &pdu_id,
 		pdu,
@@ -304,7 +312,7 @@ async fn read_through(
 	room_id: &RoomId,
 	thread_root: Option<&EventId>,
 	replaced: PduId,
-	unthreaded_readers: &OnceCell<HashSet<OwnedUserId>>,
+	unthreaded_readers: &UnthreadedReaders,
 ) -> bool {
 	let count = replaced.count.into_unsigned();
 	let bucket = async {
@@ -337,10 +345,54 @@ async fn read_through(
 		return true;
 	}
 
-	unthreaded_readers
-		.get_or_init(|| read_receipt.unthreaded_readers(room_id, count))
+	self.unthreaded_reader(unthreaded_readers, user, room_id, count)
 		.await
-		.contains(user)
+}
+
+/// Whether the user's unthreaded public receipt reaches timeline position
+/// `count`.
+///
+/// `readers` is read once per terminal edit for all its recipients. Receipts
+/// do not wait for the edit, so a recipient's receipt can land after the set
+/// was read. Its reset stamps their room watermark with a sequence number
+/// dispatched after that read, so the set is read again for a recipient
+/// missing from it whose watermark is newer.
+#[implement(super::Service)]
+pub async fn unthreaded_reader(
+	&self,
+	readers: &UnthreadedReaders,
+	user: &UserId,
+	room_id: &RoomId,
+	count: u64,
+) -> bool {
+	let mut readers = readers.0.lock().await;
+	if let Some((users, read_at)) = readers.as_ref() {
+		if users.contains(user) {
+			return true;
+		}
+
+		let reset_since = self
+			.last_notification_read(user, room_id)
+			.await
+			.is_ok_and(|reset| reset > *read_at);
+
+		if !reset_since {
+			return false;
+		}
+	}
+
+	// Taken before the scan, so a reset during it compares newer.
+	let read_at = self.services.globals.pending_count().end;
+	let users = self
+		.services
+		.read_receipt
+		.unthreaded_readers(room_id, count)
+		.await;
+
+	let read = users.contains(user);
+	*readers = Some((users, read_at));
+
+	read
 }
 
 /// Whether the unthreaded private read marker, which the user's own send
