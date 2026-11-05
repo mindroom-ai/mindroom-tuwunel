@@ -91,7 +91,8 @@ fn terminal_replies_preserve_highlight_and_gateway_tweaks() -> Result {
 		check_other_receipts(&services, &router).await?;
 		check_private_behind_own_send(&services, &router).await?;
 		check_private_after_completion(&services, &router).await?;
-		check_thread_read_kept(&services, &router).await
+		check_thread_read_kept(&services, &router).await?;
+		check_shared_readers(&services, &router).await
 	});
 	gateway.handle.abort();
 	result
@@ -611,20 +612,27 @@ async fn check_private_after_completion(services: &Services, router: &Router) ->
 }
 
 /// An unthreaded receipt on an earlier event leaves a later thread read in
-/// place, for public and private receipts alike.
+/// place, for public and private receipts alike, sent to `/receipt` or to
+/// `/read_markers`, which bounds the reset by its receipt's event too.
 async fn check_thread_read_kept(services: &Services, router: &Router) -> Result {
-	for kind in ["m.read", "m.read.private"] {
-		let (room, question) = thread_room(router, kind).await;
+	for (kind, endpoint) in [
+		("m.read", "receipt"),
+		("m.read.private", "receipt"),
+		("m.read", "read_markers"),
+		("m.read.private", "read_markers"),
+	] {
+		let name = format!("{kind}-{endpoint}");
+		let (room, question) = thread_room(router, &name).await;
 		let earlier = send(
 			router,
 			&room,
 			HELPER_TOKEN,
-			&format!("{kind}-earlier"),
+			&format!("{name}-earlier"),
 			json!({"msgtype": "m.text", "body": "Meanwhile"}),
 		)
 		.await;
 		let thread = json!({"rel_type": "m.thread", "event_id": question});
-		let reply = send(router, &room, HELPER_TOKEN, kind, stream_reply(&thread)).await;
+		let reply = send(router, &room, HELPER_TOKEN, &name, stream_reply(&thread)).await;
 		request(
 			router,
 			"POST",
@@ -633,23 +641,83 @@ async fn check_thread_read_kept(services: &Services, router: &Router) -> Result 
 			json!({"thread_id": question}),
 		)
 		.await;
-		request(
-			router,
-			"POST",
-			&format!("/rooms/{room}/receipt/{kind}/{earlier}"),
-			AUTHOR_TOKEN,
-			json!({}),
-		)
-		.await;
+
+		if endpoint == "receipt" {
+			let path = format!("/rooms/{room}/receipt/{kind}/{earlier}");
+			request(router, "POST", &path, AUTHOR_TOKEN, json!({})).await;
+		} else {
+			let body = if kind == "m.read" {
+				json!({"m.read": earlier})
+			} else {
+				json!({"m.read.private": earlier})
+			};
+			let path = format!("/rooms/{room}/read_markers");
+			request(router, "POST", &path, AUTHOR_TOKEN, body).await;
+		}
+
 		send(
 			router,
 			&room,
 			HELPER_TOKEN,
-			&format!("{kind}-done"),
+			&format!("{name}-done"),
 			terminal_reply("completed", &reply, &question),
 		)
 		.await;
-		assert_eq!(thread_counts(services, &room, &question).await, (0, 0), "{kind}");
+		assert_eq!(thread_counts(services, &room, &question).await, (0, 0), "{name}");
+	}
+
+	Ok(())
+}
+
+/// One read of the unthreaded receipts serves every recipient of a finished
+/// reply: each one whose receipt reaches it is spared, and each other one is
+/// counted, whichever of them is handled first.
+async fn check_shared_readers(services: &Services, router: &Router) -> Result {
+	let author = user_id!("@author:localhost");
+	let observer = user_id!("@observer:localhost");
+
+	for (author_reads, observer_reads) in [(true, false), (false, true), (true, true)] {
+		let name = format!("shared-{author_reads}-{observer_reads}");
+		let (room, question) = thread_room(router, &name).await;
+		request(router, "POST", &format!("/rooms/{room}/join"), OBSERVER_TOKEN, json!({})).await;
+		let thread = json!({"rel_type": "m.thread", "event_id": question});
+		let reply = send(router, &room, HELPER_TOKEN, &name, stream_reply(&thread)).await;
+		let later = send(
+			router,
+			&room,
+			HELPER_TOKEN,
+			&format!("{name}-later"),
+			json!({"msgtype": "m.text", "body": "Meanwhile"}),
+		)
+		.await;
+
+		for (reads, token) in [(author_reads, AUTHOR_TOKEN), (observer_reads, OBSERVER_TOKEN)] {
+			if reads {
+				let path = format!("/rooms/{room}/receipt/m.read/{later}");
+				request(router, "POST", &path, token, json!({})).await;
+			}
+		}
+
+		send(
+			router,
+			&room,
+			HELPER_TOKEN,
+			&format!("{name}-done"),
+			terminal_reply("completed", &reply, &question),
+		)
+		.await;
+
+		let expected = |reads: bool, unread: (u64, u64)| if reads { (0, 0) } else { unread };
+		assert_eq!(
+			thread_counts_of(services, author, &room, &question).await,
+			expected(author_reads, (1, 1)),
+			"{name}: author"
+		);
+		assert_eq!(
+			thread_counts_of(services, observer, &room, &question).await,
+			expected(observer_reads, (1, 0)),
+			"{name}: observer"
+		);
 	}
 
 	Ok(())
@@ -683,9 +751,18 @@ async fn receipt(router: &Router, room: &RoomId, event: &EventId, thread_id: &st
 }
 
 async fn thread_counts(services: &Services, room: &RoomId, root: &EventId) -> (u64, u64) {
+	thread_counts_of(services, user_id!("@author:localhost"), room, root).await
+}
+
+async fn thread_counts_of(
+	services: &Services,
+	user: &UserId,
+	room: &RoomId,
+	root: &EventId,
+) -> (u64, u64) {
 	services
 		.pusher
-		.thread_notification_counts(user_id!("@author:localhost"), room)
+		.thread_notification_counts(user, room)
 		.await
 		.get(root)
 		.copied()
