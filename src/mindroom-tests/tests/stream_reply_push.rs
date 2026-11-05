@@ -86,7 +86,8 @@ fn terminal_replies_preserve_highlight_and_gateway_tweaks() -> Result {
 
 		exercise_replies(&services, &router, author, &room, &pusher, &mut captured).await?;
 		check_invite_target(&services, &router, &pusher, &mut captured).await?;
-		check_read_reply(&services, &router).await
+		check_read_reply(&services, &router).await?;
+		check_unthreaded_read(&services, &router).await
 	});
 	gateway.handle.abort();
 	result
@@ -349,6 +350,103 @@ async fn check_unread_thread(
 	)
 	.await;
 	assert_eq!(thread_counts(services, room, question).await, (1, 1));
+
+	Ok(())
+}
+
+/// MSC3771: an unthreaded receipt, public or private, marks every thread read
+/// up to its event. It clears the thread watermarks along with the counts, so
+/// a reply it covers stays read when its stream finishes, while a reply that
+/// started after its event still counts.
+async fn check_unthreaded_read(services: &Services, router: &Router) -> Result {
+	let room = create_room(router).await;
+	request(router, "POST", &format!("/rooms/{room}/join"), HELPER_TOKEN, json!({})).await;
+	let question = send(
+		router,
+		&room,
+		AUTHOR_TOKEN,
+		"unthreaded-question",
+		json!({"msgtype": "m.text", "body": "What is the answer?"}),
+	)
+	.await;
+	let thread = json!({"rel_type": "m.thread", "event_id": question});
+
+	// The user reads the thread, then marks the room read mid-stream.
+	let public = send(router, &room, HELPER_TOKEN, "public", stream_reply(&thread)).await;
+	receipt(router, &room, &public, question.as_str()).await;
+	request(
+		router,
+		"POST",
+		&format!("/rooms/{room}/receipt/m.read/{public}"),
+		AUTHOR_TOKEN,
+		json!({}),
+	)
+	.await;
+	send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"public-done",
+		terminal_reply("completed", &public, &question),
+	)
+	.await;
+	assert_eq!(thread_counts(services, &room, &question).await, (0, 0));
+
+	// A private receipt on a later main-timeline event covers the thread too.
+	let private = send(router, &room, HELPER_TOKEN, "private", stream_reply(&thread)).await;
+	let latest = send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"latest",
+		json!({"msgtype": "m.text", "body": "Meanwhile"}),
+	)
+	.await;
+	request(
+		router,
+		"POST",
+		&format!("/rooms/{room}/read_markers"),
+		AUTHOR_TOKEN,
+		json!({"m.read.private": latest}),
+	)
+	.await;
+	send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"private-done",
+		terminal_reply("completed", &private, &question),
+	)
+	.await;
+	assert_eq!(thread_counts(services, &room, &question).await, (0, 0));
+
+	// A receipt sent mid-stream on an earlier event does not reach the reply.
+	let earlier = send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"earlier",
+		json!({"msgtype": "m.text", "body": "Meanwhile, again"}),
+	)
+	.await;
+	let later = send(router, &room, HELPER_TOKEN, "later", stream_reply(&thread)).await;
+	request(
+		router,
+		"POST",
+		&format!("/rooms/{room}/receipt/m.read/{earlier}"),
+		AUTHOR_TOKEN,
+		json!({}),
+	)
+	.await;
+	send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"later-done",
+		terminal_reply("completed", &later, &question),
+	)
+	.await;
+	assert_eq!(thread_counts(services, &room, &question).await, (1, 1));
 
 	Ok(())
 }

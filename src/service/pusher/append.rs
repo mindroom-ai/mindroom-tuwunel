@@ -282,10 +282,12 @@ async fn replaced_pdu_id(&self, pdu_id: &RawPduId, pdu: &Pdu) -> Option<PduId> {
 }
 
 /// Whether the user has read the `replaced` event: the read watermark of the
-/// bucket it counts in (its thread, or else the room) covers it, or the
-/// user's own send in that same thread or timeline came after it. A
-/// main-timeline receipt moves the room watermark but leaves thread counts,
-/// so it covers no thread.
+/// bucket it counts in (its thread, or else the room) covers it, the user's
+/// own send in that same thread or timeline came after it, or, in a thread,
+/// the user's unthreaded receipt reaches it. A main-timeline receipt moves
+/// the room watermark but leaves thread counts, so it covers no thread. An
+/// unthreaded receipt covers every thread up to its event (MSC3771), but its
+/// reset deletes the thread watermarks, so the receipt itself is read back.
 #[implement(super::Service)]
 async fn read_through(
 	&self,
@@ -307,7 +309,17 @@ async fn read_through(
 	let (bucket, sent_after) =
 		join(bucket, self.sent_after_in_thread(user, room_id, thread_root, replaced)).await;
 
-	bucket.is_ok_and(|last_read| last_read >= count) || sent_after
+	if bucket.is_ok_and(|last_read| last_read >= count) || sent_after {
+		return true;
+	}
+
+	// The room watermark already covers what an unthreaded receipt reaches.
+	thread_root.is_some()
+		&& self
+			.services
+			.read_receipt
+			.unthreaded_read_reaches(room_id, user, count)
+			.await
 }
 
 /// Whether the unthreaded private read marker, which the user's own send

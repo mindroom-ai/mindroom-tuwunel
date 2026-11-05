@@ -1128,6 +1128,7 @@ was merged upstream, so it is no longer a fork delta.
 Files:
 - `src/service/pusher/mod.rs`, `src/service/pusher/send.rs`,
   `src/service/pusher/append.rs`
+- `src/service/rooms/read_receipt/{mod.rs,data.rs}`
 - `src/service/pusher/tests.rs`
 - `src/mindroom-tests/tests/stream_reply_push.rs`
 
@@ -1153,6 +1154,12 @@ Behavior:
   the reaction that stops the stream; the unthreaded private read marker
   records it, since the own send's reset deletes thread watermarks). A
   `"main"` receipt or an own send elsewhere in the room covers no thread.
+  An unthreaded receipt (`m.read` or `m.read.private` without `thread_id`)
+  at or after the replaced event covers it in any thread, as MSC3771
+  specifies. Its reset also deletes the thread watermarks, so the receipt
+  itself is read back: the public one from the receipt rows stored after the
+  replaced event, the private one from the marker the user's clients
+  announced (not the one the server moves to an own send).
   Clients send no receipt for an edit of a reply they already read, so a
   user who watched a reply finish would otherwise keep a count, and an
   app-icon badge, with nothing left to read. The push itself is still

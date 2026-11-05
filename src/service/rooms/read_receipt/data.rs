@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, pin::pin, sync::Arc};
 
 use futures::{
 	Stream, TryStreamExt,
@@ -207,6 +207,35 @@ impl Data {
 
 				Ok((user_id, count, Raw::from_json(event)))
 			})
+	}
+
+	/// The event named by the user's unthreaded receipt, when that receipt
+	/// was stored after stream position `since`.
+	///
+	/// A user keeps at most one unthreaded row per room, so the scan stops at
+	/// the first match.
+	#[inline]
+	pub(super) async fn unthreaded_receipt_since(
+		&self,
+		room_id: &RoomId,
+		user_id: &UserId,
+		since: u64,
+	) -> Option<OwnedEventId> {
+		type Key<'a> = (&'a RoomId, u64, &'a UserId, &'a str);
+
+		let rows = self
+			.readreceiptid_readreceipt
+			.stream_from(&(room_id, since.saturating_add(1)))
+			.ignore_err()
+			.ready_take_while(|((room, ..), _): &(Key<'_>, &[u8])| *room == room_id);
+
+		pin!(rows)
+			.ready_find_map(|((_, _, user, thread), receipt): (Key<'_>, &[u8])| {
+				(user == user_id && thread.is_empty())
+					.then_some(receipt)
+					.and_then(stored_event_id)
+			})
+			.await
 	}
 
 	/// Sets the private read marker for `(room, user, thread)`, reporting
