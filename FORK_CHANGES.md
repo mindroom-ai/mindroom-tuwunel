@@ -1127,8 +1127,9 @@ was merged upstream, so it is no longer a fork delta.
 ### 4) `pusher: notify once when streams finish`
 Files:
 - `src/service/pusher/mod.rs`, `src/service/pusher/send.rs`,
-  `src/service/pusher/append.rs`
+  `src/service/pusher/append.rs`, `src/service/pusher/notification.rs`
 - `src/service/rooms/read_receipt/{mod.rs,data.rs}`
+- `src/api/client/read_marker/read_markers.rs`
 - `src/service/pusher/tests.rs`
 - `src/mindroom-tests/tests/stream_reply_push.rs`
 
@@ -1156,10 +1157,21 @@ Behavior:
   `"main"` receipt or an own send elsewhere in the room covers no thread.
   An unthreaded receipt (`m.read` or `m.read.private` without `thread_id`)
   at or after the replaced event covers it in any thread, as MSC3771
-  specifies. Its reset also deletes the thread watermarks, so the receipt
-  itself is read back: the public one from the receipt rows stored after the
-  replaced event, the private one from the marker the user's clients
-  announced (not the one the server moves to an own send).
+  specifies. Its reset still clears every thread's counts, but deletes only
+  the thread watermarks at or before its event, so an older unthreaded
+  receipt leaves a later thread read in place. The receipt itself is read
+  back by its event's position: the public one from the receipt rows stored
+  after the replaced event, scanned once per terminal edit for all
+  recipients; the private one from the marker the user's clients announced.
+  The server moves the private marker to an own send without announcing it,
+  so an explicit private receipt behind such a send is still announced once
+  it passes the last announced one.
+  The thread and room watermarks record when a receipt arrived, not where
+  its event is: a receipt for the reply's thread (or, for a main-timeline
+  reply, the room) that arrives mid-stream covers the reply even when it
+  names an earlier event. Only the unthreaded read-back compares event
+  positions. An own send elsewhere still deletes every thread watermark, so
+  a thread reply read before it and finished after it counts once.
   Clients send no receipt for an edit of a reply they already read, so a
   user who watched a reply finish would otherwise keep a count, and an
   app-icon badge, with nothing left to read. The push itself is still
