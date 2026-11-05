@@ -2,7 +2,10 @@ mod data;
 #[cfg(test)]
 mod tests;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+	collections::{BTreeMap, HashSet},
+	sync::Arc,
+};
 
 use futures::{Stream, StreamExt, TryStreamExt};
 use ruma::{
@@ -28,7 +31,7 @@ use tuwunel_core::{
 	result::NotFound,
 	smallstr::SmallString,
 	smallvec::SmallVec,
-	utils::{BoolExt, IterStream},
+	utils::{BoolExt, IterStream, ReadyExt},
 	warn,
 };
 
@@ -426,41 +429,27 @@ impl Service {
 			.await
 	}
 
-	/// Whether the user's unthreaded read receipt, public or private, is at
-	/// or after timeline position `count`.
+	/// The local users whose unthreaded public read receipt is at or after
+	/// timeline position `count`.
 	///
 	/// MSC3771: an unthreaded receipt marks every event up to its own as read,
-	/// whatever thread the event is in. The private receipt is the one the
-	/// user's clients announced, not the marker the server moves to the user's
-	/// own sends. A public receipt can reach `count` only if it was stored
-	/// after that event, so only those rows are read.
-	pub async fn unthreaded_read_reaches(
-		&self,
-		room_id: &RoomId,
-		user_id: &UserId,
-		count: u64,
-	) -> bool {
-		if self
-			.private_read_sync_get_count(room_id, user_id)
+	/// whatever thread the event is in. A receipt can reach `count` only if it
+	/// was stored after that event, so only those rows are read, once for all
+	/// users. A user with two racing rows counts if either reaches.
+	pub async fn unthreaded_readers(&self, room_id: &RoomId, count: u64) -> HashSet<OwnedUserId> {
+		self.db
+			.unthreaded_receipts_since(room_id, count)
+			.ready_filter(|(user_id, _)| self.services.globals.user_is_local(user_id))
+			.filter_map(async |(user_id, event_id)| {
+				self.services
+					.timeline
+					.get_pdu_count(&event_id)
+					.await
+					.is_ok_and(|read| read >= PduCount::Normal(count))
+					.then_some(user_id)
+			})
+			.collect()
 			.await
-			.is_ok_and(|(read, _)| read >= count)
-		{
-			return true;
-		}
-
-		let Some(event_id) = self
-			.db
-			.unthreaded_receipt_since(room_id, user_id, count)
-			.await
-		else {
-			return false;
-		};
-
-		self.services
-			.timeline
-			.get_pdu_count(&event_id)
-			.await
-			.is_ok_and(|read| read >= PduCount::Normal(count))
 	}
 
 	/// Returns the PDU count of the last private read update in this room.

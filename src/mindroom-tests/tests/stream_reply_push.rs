@@ -88,6 +88,7 @@ fn terminal_replies_preserve_highlight_and_gateway_tweaks() -> Result {
 		check_invite_target(&services, &router, &pusher, &mut captured).await?;
 		check_read_reply(&services, &router).await?;
 		check_unthreaded_read(&services, &router).await?;
+		check_other_receipts(&services, &router).await?;
 		check_private_behind_own_send(&services, &router).await?;
 		check_thread_read_kept(&services, &router).await
 	});
@@ -456,6 +457,43 @@ async fn check_unthreaded_read(services: &Services, router: &Router) -> Result {
 		HELPER_TOKEN,
 		"later-done",
 		terminal_reply("completed", &later, &question),
+	)
+	.await;
+	assert_eq!(thread_counts(services, &room, &question).await, (1, 1));
+
+	Ok(())
+}
+
+/// Only the user's own unthreaded receipt covers a thread: neither their
+/// `"main"` receipt nor another member's unthreaded receipt on a later event
+/// does.
+async fn check_other_receipts(services: &Services, router: &Router) -> Result {
+	let (room, question) = thread_room(router, "others").await;
+	let thread = json!({"rel_type": "m.thread", "event_id": question});
+	let reply = send(router, &room, HELPER_TOKEN, "others", stream_reply(&thread)).await;
+	let later = send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"others-later",
+		json!({"msgtype": "m.text", "body": "Meanwhile"}),
+	)
+	.await;
+	receipt(router, &room, &later, "main").await;
+	request(
+		router,
+		"POST",
+		&format!("/rooms/{room}/receipt/m.read/{later}"),
+		HELPER_TOKEN,
+		json!({}),
+	)
+	.await;
+	send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"others-done",
+		terminal_reply("completed", &reply, &question),
 	)
 	.await;
 	assert_eq!(thread_counts(services, &room, &question).await, (1, 1));

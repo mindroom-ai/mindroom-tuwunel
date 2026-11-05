@@ -5,7 +5,7 @@ use futures::{
 	future::{join, join3, join4},
 };
 use ruma::{
-	EventId, RoomId, UserId,
+	EventId, OwnedUserId, RoomId, UserId,
 	api::client::push::ProfileTag,
 	events::{
 		AnySyncTimelineEvent, TimelineEventType,
@@ -16,6 +16,7 @@ use ruma::{
 	serde::Raw,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
 use tracing::Level;
 use tuwunel_core::{
 	Result, implement,
@@ -67,6 +68,9 @@ struct Appended<'a> {
 	related_events: Option<&'a Arc<RelatedEvents>>,
 	/// The position of the event a terminal MindRoom stream edit replaces.
 	replaced: Option<PduId>,
+	/// The users whose unthreaded public receipt reaches `replaced`, read on
+	/// first need and shared by every recipient.
+	unthreaded_readers: &'a OnceCell<HashSet<OwnedUserId>>,
 }
 
 /// Called by timeline append_pdu.
@@ -121,6 +125,7 @@ pub(crate) async fn append_pdu(&self, pdu_id: RawPduId, pdu: &Pdu) -> Result {
 	)
 	.await;
 
+	let unthreaded_readers = OnceCell::new();
 	let appended = Appended {
 		pdu_id: &pdu_id,
 		pdu,
@@ -129,6 +134,7 @@ pub(crate) async fn append_pdu(&self, pdu_id: RawPduId, pdu: &Pdu) -> Result {
 		thread_root: thread_root.as_deref(),
 		related_events: related_events.as_ref(),
 		replaced,
+		unthreaded_readers: &unthreaded_readers,
 	};
 
 	let _cork = self.db.db.cork();
@@ -175,6 +181,7 @@ async fn append_pdu_for_user(
 		thread_root,
 		related_events,
 		replaced,
+		unthreaded_readers,
 	}: Appended<'_>,
 ) {
 	let ruleset = self.ruleset(user).await;
@@ -208,7 +215,7 @@ async fn append_pdu_for_user(
 	// once the user has read that original it is not unread again.
 	let read = match replaced {
 		| Some(replaced) if notify || highlight =>
-			self.read_through(user, pdu.room_id(), thread_root, replaced)
+			self.read_through(user, pdu.room_id(), thread_root, replaced, unthreaded_readers)
 				.await,
 		| _ => false,
 	};
@@ -287,7 +294,9 @@ async fn replaced_pdu_id(&self, pdu_id: &RawPduId, pdu: &Pdu) -> Option<PduId> {
 /// the user's unthreaded receipt reaches it. A main-timeline receipt moves
 /// the room watermark but leaves thread counts, so it covers no thread. An
 /// unthreaded receipt covers every thread up to its event (MSC3771), but its
-/// reset deletes the thread watermarks, so the receipt itself is read back.
+/// reset deletes the thread watermarks up to that event, so the receipt
+/// itself is read back: the private one the user's clients announced, and
+/// the public one from `unthreaded_readers`, which every recipient shares.
 #[implement(super::Service)]
 async fn read_through(
 	&self,
@@ -295,6 +304,7 @@ async fn read_through(
 	room_id: &RoomId,
 	thread_root: Option<&EventId>,
 	replaced: PduId,
+	unthreaded_readers: &OnceCell<HashSet<OwnedUserId>>,
 ) -> bool {
 	let count = replaced.count.into_unsigned();
 	let bucket = async {
@@ -314,12 +324,23 @@ async fn read_through(
 	}
 
 	// The room watermark already covers what an unthreaded receipt reaches.
-	thread_root.is_some()
-		&& self
-			.services
-			.read_receipt
-			.unthreaded_read_reaches(room_id, user, count)
-			.await
+	if thread_root.is_none() {
+		return false;
+	}
+
+	let read_receipt = &self.services.read_receipt;
+	if read_receipt
+		.private_read_sync_get_count(room_id, user)
+		.await
+		.is_ok_and(|(read, _)| read >= count)
+	{
+		return true;
+	}
+
+	unthreaded_readers
+		.get_or_init(|| read_receipt.unthreaded_readers(room_id, count))
+		.await
+		.contains(user)
 }
 
 /// Whether the unthreaded private read marker, which the user's own send

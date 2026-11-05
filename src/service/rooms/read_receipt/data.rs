@@ -1,11 +1,11 @@
-use std::{collections::BTreeMap, pin::pin, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use futures::{
 	Stream, TryStreamExt,
 	future::{join, try_join},
 };
 use ruma::{
-	CanonicalJsonObject, EventId, OwnedEventId, RoomId, UserId,
+	CanonicalJsonObject, EventId, OwnedEventId, OwnedUserId, RoomId, UserId,
 	events::{AnySyncEphemeralRoomEvent, receipt::ReceiptEvent},
 	serde::Raw,
 };
@@ -209,33 +209,30 @@ impl Data {
 			})
 	}
 
-	/// The event named by the user's unthreaded receipt, when that receipt
-	/// was stored after stream position `since`.
+	/// The unthreaded receipts stored after stream position `since`, as each
+	/// user and the event their receipt names.
 	///
-	/// A user keeps at most one unthreaded row per room, so the scan stops at
-	/// the first match.
+	/// A user keeps one unthreaded row per room, but two receipts racing past
+	/// the same superseded row can leave two until the next write.
 	#[inline]
-	pub(super) async fn unthreaded_receipt_since(
-		&self,
-		room_id: &RoomId,
-		user_id: &UserId,
+	pub(super) fn unthreaded_receipts_since<'a>(
+		&'a self,
+		room_id: &'a RoomId,
 		since: u64,
-	) -> Option<OwnedEventId> {
+	) -> impl Stream<Item = (OwnedUserId, OwnedEventId)> + Send + 'a {
 		type Key<'a> = (&'a RoomId, u64, &'a UserId, &'a str);
 
-		let rows = self
-			.readreceiptid_readreceipt
+		self.readreceiptid_readreceipt
 			.stream_from(&(room_id, since.saturating_add(1)))
 			.ignore_err()
-			.ready_take_while(|((room, ..), _): &(Key<'_>, &[u8])| *room == room_id);
-
-		pin!(rows)
-			.ready_find_map(|((_, _, user, thread), receipt): (Key<'_>, &[u8])| {
-				(user == user_id && thread.is_empty())
+			.ready_take_while(move |((room, ..), _): &(Key<'_>, &[u8])| *room == room_id)
+			.ready_filter_map(|((_, _, user, thread), receipt): (Key<'_>, &[u8])| {
+				thread
+					.is_empty()
 					.then_some(receipt)
 					.and_then(stored_event_id)
+					.map(|event_id| (user.to_owned(), event_id))
 			})
-			.await
 	}
 
 	/// Sets the private read marker for `(room, user, thread)`, reporting
