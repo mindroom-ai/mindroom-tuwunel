@@ -121,51 +121,60 @@ pub async fn full_register(
 	}
 
 	if !is_appservice && (self.services.config.allow_guests_auto_join_rooms || !is_guest) {
-		for room in &self.services.server.config.auto_join_rooms {
-			let Ok(room_id) = self.services.alias.maybe_resolve(room).await else {
-				error!(
-					"Failed to resolve room alias to room ID when attempting to auto join \
-					 {room}, skipping"
-				);
-				continue;
-			};
-
-			if !self
-				.services
-				.state_cache
-				.server_in_room(self.services.globals.server_name(), &room_id)
-				.await
-			{
-				warn!(
-					"Skipping room {room} to automatically join as we have never joined before."
-				);
-				continue;
-			}
-
-			match self
-				.services
-				.membership
-				.join(Join {
-					sender_user: user_id,
-					room_id: &room_id,
-					orig_room_id: Some(room),
-					reason: Some("Automatically joining this room upon registration".to_owned()),
-					servers: &[],
-					is_appservice: false,
-					extra_content: None,
-				})
-				.await
-			{
-				| Err(e) => {
-					// don't return this error so we don't fail registrations
-					error!("Failed to automatically join room {room} for user {user_id}: {e}");
-				},
-				| _ => {
-					info!("Automatically joined room {room} for user {user_id}");
-				},
-			}
-		}
+		self.auto_join_rooms(user_id).await;
 	}
 
 	Ok(())
+}
+
+/// Join a local user who has just signed up to the configured
+/// `auto_join_rooms`.
+///
+/// Registration calls this, and so does an SSO sign-in that claims an account
+/// created ahead of it. A room that cannot be resolved or joined is logged and
+/// skipped, so it never fails the sign-up.
+#[implement(super::Service)]
+pub async fn auto_join_rooms(&self, user_id: &UserId) {
+	for room in &self.services.server.config.auto_join_rooms {
+		let Ok(room_id) = self.services.alias.maybe_resolve(room).await else {
+			error!(
+				"Failed to resolve room alias to room ID when attempting to auto join {room}, \
+				 skipping"
+			);
+			continue;
+		};
+
+		if !self
+			.services
+			.state_cache
+			.server_in_room(self.services.globals.server_name(), &room_id)
+			.await
+		{
+			warn!("Skipping room {room} to automatically join as we have never joined before.");
+			continue;
+		}
+
+		match self
+			.services
+			.membership
+			.join(Join {
+				sender_user: user_id,
+				room_id: &room_id,
+				orig_room_id: Some(room),
+				reason: Some("Automatically joining this room upon registration".to_owned()),
+				servers: &[],
+				is_appservice: false,
+				extra_content: None,
+			})
+			.await
+		{
+			| Err(e) => {
+				// don't return this error so we don't fail registrations
+				error!("Failed to automatically join room {room} for user {user_id}: {e}");
+			},
+			| _ => {
+				info!("Automatically joined room {room} for user {user_id}");
+			},
+		}
+	}
 }

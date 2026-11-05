@@ -18,6 +18,7 @@ use tuwunel_core::{
 		MutexMap,
 		stream::{IterStream, ReadyExt, TryExpect},
 	},
+	warn,
 };
 use tuwunel_database::{Cbor, Database, Deserialized, Ignore, Map};
 use url::Url;
@@ -364,6 +365,24 @@ pub fn get_sess_id_by_user(&self, user_id: &UserId) -> impl Stream<Item = Result
 		.map_ok(Vec::into_iter)
 		.map_ok(IterStream::try_stream)
 		.try_flatten_stream()
+}
+
+/// Whether any identity of any provider is linked to `user_id`.
+///
+/// An unreadable link counts as one, since it may name the identity the
+/// account belongs to.
+#[implement(Sessions)]
+pub async fn is_linked(&self, user_id: &UserId) -> bool {
+	self.get_sess_id_by_user(user_id)
+		.ready_any(|sess_id| match sess_id {
+			| Ok(_) => true,
+			| Err(e) if e.is_missing() => false,
+			| Err(e) => {
+				warn!(%user_id, error = %e, "Unreadable identity links.");
+				true
+			},
+		})
+		.await
 }
 
 /// Resolve the `sess_id` from an associated provider issuer and subject hash.

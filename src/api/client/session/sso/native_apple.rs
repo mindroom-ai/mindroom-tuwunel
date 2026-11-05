@@ -489,6 +489,7 @@ mod tests {
 			scope: BTreeSet::new(),
 			userid_claims: BTreeSet::new(),
 			trusted: false,
+			claim_unlinked_accounts: false,
 			unique_id_fallbacks: true,
 			registration: true,
 			base_path: None,

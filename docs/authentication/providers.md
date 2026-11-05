@@ -72,6 +72,7 @@ please refer to the section on [environment variables](#configuring-via-environm
 |---|---|---|
 | `userid_claims` | all | Claims used to compute the Matrix localpart for new registrations. When empty, Tuwunel avoids generated IDs where possible. The special value `"unique"` forces generated IDs exclusively. The claim `"sub"` takes precedence over all others when listed. |
 | `trusted` | `false` | Inverts user matching: instead of registering a new account when claims conflict with existing users, Tuwunel finds the first matching user and grants access to it. **Only set this for providers you self-host and fully control. Never use with public providers (GitHub, GitLab, Google, etc.); it enables account takeover.** For migrated databases, prefer durable bulk adoption or individual association to temporarily enabling this option. |
+| `claim_unlinked_accounts` | `false` | Lets a sign-in take an existing account that nobody can sign in to yet, such as one an appservice or the admin API created without a password ahead of its owner's first sign-in. Accounts with a password, a device or a linked identity are never taken. See [Accounts created before the first sign-in](#accounts-created-before-the-first-sign-in). |
 | `unique_id_fallbacks` | `true` | When no claim maps cleanly to an available username, generate a unique random localpart as a fallback. Set to `false` on private servers where random usernames are undesirable — a misconfiguration will produce an error instead. |
 | `registration` | `true` | Whether this provider can create new Matrix accounts. Set to `false` to restrict the provider to existing users only. |
 
@@ -273,6 +274,72 @@ After a supported database migration, stored provider mappings can be adopted
 in bulk from the source database. This one-time procedure has additional safety
 requirements and must be completed before migrated users sign in. See
 [Migrating Databases](migrating.md).
+
+### Accounts created before the first sign-in
+
+A migration from another chat system can create each person's account ahead
+of time, for example through an appservice's `/register` with
+`m.login.application_service`, and fill it with history. Normally the
+person's first sign-in then gets a new account, because an existing account
+that SSO did not create is skipped. With `claim_unlinked_accounts = true`, the
+first sign-in whose claims name such an account takes it instead:
+
+```toml
+[[global.identity_provider]]
+brand = "Keycloak"
+client_id = "tuwunel"
+# ...
+userid_claims = ["email"]
+claim_unlinked_accounts = true
+```
+
+The names come from the claims in the order described
+[below](#how-tuwunel-derives-matrix-user-ids-from-claims), so a free name tried
+before the account's name still gets a new account; `userid_claims` narrows
+the claims to the one that names the accounts. An account qualifies only while
+nobody can sign in to it:
+
+- it is not the server user, and its name is neither forbidden nor reserved
+  exclusively by an appservice;
+- its origin is `password` or `sso`; accounts provisioned by LDAP, JWT or a
+  delegated authentication service sign in there;
+- it holds no password. An empty password means it was created without one,
+  unless a deactivation is recorded for it;
+- it has no device, whose access token or keys someone already holds, so
+  register the accounts with `"inhibit_login": true`;
+- no identity of any provider is linked to it, and no
+  [admin-approved association](#admin-approved-association-for-untrusted-providers)
+  is pending for it.
+
+Any other existing account is skipped exactly as without the option, and the
+next name or the identity's fallback username is used. A claimed account
+becomes an SSO account (origin `sso`, no password) linked to the identity, as
+if SSO had registered it, so the person's next sign-in reaches it directly and
+interactive authentication offers them SSO. The claiming sign-in also gives it
+what SSO registration gives a new account, once: it joins the
+`auto_join_rooms`, and takes the identity's name and avatar unless the account
+already has its own (a display name other than the one its registration
+defaulted to, or any avatar). It is not granted admin as a first user would be.
+The server logs `Claimed an unlinked account.` with the user ID and the
+provider ID.
+
+**An unclaimed account stays claimable for as long as the option is on.**
+Whoever later gets an identity whose claims name it, such as an email address
+the provider issues to someone new, gets the account and all its history. Turn
+the option off once the migration window ends, or deactivate the accounts
+nobody claimed.
+
+Unlike `trusted`, this never hands out an account with a password, a device or
+a linked identity. Still only enable it for a provider whose claims name one
+person each, such as a self-hosted directory or a provider that only signs in
+your organization's domain: the `email` claim keeps only the part before the
+`@`, so on a provider that signs in addresses of any domain, whoever first
+signs in with a matching name takes the account. An account deactivated before
+this server recorded deactivation reasons, or adopted deactivated from another
+server's database, looks like one created without a password and can be
+claimed. An appservice whose namespace still covers a claimed account can
+keep acting as it; take the account out of the namespace once the migration
+no longer needs it.
 
 ### How Tuwunel derives Matrix user IDs from claims
 

@@ -42,7 +42,6 @@ use tuwunel_core::{
 		hash::sha256,
 		html::escape as html_escape,
 		result::{FlatOk, LogErr, NotFound},
-		stream::ReadyExt,
 		string::EMPTY,
 		timepoint_from_now, timepoint_has_passed,
 	},
@@ -56,7 +55,7 @@ use tuwunel_service::{
 		CODE_VERIFIER_LENGTH, GITHUB_LOGIN_ISSUER, Provider, SESSION_ID_LENGTH, Session,
 		TokenResponse, UserInfo, fallback_localpart, unique_id_iss_sub, unique_id_sub,
 	},
-	users::{PASSWORD_SENTINEL, Register},
+	users::{Claim, PASSWORD_SENTINEL, Register},
 };
 use url::Url;
 
@@ -69,6 +68,10 @@ use crate::{
 	ClientIp, Ruma, RumaResponse,
 	oidc::{account::ACCOUNT_HEAD, redirect_allowlisted},
 };
+
+/// A local account for a sign-in, with the claim on it if the sign-in claimed
+/// an existing account.
+type Candidate = (OwnedUserId, Option<Claim>);
 
 /// Grant phase query string.
 #[derive(Debug, Serialize)]
@@ -649,8 +652,8 @@ async fn complete_sso_session(
 			..session
 		};
 
-		let user_id = match (session.user_id, old_user_id) {
-			| (Some(user_id), ..) | (None, Some(user_id)) => user_id,
+		let (user_id, claim) = match (session.user_id, old_user_id) {
+			| (Some(user_id), ..) | (None, Some(user_id)) => (user_id, None),
 			| (None, None) => decide_user_id(services, provider, &userinfo, &unique_id).await?,
 		};
 
@@ -673,14 +676,23 @@ async fn complete_sso_session(
 			register_user(services, provider, &session, &userinfo, &user_id, origin).await?;
 		}
 
-		Ok((session, user_id))
+		Ok((session, (user_id, claim)))
 	};
 
-	let (session, user_id, old_sess_id) = services
+	let (session, (user_id, claim), old_sess_id) = services
 		.oauth
 		.sessions
 		.commit_identity_session(&unique_id, complete_identity)
 		.await?;
+
+	// The identity is linked now, so release the account before the steps below
+	// take its password lock. Only this sign-in claims it, so the account is
+	// provisioned once.
+	if let Some(claim) = claim {
+		drop(claim);
+		info!(%user_id, provider = provider.id(), "Claimed an unlinked account.");
+		provision_claimed(services, provider, &session, &userinfo, &user_id).await;
+	}
 
 	if services
 		.users
@@ -883,6 +895,66 @@ async fn register_user(
 	Ok(())
 }
 
+/// Give a claimed account what SSO registration gives a new one.
+///
+/// The identity's name and avatar replace only what the account's own
+/// registration defaulted to, so a profile someone set for it stays, and the
+/// account joins the configured `auto_join_rooms`. The first user's admin grant
+/// is not given, since the account existed before.
+async fn provision_claimed(
+	services: &Services,
+	provider: &Provider,
+	session: &Session,
+	userinfo: &UserInfo,
+	user_id: &UserId,
+) {
+	let suffix = services
+		.config
+		.new_user_displayname_suffix
+		.as_str();
+	let with_suffix = |name: &str| match suffix {
+		| "" => name.to_owned(),
+		| suffix => format!("{name} {suffix}"),
+	};
+
+	let default_displayname = match services.profile.displayname(user_id).await {
+		| Ok(current) => {
+			let localpart = user_id.localpart();
+
+			current == localpart || current == with_suffix(localpart)
+		},
+		| Err(e) => e.is_missing(),
+	};
+
+	if let Some(name) = userinfo.name.as_deref()
+		&& default_displayname
+	{
+		services
+			.profile
+			.set_displayname(user_id, Some(&with_suffix(name)), None)
+			.await
+			.log_err()
+			.ok();
+	}
+
+	if let Some(avatar_url) = userinfo
+		.avatar_url
+		.as_deref()
+		.or(userinfo.picture.as_deref())
+		&& services
+			.profile
+			.avatar_url(user_id)
+			.await
+			.is_missing()
+	{
+		set_avatar(services, provider, session, userinfo, user_id, avatar_url)
+			.await
+			.ok();
+	}
+
+	services.users.auto_join_rooms(user_id).await;
+}
+
 #[tracing::instrument(level = "debug", skip_all, fields(user_id, avatar_url))]
 async fn set_avatar(
 	services: &Services,
@@ -942,7 +1014,7 @@ async fn decide_user_id(
 	provider: &Provider,
 	userinfo: &UserInfo,
 	unique_id: &str,
-) -> Result<OwnedUserId> {
+) -> Result<Candidate> {
 	if let Some(user_id) = services
 		.oauth
 		.sessions
@@ -955,7 +1027,7 @@ async fn decide_user_id(
 			"Matched pending association"
 		);
 
-		return Ok(user_id);
+		return Ok((user_id, None));
 	}
 
 	let explicit = |claim: &str| provider.userid_claims.contains(claim);
@@ -996,14 +1068,14 @@ async fn decide_user_id(
 	];
 
 	for choice in choices.into_iter().flatten() {
-		if let Some(user_id) = try_user_id(services, provider, &choice, false).await {
-			return Ok(user_id);
+		if let Some(candidate) = try_user_id(services, provider, &choice, false).await {
+			return Ok(candidate);
 		}
 	}
 
 	let localpart = fallback_localpart(unique_id);
-	if let Some(user_id) = try_user_id(services, provider, &localpart, true).await {
-		return Ok(user_id);
+	if let Some(candidate) = try_user_id(services, provider, &localpart, true).await {
+		return Ok(candidate);
 	}
 
 	Err!(Request(UserInUse("User ID is not available.")))
@@ -1015,7 +1087,7 @@ async fn try_user_id(
 	provider: &Provider,
 	username: &str,
 	unique_id: bool,
-) -> Option<OwnedUserId> {
+) -> Option<Candidate> {
 	let server_name = services.globals.server_name();
 	let user_id = parse_user_id(server_name, username)
 		.inspect_err(|e| warn!(?username, "Username invalid: {e}"))
@@ -1040,6 +1112,12 @@ async fn try_user_id(
 	}
 
 	if services.users.exists(&user_id).await {
+		if provider.claim_unlinked_accounts
+			&& let Some(claim) = services.users.claim_unlinked(&user_id).await
+		{
+			return Some((user_id, Some(claim)));
+		}
+
 		if provider.trusted {
 			info!(
 				?username,
@@ -1047,7 +1125,7 @@ async fn try_user_id(
 				"Authorizing trusted provider access to existing account."
 			);
 
-			return Some(user_id);
+			return Some((user_id, None));
 		}
 
 		if services
@@ -1068,20 +1146,7 @@ async fn try_user_id(
 
 		// Only an identity without an account reaches its fallback, so an account
 		// linked to any identity belongs to another one. An unreadable link counts.
-		if services
-			.oauth
-			.sessions
-			.get_sess_id_by_user(&user_id)
-			.ready_any(|sess_id| match sess_id {
-				| Ok(_) => true,
-				| Err(e) if e.is_missing() => false,
-				| Err(e) => {
-					warn!(?username, error = %e, "Unreadable identity links.");
-					true
-				},
-			})
-			.await
-		{
+		if services.oauth.sessions.is_linked(&user_id).await {
 			debug_warn!(?username, "Existing username is linked to another identity.");
 			return None;
 		}
@@ -1107,7 +1172,7 @@ async fn try_user_id(
 		}
 	}
 
-	Some(user_id)
+	Some((user_id, None))
 }
 
 fn parse_user_id(server_name: &ServerName, username: &str) -> Result<OwnedUserId> {

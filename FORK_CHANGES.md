@@ -644,6 +644,32 @@ username is used. Upstream has the same bug. File:
 `src/api/client/session/sso.rs`; test in
 `src/main/tests/sso_fallback_account.rs`.
 
+### SSO sign-in can claim an account created ahead of it
+
+An operator migrating from another chat system can create each person's
+account before their first sign-in, for example through an appservice's
+`/register`, and fill it with history. That sign-in then got a new account,
+because an existing account SSO did not create is skipped, while
+`trusted = true` also hands out accounts with passwords, devices or other
+identities. A provider with `claim_unlinked_accounts = true` (off by default)
+lets the identity whose claims name an existing account take it while nobody
+can sign in to it: not the server user, origin `password` or `sso`, no
+password (an empty one only without a recorded deactivation), no device, no
+linked identity and no pending admin-approved association. The account
+becomes an SSO account (sentinel password, origin `sso`) under its password
+lock, which is held until the identity's link is stored, so two identities
+cannot both claim it and a password change or deactivation waits. Any other
+account is skipped as before. The claiming sign-in then gives the account
+what SSO registration gives a new one, once: `auto_join_rooms`, and the
+identity's name and avatar where the account still has its registration
+defaults, but not the first user's admin grant. An unclaimed account stays
+claimable while the option is on, so operators turn it off after their
+migration. Upstream has no such option. Files: `src/core/config/mod.rs`,
+`tuwunel-example.toml`, `src/service/users/{claim.rs,register.rs}`,
+`src/service/oauth/sessions.rs`, `src/api/client/session/sso.rs`,
+`docs/authentication/providers.md`; test in
+`src/main/tests/sso_claim_unlinked_account.rs`.
+
 ### Knock state is checked before it is stored
 
 A knock on a room this server is not in stored every non-member
@@ -1327,6 +1353,13 @@ mindroom_openid_audience = true
 [global]
 # On by default; false refuses sends and stops advertising the feature.
 mindroom_ephemeral_events_enabled = true
+```
+
+### Claiming accounts created before the first sign-in
+```toml
+[[global.identity_provider]]
+# Off by default; only for providers whose claims name one person each.
+claim_unlinked_accounts = true
 ```
 
 ### Native Sign in with Apple

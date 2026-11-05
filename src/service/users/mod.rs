@@ -1,3 +1,4 @@
+mod claim;
 mod create;
 mod dehydrated_device;
 pub mod device;
@@ -39,6 +40,7 @@ pub type LoginProviderId = SmallString<[u8; 32]>;
 type LoginTokenId = SmallString<[u8; 48]>;
 
 pub use self::{
+	claim::Claim,
 	dehydrated_device::DehydratedDevice,
 	invite_filter::InviteFilter,
 	keys::{DeviceKeysUpdate, DeviceListChange, DeviceListRecord, parse_master_key},
