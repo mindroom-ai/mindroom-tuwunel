@@ -383,7 +383,10 @@ impl Service {
 	///
 	/// Unthreaded writes supersede prior per-thread rows so the room-wide
 	/// receipt subsumes thread state. Returns whether the marker advanced; a
-	/// position at or behind the stored one writes nothing.
+	/// position at or behind the stored one leaves it. The server moves the
+	/// marker to the user's own sends without announcing it, so an announced
+	/// write behind it is still announced once it passes the last announced
+	/// position.
 	#[tracing::instrument(skip(self), level = "debug", name = "set_private")]
 	pub async fn private_read_set(&self, private_read: PrivateRead<'_>) -> bool {
 		self.db.private_read_set(private_read).await

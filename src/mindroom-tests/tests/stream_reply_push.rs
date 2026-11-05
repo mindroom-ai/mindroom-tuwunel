@@ -87,7 +87,8 @@ fn terminal_replies_preserve_highlight_and_gateway_tweaks() -> Result {
 		exercise_replies(&services, &router, author, &room, &pusher, &mut captured).await?;
 		check_invite_target(&services, &router, &pusher, &mut captured).await?;
 		check_read_reply(&services, &router).await?;
-		check_unthreaded_read(&services, &router).await
+		check_unthreaded_read(&services, &router).await?;
+		check_private_behind_own_send(&services, &router).await
 	});
 	gateway.handle.abort();
 	result
@@ -449,6 +450,88 @@ async fn check_unthreaded_read(services: &Services, router: &Router) -> Result {
 	assert_eq!(thread_counts(services, &room, &question).await, (1, 1));
 
 	Ok(())
+}
+
+/// The server moves the user's private read marker to each of their own
+/// sends without telling their clients, so an explicit private receipt at or
+/// before such a send still covers the threads it reaches.
+async fn check_private_behind_own_send(services: &Services, router: &Router) -> Result {
+	let (room, question) = thread_room(router, "own-send").await;
+	let thread = json!({"rel_type": "m.thread", "event_id": question});
+
+	// The user posts in the main timeline, then marks the room read there.
+	let reply = send(router, &room, HELPER_TOKEN, "on-own", stream_reply(&thread)).await;
+	let own = send(
+		router,
+		&room,
+		AUTHOR_TOKEN,
+		"on-own-message",
+		json!({"msgtype": "m.text", "body": "Meanwhile"}),
+	)
+	.await;
+	request(
+		router,
+		"POST",
+		&format!("/rooms/{room}/read_markers"),
+		AUTHOR_TOKEN,
+		json!({"m.read.private": own}),
+	)
+	.await;
+	send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"on-own-done",
+		terminal_reply("completed", &reply, &question),
+	)
+	.await;
+	assert_eq!(thread_counts(services, &room, &question).await, (0, 0));
+
+	// A receipt on the reply itself, sent after a newer own send.
+	let reply = send(router, &room, HELPER_TOKEN, "behind-own", stream_reply(&thread)).await;
+	send(
+		router,
+		&room,
+		AUTHOR_TOKEN,
+		"behind-own-message",
+		json!({"msgtype": "m.text", "body": "Meanwhile, again"}),
+	)
+	.await;
+	request(
+		router,
+		"POST",
+		&format!("/rooms/{room}/receipt/m.read.private/{reply}"),
+		AUTHOR_TOKEN,
+		json!({}),
+	)
+	.await;
+	send(
+		router,
+		&room,
+		HELPER_TOKEN,
+		"behind-own-done",
+		terminal_reply("completed", &reply, &question),
+	)
+	.await;
+	assert_eq!(thread_counts(services, &room, &question).await, (0, 0));
+
+	Ok(())
+}
+
+/// A new room the helper joined, with the author's question to thread on.
+async fn thread_room(router: &Router, name: &str) -> (OwnedRoomId, OwnedEventId) {
+	let room = create_room(router).await;
+	request(router, "POST", &format!("/rooms/{room}/join"), HELPER_TOKEN, json!({})).await;
+	let question = send(
+		router,
+		&room,
+		AUTHOR_TOKEN,
+		&format!("{name}-question"),
+		json!({"msgtype": "m.text", "body": "What is the answer?"}),
+	)
+	.await;
+
+	(room, question)
 }
 
 async fn receipt(router: &Router, room: &RoomId, event: &EventId, thread_id: &str) {

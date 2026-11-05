@@ -239,7 +239,7 @@ impl Data {
 	}
 
 	/// Sets the private read marker for `(room, user, thread)`, reporting
-	/// whether it advanced.
+	/// whether the active marker advanced.
 	///
 	/// Unthreaded writes use the legacy 2-tuple `(room, user)` key shape
 	/// and sweep any pre-existing per-thread rows so the room-wide receipt
@@ -250,6 +250,12 @@ impl Data {
 	/// `announce` is set, keeping it a single point query. Announced state is
 	/// mirrored separately so notification-only writes cannot alter a sync
 	/// snapshot without changing its version.
+	///
+	/// The server moves the active marker to the user's own sends without
+	/// announcing it, so an announced write is compared with the announced
+	/// marker instead, and is announced whenever it passes that one. Each
+	/// marker only moves forward. Before the mirror existed sync served the
+	/// active state, so a database predating it compares with that.
 	#[inline]
 	pub(super) async fn private_read_set(
 		&self,
@@ -263,16 +269,15 @@ impl Data {
 		}: PrivateRead<'_>,
 	) -> bool {
 		let thread_kind = thread.as_str().unwrap_or_default();
+		let behind =
+			|stored: Result<(u64, Option<u64>)>| stored.is_ok_and(|(stored, _)| count <= stored);
 
-		if self
-			.private_read_position(room_id, user_id, thread_kind)
-			.await
-			.is_ok_and(|(stored, _)| count <= stored)
-		{
-			return false;
-		}
+		let active_behind = behind(
+			self.private_read_position(room_id, user_id, thread_kind)
+				.await,
+		);
 
-		let reset_sync = if announce && !thread_kind.is_empty() {
+		let premirror = if announce {
 			let versions = try_join(
 				self.last_privateread_update_fallible(user_id, room_id),
 				self.private_read_sync_update_fallible(user_id, room_id),
@@ -281,6 +286,11 @@ impl Data {
 
 			match versions {
 				| Ok((gate, snapshot)) => gate != snapshot,
+				// An unthreaded write rewrites the whole snapshot, which repairs it.
+				| Err(error) if thread_kind.is_empty() => {
+					error!(?error, "Rewriting an unreadable private read sync snapshot.");
+					true
+				},
 				| Err(error) => {
 					error!(?error, "Failed to inspect the private read sync snapshot.");
 					return false;
@@ -290,17 +300,34 @@ impl Data {
 			false
 		};
 
-		let mut txn = self
-			.sweep_thread_private_reads(
-				&self.roomuserid_privateread,
-				room_id,
-				user_id,
-				thread_kind,
-				self.services.db.txn(),
-			)
-			.await;
+		let announced_behind = !announce
+			|| match premirror {
+				| true => active_behind,
+				| false => behind(
+					self.private_read_sync_position(room_id, user_id, thread_kind)
+						.await,
+				),
+			};
 
-		if announce && (thread_kind.is_empty() || reset_sync) {
+		if active_behind && announced_behind {
+			return false;
+		}
+
+		let mut txn = self.services.db.txn();
+
+		if !active_behind {
+			txn = self
+				.sweep_thread_private_reads(
+					&self.roomuserid_privateread,
+					room_id,
+					user_id,
+					thread_kind,
+					txn,
+				)
+				.await;
+		}
+
+		if !announced_behind && (thread_kind.is_empty() || premirror) {
 			txn = match self
 				.sweep_private_read_sync(room_id, user_id, txn)
 				.await
@@ -314,7 +341,7 @@ impl Data {
 		}
 
 		// The permit retires the sequence number on drop, so it outlives execute().
-		let next_count = announce.then(|| self.services.globals.next_count());
+		let next_count = (!announced_behind).then(|| self.services.globals.next_count());
 		let ts = u64::from(ts.get());
 
 		if let Some(next_count) = next_count.as_deref() {
@@ -328,18 +355,20 @@ impl Data {
 		}
 
 		// Additive value tail: ts (millis); old bare-count rows read back None.
-		match thread_kind.is_empty() {
-			| true => txn.put(&self.roomuserid_privateread, (room_id, user_id), (count, ts)),
-			| false => txn.put(
-				&self.roomuserid_privateread,
-				(room_id, user_id, thread_kind),
-				(count, ts),
-			),
+		if !active_behind {
+			match thread_kind.is_empty() {
+				| true => txn.put(&self.roomuserid_privateread, (room_id, user_id), (count, ts)),
+				| false => txn.put(
+					&self.roomuserid_privateread,
+					(room_id, user_id, thread_kind),
+					(count, ts),
+				),
+			}
 		}
 
 		txn.execute();
 
-		true
+		!active_behind
 	}
 
 	/// Private read position for an exact `(room, user, thread)` context.
@@ -386,9 +415,22 @@ impl Data {
 		room_id: &RoomId,
 		user_id: &UserId,
 	) -> Result<(u64, Option<u64>)> {
-		let key = (room_id, user_id, "");
+		self.private_read_sync_position(room_id, user_id, "")
+			.await
+	}
+
+	/// Announced private read position for an exact `(room, user, thread)`
+	/// context. The mirror keys every context, unthreaded included, by its
+	/// kind.
+	#[inline]
+	async fn private_read_sync_position(
+		&self,
+		room_id: &RoomId,
+		user_id: &UserId,
+		thread_kind: &str,
+	) -> Result<(u64, Option<u64>)> {
 		self.roomuserid_privatereadsync
-			.qry(&key)
+			.qry(&(room_id, user_id, thread_kind))
 			.await
 			.deserialized()
 	}
