@@ -1671,9 +1671,10 @@ async fn finalize_joined_room(
 	);
 
 	// MSC3773: a client takes a thread left out of `unread_thread_notifications`
-	// as read, so a room in the response lists the counts of all its threads.
-	// They never put a room in the response on their own: a read position that
-	// moved already does that through the room counts.
+	// as read, so a room in the response lists every thread that has
+	// notifications, and only those. The counts never put a room in the
+	// response on their own: a read position that moved already does that
+	// through the room counts.
 	if want_thread_unread && !joined_room.is_empty() {
 		let thread_counts = match thread_counts {
 			| Some(thread_counts) => thread_counts,
@@ -1686,6 +1687,7 @@ async fn finalize_joined_room(
 
 		joined_room.unread_thread_notifications = thread_counts
 			.into_iter()
+			.filter(|(_, (notifications, highlights))| *notifications > 0 || *highlights > 0)
 			.map(|(root, (notifications, highlights))| {
 				let counts = UnreadNotificationsCount {
 					notification_count: UInt::try_from(notifications).ok(),
