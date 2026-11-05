@@ -94,12 +94,14 @@ fn sync_lists_every_thread_count() -> Result {
 		// Stop typing, so the 30 s typing timeout cannot bring the room back into
 		// the quiet round below on a slow run.
 		request(&router, Method::PUT, &path, HELPER_TOKEN, json!({"typing": false})).await;
+		// Consume that typing update, so the receipt alone carries the room next.
+		let stopped = sync(&router, THREADED, Some(&typing)).await;
 
 		// The reader opens the first thread. Read down to zero, it is left out
 		// of the map, which the client takes as read; the second is still
 		// unread.
 		receipt(&router, &room, READER_TOKEN, &first_reply, json!({"thread_id": first})).await;
-		let read = sync(&router, THREADED, Some(&typing)).await;
+		let read = sync(&router, THREADED, Some(&stopped)).await;
 		assert_eq!(counts(&read, &room, &first), None, "read thread: {read}");
 		assert_eq!(client_counts(&read, &room, &first), Some((0, 0)), "read thread: {read}");
 		assert_eq!(counts(&read, &room, &second), Some((1, 1)), "unread thread: {read}");
