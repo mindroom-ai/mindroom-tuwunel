@@ -840,6 +840,52 @@ Behavior:
   per-type power levels, which need a new room version. Typing and receipts
   are unchanged.
 
+### MatrixRTC clients can schedule their own call leave
+
+A MatrixRTC client that closes without leaving, on a page reload, a crash or a
+lost network, otherwise stays in the call until its membership expires, hours
+later. matrix-js-sdk and matrix-rust-sdk avoid that with MSC4140 delayed
+events: the client schedules its own leave a few seconds ahead and keeps
+restarting it, so the server sends the leave once the client stops. Upstream
+has no delayed events yet
+([#178](https://github.com/matrix-construct/tuwunel/issues/178)), so the fork
+serves only what those SDKs call, and drops this once upstream supports
+delayed events.
+
+Files: `Cargo.toml` (Ruma's `unstable-msc4140` feature),
+`src/service/delayed_events/mod.rs`, `src/service/services.rs`,
+`src/api/client/delayed_events.rs`, `src/api/client/state.rs`,
+`src/api/client/{mod.rs,routes.rs,versions.rs}`; test in
+`src/mindroom-tests/tests/delayed_call_membership.rs`.
+
+Behavior:
+- `PUT /_matrix/client/*/rooms/{roomId}/state/{eventType}[/{stateKey}]` with
+  the `org.matrix.msc4140.delay` query parameter, in milliseconds, schedules
+  the event and answers `{"delay_id"}`; the empty-key routes share the
+  handler, replacing `send_state_event_for_empty_key_route`. Only `org.matrix.msc3401.call.member`
+  can be delayed, by a joined user, for at most 24 hours, with at most 100
+  scheduled per user and content of at most 65535 bytes; other types are 403
+  `M_FORBIDDEN`, because the state endpoint validates some of them before
+  sending, such as memberships against room bans and invite blocking. A
+  suspended account is 403 `M_USER_SUSPENDED`, as on the state endpoint; a
+  leave scheduled before the suspension is still sent.
+- `POST /_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delayId}/{action}`,
+  which matrix-js-sdk calls, and the same path without `/{action}` and with
+  `{"action"}` in the body, which matrix-rust-sdk calls, restart, cancel or
+  send the event at once. They need the owner's access token; any other delay
+  ID is 404 `M_NOT_FOUND`. Ruma's request type also registers the stable
+  `/_matrix/client/v1/delayed_events/{delayId}/{action}` path, which
+  `/versions` does not advertise.
+- `/_matrix/client/versions` lists `org.matrix.msc4140` in
+  `unstable_features`.
+- Scheduled events live only in memory, so a server restart drops them. A
+  client's next restart request then answers 404 `M_NOT_FOUND`, and the SDKs
+  schedule a new leave.
+- Omitted from MSC4140: delayed message events (`/send` ignores the delay
+  parameter and sends at once; no MatrixRTC SDK delays a message), other
+  state types, the delegated restart without an access token, and the
+  endpoints that list scheduled and finished events.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
