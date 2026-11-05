@@ -31,7 +31,7 @@ use tuwunel_core::{
 	result::NotFound,
 	smallstr::SmallString,
 	smallvec::SmallVec,
-	utils::{BoolExt, IterStream, ReadyExt},
+	utils::{BoolExt, IterStream},
 	warn,
 };
 
@@ -439,7 +439,6 @@ impl Service {
 	pub async fn unthreaded_readers(&self, room_id: &RoomId, count: u64) -> HashSet<OwnedUserId> {
 		self.db
 			.unthreaded_receipts_since(room_id, count)
-			.ready_filter(|(user_id, _)| self.services.globals.user_is_local(user_id))
 			.filter_map(async |(user_id, event_id)| {
 				self.services
 					.timeline

@@ -209,11 +209,12 @@ impl Data {
 			})
 	}
 
-	/// The unthreaded receipts stored after stream position `since`, as each
-	/// user and the event their receipt names.
+	/// The unthreaded receipts of local users stored after stream position
+	/// `since`, as each user and the event their receipt names.
 	///
 	/// A user keeps one unthreaded row per room, but two receipts racing past
-	/// the same superseded row can leave two until the next write.
+	/// the same superseded row can leave two until the next write. Other
+	/// rows are skipped before their receipt is parsed.
 	#[inline]
 	pub(super) fn unthreaded_receipts_since<'a>(
 		&'a self,
@@ -227,8 +228,7 @@ impl Data {
 			.ignore_err()
 			.ready_take_while(move |((room, ..), _): &(Key<'_>, &[u8])| *room == room_id)
 			.ready_filter_map(|((_, _, user, thread), receipt): (Key<'_>, &[u8])| {
-				thread
-					.is_empty()
+				(thread.is_empty() && self.services.globals.user_is_local(user))
 					.then_some(receipt)
 					.and_then(stored_event_id)
 					.map(|event_id| (user.to_owned(), event_id))
@@ -284,9 +284,13 @@ impl Data {
 
 			match versions {
 				| Ok((gate, snapshot)) => gate != snapshot,
-				// An unthreaded write rewrites the whole snapshot, which repairs it.
+				// An unthreaded write that advances rewrites the whole snapshot,
+				// which repairs it.
 				| Err(error) if thread_kind.is_empty() => {
-					error!(?error, "Rewriting an unreadable private read sync snapshot.");
+					error!(
+						?error,
+						"Unreadable private read sync snapshot, read as predating the mirror."
+					);
 					true
 				},
 				| Err(error) => {

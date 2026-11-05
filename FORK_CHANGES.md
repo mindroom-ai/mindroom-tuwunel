@@ -1162,7 +1162,8 @@ Behavior:
   receipt leaves a later thread read in place. The receipt itself is read
   back by its event's position: the public one from the receipt rows stored
   after the replaced event, scanned once per terminal edit for all
-  recipients; the private one from the marker the user's clients announced.
+  recipients and skipping other servers' users before their rows are
+  parsed; the private one from the marker the user's clients announced.
   The server moves the private marker to an own send without announcing it,
   so an explicit private receipt behind such a send is still announced once
   it passes the last announced one, and resets the counts as a public receipt
