@@ -236,7 +236,8 @@ impl Data {
 	}
 
 	/// Sets the private read marker for `(room, user, thread)`, reporting
-	/// whether the active marker advanced.
+	/// whether it advanced: the active marker, or for an announced write the
+	/// announced one.
 	///
 	/// Unthreaded writes use the legacy 2-tuple `(room, user)` key shape
 	/// and sweep any pre-existing per-thread rows so the room-wide receipt
@@ -365,7 +366,11 @@ impl Data {
 
 		txn.execute();
 
-		!active_behind
+		// One of the markers advanced. An announced write behind the user's own
+		// send passes only the announced one, which is the receipt their clients
+		// see, so the caller resets counts as for a public receipt, also counts
+		// that appeared after that send.
+		true
 	}
 
 	/// Private read position for an exact `(room, user, thread)` context.

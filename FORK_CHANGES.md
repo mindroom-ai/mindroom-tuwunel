@@ -1165,7 +1165,8 @@ Behavior:
   recipients; the private one from the marker the user's clients announced.
   The server moves the private marker to an own send without announcing it,
   so an explicit private receipt behind such a send is still announced once
-  it passes the last announced one.
+  it passes the last announced one, and resets the counts as a public receipt
+  would, including the count of a reply that finished after that send.
   The thread and room watermarks record when a receipt arrived, not where
   its event is: a receipt for the reply's thread (or, for a main-timeline
   reply, the room) that arrives mid-stream covers the reply even when it

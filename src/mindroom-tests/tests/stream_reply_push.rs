@@ -90,6 +90,7 @@ fn terminal_replies_preserve_highlight_and_gateway_tweaks() -> Result {
 		check_unthreaded_read(&services, &router).await?;
 		check_other_receipts(&services, &router).await?;
 		check_private_behind_own_send(&services, &router).await?;
+		check_private_after_completion(&services, &router).await?;
 		check_thread_read_kept(&services, &router).await
 	});
 	gateway.handle.abort();
@@ -563,6 +564,48 @@ async fn check_private_behind_own_send(services: &Services, router: &Router) -> 
 	)
 	.await;
 	assert_eq!(thread_counts(services, &room, &question).await, (0, 0));
+
+	Ok(())
+}
+
+/// A private receipt on the user's own post, sent once a reply that started
+/// before the post has finished, reads the reply as a public receipt would.
+/// The post moved the private marker there without announcing it, so the
+/// receipt only advances the announced one, through `/read_markers` and
+/// `/receipt` alike.
+async fn check_private_after_completion(services: &Services, router: &Router) -> Result {
+	for endpoint in ["read_markers", "receipt"] {
+		let name = format!("after-{endpoint}");
+		let (room, question) = thread_room(router, &name).await;
+		let thread = json!({"rel_type": "m.thread", "event_id": question});
+		let reply = send(router, &room, HELPER_TOKEN, &name, stream_reply(&thread)).await;
+		let own = send(
+			router,
+			&room,
+			AUTHOR_TOKEN,
+			&format!("{name}-message"),
+			json!({"msgtype": "m.text", "body": "Meanwhile"}),
+		)
+		.await;
+		send(
+			router,
+			&room,
+			HELPER_TOKEN,
+			&format!("{name}-done"),
+			terminal_reply("completed", &reply, &question),
+		)
+		.await;
+		assert_eq!(thread_counts(services, &room, &question).await, (1, 1), "{name}: finished");
+
+		if endpoint == "read_markers" {
+			let path = format!("/rooms/{room}/read_markers");
+			request(router, "POST", &path, AUTHOR_TOKEN, json!({"m.read.private": own})).await;
+		} else {
+			let path = format!("/rooms/{room}/receipt/m.read.private/{own}");
+			request(router, "POST", &path, AUTHOR_TOKEN, json!({})).await;
+		}
+		assert_eq!(thread_counts(services, &room, &question).await, (0, 0), "{name}: read");
+	}
 
 	Ok(())
 }
