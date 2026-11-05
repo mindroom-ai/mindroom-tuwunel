@@ -9,8 +9,8 @@ use tuwunel_database::Database;
 
 pub(crate) use crate::OnceServices;
 use crate::{
-	account_data, admin, appservice, client, config, deactivate, edit_purge, emergency,
-	federation, fetcher, globals, key_backups, login_ratelimit,
+	account_data, admin, appservice, client, config, deactivate, delayed_events, edit_purge,
+	emergency, federation, fetcher, globals, key_backups, login_ratelimit,
 	manager::Manager,
 	media, membership, oauth, presence, profile, pusher, registration_tokens, rendezvous,
 	resolver,
@@ -67,6 +67,7 @@ pub struct Services {
 	pub users: Arc<users::Service>,
 	pub membership: Arc<membership::Service>,
 	pub deactivate: Arc<deactivate::Service>,
+	pub delayed_events: Arc<delayed_events::Service>,
 	pub oauth: Arc<oauth::Service>,
 	pub retention: Arc<retention::Service>,
 	pub registration_tokens: Arc<registration_tokens::Service>,
@@ -137,6 +138,7 @@ pub async fn build(server: Arc<Server>) -> Result<Arc<Self>> {
 		users: users::Service::build(&args)?,
 		membership: membership::Service::build(&args)?,
 		deactivate: deactivate::Service::build(&args)?,
+		delayed_events: delayed_events::Service::build(&args)?,
 		oauth: oauth::Service::build(&args)?,
 		retention: retention::Service::build(&args)?,
 		registration_tokens: registration_tokens::Service::build(&args)?,
@@ -207,6 +209,7 @@ pub(crate) fn services(&self) -> impl Iterator<Item = Arc<dyn Service>> + Send {
 		cast!(self.users),
 		cast!(self.membership),
 		cast!(self.deactivate),
+		cast!(self.delayed_events),
 		cast!(self.oauth),
 		cast!(self.retention),
 		cast!(self.registration_tokens),
