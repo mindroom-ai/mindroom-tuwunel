@@ -943,6 +943,45 @@ Behavior:
   per-type power levels, which need a new room version. Typing and receipts
   are unchanged.
 
+### MatrixRTC clients can schedule their own call leave
+
+A MatrixRTC client that closes without leaving, on a page reload, a crash or a
+lost network, otherwise stays in the call until its membership expires, hours
+later. matrix-js-sdk and matrix-rust-sdk avoid that with MSC4140 delayed
+events: the client schedules its own leave a few seconds ahead and keeps
+restarting it, so the server sends the leave once the client stops. Upstream
+has no delayed events yet
+([#178](https://github.com/matrix-construct/tuwunel/issues/178)), so the fork
+serves only what those SDKs call, and drops this once upstream supports
+delayed events.
+
+Files: `src/service/delayed_events/mod.rs`, `src/service/services.rs`,
+`src/api/client/delayed_events.rs`, `src/api/router.rs`,
+`src/api/client/versions.rs`; test in
+`src/mindroom-tests/tests/delayed_call_membership.rs`.
+
+Behavior:
+- `PUT /_matrix/client/*/rooms/{roomId}/state/{eventType}/{stateKey}` with the
+  `org.matrix.msc4140.delay` query parameter, in milliseconds, schedules the
+  event and answers `{"delay_id"}`. Only `org.matrix.msc3401.call.member`
+  can be delayed, by a joined user, for at most 24 hours, with at most 100
+  scheduled per user; other types are 403 `M_FORBIDDEN`, because the state
+  endpoint validates some of them before sending, such as memberships against
+  room bans and invite blocking.
+- `POST /_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delayId}/{action}`,
+  which matrix-js-sdk calls, and the same path without `/{action}` and with
+  `{"action"}` in the body, which matrix-rust-sdk calls, restart, cancel or
+  send the event at once. They need the owner's access token; any other delay
+  ID is 404 `M_NOT_FOUND`.
+- `/_matrix/client/versions` lists `org.matrix.msc4140` in
+  `unstable_features`.
+- Scheduled events live only in memory, so a restart drops them. A client's
+  next restart then answers 404 `M_NOT_FOUND`, and the SDKs schedule a new
+  leave.
+- Omitted from MSC4140: delayed message events, other state types, the
+  delegated restart without an access token, and the endpoints that list
+  scheduled and finished events.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
