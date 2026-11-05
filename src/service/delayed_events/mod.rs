@@ -4,8 +4,9 @@
 //! keeps restarting it, so the server sends the leave once the client stops,
 //! for example on a crash. Only call memberships can be delayed: the state
 //! endpoint validates other state types before sending them, which a delayed
-//! event would skip. A restart drops every scheduled leave; the client's next
-//! restart then answers `M_NOT_FOUND`, and the client schedules a new one.
+//! event would skip. A server restart drops every scheduled leave; the
+//! client's next restart request then answers `M_NOT_FOUND`, and the client
+//! schedules a new one.
 
 use std::{
 	collections::HashMap,

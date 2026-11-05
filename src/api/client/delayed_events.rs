@@ -20,7 +20,7 @@ use tuwunel_service::delayed_events::CALL_MEMBER;
 
 use crate::{Ruma, RumaResponse};
 
-/// # `PUT /_matrix/client/*/rooms/{roomId}/state/{eventType}/{stateKey}`
+/// # `PUT /_matrix/client/*/rooms/{roomId}/state/{eventType}[/{stateKey}]`
 ///
 /// Schedules the state event when the request has the
 /// `org.matrix.msc4140.delay` query parameter, in milliseconds, and otherwise

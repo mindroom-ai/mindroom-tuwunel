@@ -390,23 +390,23 @@ fn register_client_state_and_sync_routes(router: Router<State>) -> Router<State>
 		.route(
 			"/_matrix/client/r0/rooms/{room_id}/state/{event_type}",
 			get(client::get_state_events_for_empty_key_route)
-				.put(client::send_state_event_for_empty_key_route),
+				.put(client::send_state_event_or_delayed_route),
 		)
 		.route(
 			"/_matrix/client/v3/rooms/{room_id}/state/{event_type}",
 			get(client::get_state_events_for_empty_key_route)
-				.put(client::send_state_event_for_empty_key_route),
+				.put(client::send_state_event_or_delayed_route),
 		)
 		// These two endpoints allow trailing slashes
 		.route(
 			"/_matrix/client/r0/rooms/{room_id}/state/{event_type}/",
 			get(client::get_state_events_for_empty_key_route)
-				.put(client::send_state_event_for_empty_key_route),
+				.put(client::send_state_event_or_delayed_route),
 		)
 		.route(
 			"/_matrix/client/v3/rooms/{room_id}/state/{event_type}/",
 			get(client::get_state_events_for_empty_key_route)
-				.put(client::send_state_event_for_empty_key_route),
+				.put(client::send_state_event_or_delayed_route),
 		)
 		.ruma_route(&client::events_route)
 		.ruma_route(&client::sync_events_route)
