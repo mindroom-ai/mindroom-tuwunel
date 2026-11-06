@@ -1220,10 +1220,12 @@ Behavior:
   or the recipient's own send before the stream finished changes nothing. The
   recipient's next receipt clears the count through upstream's normal reset;
   MindRoom's clients send one when the user is looking at the reply as it
-  finishes. Upstream resets only on a receipt that advances, so that receipt
-  names the terminal edit or a later event: another receipt on an event the
-  user already acknowledged, such as the reply's first event read mid-stream,
-  clears nothing.
+  finishes. Upstream resets only on a receipt that advances in the count's own
+  context: for a thread reply, a receipt in that thread or an unthreaded one
+  (a `"main"` receipt never clears it); for a main-timeline reply, a `"main"`
+  or unthreaded receipt. Clients therefore name the terminal edit or a later
+  event: another receipt on an event the user already acknowledged, such as
+  the reply's first event read mid-stream, clears nothing.
 - The `push_everything` debug mode honors the same suppression.
 - Keeps upstream's recipient-based membership-notification target flag. The
   real gateway fixture checks an invite addressed to someone other than its
@@ -1379,7 +1381,10 @@ native_client_ids = ["chat.mindroom.app"]
   unread; terminal events use ordinary recipient push rules and count like a
   new message, even for a recipient who read the reply while it streamed. The
   classifier does not deduplicate multiple distinct terminal events for the
-  same stream.
+  same stream. Deploy it together with clients that send a receipt on the
+  terminal edit when the user watches it finish: an older client acknowledges
+  the reply's first event again, which does not advance, so a reply the user
+  watched keeps its count until the next event in its thread.
 - OpenID audience binding is off unless `mindroom_openid_audience = true`.
   With it on, tokens requested without `io.mindroom.audience` stay unbound and keep verifying at userinfo calls without the query audience, so Element Call, LiveKit, the hosted provisioning service, and stock relying parties work unchanged.
   A relying party that sends `io.mindroom.audience` to userinfo accepts only tokens bound to that audience, so its clients must request bound tokens.
