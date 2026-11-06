@@ -90,6 +90,11 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 				}
 			}
 		}
+
+		self.bundle_thread_previews(sender_user, &mut pdu)
+			.await
+			.log_err()
+			.ok();
 	}
 
 	let replacement = self
@@ -327,7 +332,7 @@ async fn bundle_thread_latest_edit(&self, sender_user: &UserId, pdu: &mut Pdu) {
 /// `origin_server_ts`, which the typed index sorts on.
 #[implement(Service)]
 #[tracing::instrument(skip_all, level = "trace")]
-async fn newest_replacement(&self, parent: &Pdu) -> Option<Pdu> {
+pub(super) async fn newest_replacement(&self, parent: &Pdu) -> Option<Pdu> {
 	if parent.is_redacted() {
 		return None;
 	}

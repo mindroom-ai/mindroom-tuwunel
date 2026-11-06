@@ -236,6 +236,17 @@ impl Service {
 			return Ok(());
 		}
 
+		self.services
+			.pdu_metadata
+			.add_typed_relation(
+				PduId::from(pdu_id).shortroomid,
+				pdu_id.pdu_count(),
+				root_event_id,
+				event,
+				RelationType::Thread,
+			)
+			.await;
+
 		let mut root_pdu_json = self
 			.services
 			.timeline

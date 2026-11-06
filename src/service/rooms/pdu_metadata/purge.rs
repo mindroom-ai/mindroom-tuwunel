@@ -103,6 +103,7 @@ async fn index_pdu_relations(&self, pdu_id: PduId, pdu: &Pdu) {
 	let (rel_type, parent) = match content.relates_to {
 		| Relation::Replacement(replacement) => (RelationType::Replacement, replacement.event_id),
 		| Relation::Reference(reference) => (RelationType::Reference, reference.event_id),
+		| Relation::Thread(thread) => (RelationType::Thread, thread.event_id),
 		| _ => return,
 	};
 

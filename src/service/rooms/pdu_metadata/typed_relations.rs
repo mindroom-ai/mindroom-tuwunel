@@ -26,10 +26,12 @@ type Prefix = ArrayVec<u8, PREFIX_LEN>;
 /// `relatesto_typed` rel_type discriminant, occupying one key byte between the
 /// parent `RawPduId` and the child's ts. Stable on-disk format; the explicit
 /// discriminants are permanent and must stay distinct.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tag {
 	Replace = 0x01,
 	Reference = 0x02,
+	ThreadTitle = 0x03,
+	ThreadReply = 0x04,
 }
 
 impl From<Tag> for u8 {
@@ -38,6 +40,8 @@ impl From<Tag> for u8 {
 		match tag {
 			| Tag::Replace => 0x01,
 			| Tag::Reference => 0x02,
+			| Tag::ThreadTitle => 0x03,
+			| Tag::ThreadReply => 0x04,
 		}
 	}
 }
@@ -51,9 +55,9 @@ pub(super) const KEY_LEN: usize = PREFIX_LEN + size_of::<u64>() * 2;
 /// `relatesto_typed` key: byte offset of the child `PduCount` (the key tail).
 pub(super) const CHILD_COUNT_OFFSET: usize = KEY_LEN - size_of::<u64>();
 
-/// Maintain the `rel_type`-aware relation index for an `m.replace` or
-/// `m.reference` child of `parent`. The row is keyed by the parent so a serve
-/// of `parent` seeks its newest edit (or its references) without loading
+/// Maintain the `rel_type`-aware relation index for an `m.replace`,
+/// `m.reference`, or direct `m.thread` child of `parent`. The row is keyed by
+/// the parent so a serve seeks its newest matching child without loading
 /// non-matching children. Indexed unconditionally; only the read fold is gated.
 #[implement(Service)]
 #[tracing::instrument(skip(self, child), level = "debug")]
@@ -65,7 +69,10 @@ pub async fn add_typed_relation<E: Event>(
 	child: &E,
 	rel_type: RelationType,
 ) {
-	let Some(tag) = tag(&rel_type) else {
+	let Some(tag) = (match rel_type {
+		| RelationType::Thread => super::thread_previews::preview_tag(child),
+		| _ => tag(&rel_type),
+	}) else {
 		return;
 	};
 
@@ -83,7 +90,11 @@ pub async fn add_typed_relation<E: Event>(
 		.get_or_create_shorteventid(child.event_id())
 		.await;
 
-	let child_ts = u64::from(child.origin_server_ts().get());
+	// Thread activity follows arrival order, independent of sender timestamps.
+	let child_ts = match tag {
+		| Tag::ThreadTitle | Tag::ThreadReply => 0,
+		| _ => u64::from(child.origin_server_ts().get()),
+	};
 	let key = key(shortroomid, parent_count, tag, child_ts, child_count);
 
 	self.db

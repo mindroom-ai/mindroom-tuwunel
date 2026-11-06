@@ -1430,3 +1430,50 @@ native_client_ids = ["chat.mindroom.app"]
 - Upstream v1.9.1 `/messages` treats `from` and `to` as directional
   stream-position bounds and
   rejects malformed pagination tokens with `M_INVALID_PARAM`.
+
+### Fresh-device thread titles and conversational previews
+
+The shared read-time thread bundler adds two optional fields alongside the
+standard `unsigned.m.relations.m.thread` fields:
+
+- `io.mindroom.title`: the latest authorized title event in the thread.
+- `io.mindroom.latest_reply`: the latest direct thread event without a title marker.
+
+Both values are full client message-like events, with `event_id`, `sender`,
+`type`, `origin_server_ts`, `content`, and applicable `unsigned` data. Like
+`latest_event`, the embedded event omits `room_id`. Reply edits use the existing
+`bundle_edit_relations` setting and `m.replace` validation. Reference bundles
+use the existing setting too. The standard `latest_event`, `count`, and
+`current_user_participated` behavior stays unchanged. The fields reach
+`/messages`, `/context`, `/event`, `/relations`, `/threads`, and v3 and sliding
+sync timelines through their shared bundler.
+
+A title marker is an `io.mindroom.thread_summary` **object** in the content of
+an unencrypted, non-state, direct `m.thread` event. A plain `m.notice` remains
+a conversational reply. Marked events never become conversational previews,
+even when their author is unauthorized. Title authors need power level **50
+or higher in the state before the title event**. Room operators must grant
+that level to their title-producing agents. Later promotions cannot authorize
+old forged titles, and later demotions do not invalidate previously authorized
+titles. Bundled title edits need the same power at the edit event. Missing
+authorization state fails closed.
+
+Fields are omitted when no eligible event exists. Reads skip redacted,
+purged, erased-for-recipient, ignored-user, and blocked-server events. Root,
+child, and edit history visibility is enforced for the requesting user,
+including current members who left and rejoined. A redacted root retains
+previews of its live children, like its standard thread summary. Encrypted rooms receive
+neither field, including for earlier plaintext history. No plaintext metadata
+is derived from encrypted events, and clients retain their decryption fallback.
+
+The typed relation index separates title markers from other direct replies.
+Each category sorts by the server's event position, matching thread activity,
+so finding a title never walks every conversational reply. Two bounded reverse
+seeks per root stop at the first eligible event. Each seek examines at most
+`thread_latest_reply_search_limit` rows (default 1024), including dangling or
+filtered rows. An exhausted seek omits its field; clients can load that thread.
+There is no shared requester cache. Existing databases rebuild the typed index
+once at startup, while new events maintain it on ingestion. Redactions and
+purges need no thread scans because serving reloads candidate events.
+
+Regression coverage: `src/mindroom-tests/tests/thread_previews.rs`.
