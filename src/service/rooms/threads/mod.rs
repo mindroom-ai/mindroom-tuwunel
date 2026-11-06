@@ -880,12 +880,12 @@ async fn rebuild_thread_summary(&self, root_id: RawPduId) -> Result<bool> {
 
 /// Measures a root's stored thread summary against a recount of its replies.
 ///
-/// A root with no summary gives `None`. A backfilled root's replies are not in
-/// the relation index, so it keeps its count, and a stored latest reply that is
-/// gone or redacted gives way to the newest reply. Relation keys, the replies'
-/// rows, and the latest reply's mapping and row are read without trusting them,
-/// so damage to any of them is reported rather than panicking or failing the
-/// recount.
+/// A root with no summary gives `None`. Older replies of a backfilled root may
+/// not be in the relation index, so it keeps its count, and a stored latest
+/// reply that is gone or redacted gives way to the newest reply. Relation keys,
+/// the replies' rows, and the latest reply's mapping and row are read without
+/// trusting them, so damage to any of them is reported rather than panicking or
+/// failing the recount.
 #[implement(Service)]
 #[tracing::instrument(level = "debug", skip(self, root))]
 pub(crate) async fn recount_summary(
