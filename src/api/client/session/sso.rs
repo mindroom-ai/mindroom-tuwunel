@@ -649,9 +649,19 @@ async fn complete_sso_session(
 			..session
 		};
 
-		let user_id = match (session.user_id, old_user_id) {
-			| (Some(user_id), ..) | (None, Some(user_id)) => user_id,
-			| (None, None) => decide_user_id(services, provider, &userinfo, &unique_id).await?,
+		let (user_id, assigned) = match (session.user_id, old_user_id) {
+			| (Some(user_id), ..) | (None, Some(user_id)) => (user_id, None),
+			| (None, None) => match assigned_account(provider, &userinfo) {
+				| Some(user_id) => {
+					let guard = services
+						.users
+						.assign_sso_account(&user_id)
+						.await?;
+					(user_id, Some(guard))
+				},
+				| None =>
+					(decide_user_id(services, provider, &userinfo, &unique_id).await?, None),
+			},
 		};
 
 		let session = Session {
@@ -673,14 +683,17 @@ async fn complete_sso_session(
 			register_user(services, provider, &session, &userinfo, &user_id, origin).await?;
 		}
 
-		Ok((session, user_id))
+		Ok((session, (user_id, assigned)))
 	};
 
-	let (session, user_id, old_sess_id) = services
+	let (session, (user_id, assigned), old_sess_id) = services
 		.oauth
 		.sessions
 		.commit_identity_session(&unique_id, complete_identity)
 		.await?;
+
+	// The link is stored, so release the account before the steps below lock it.
+	drop(assigned);
 
 	if services
 		.users
@@ -929,6 +942,17 @@ async fn set_avatar(
 		.await?;
 
 	Ok(())
+}
+
+/// The account `assigned_accounts` gives the identity's email address, if any.
+fn assigned_account(provider: &Provider, userinfo: &UserInfo) -> Option<OwnedUserId> {
+	let email = userinfo.email.as_deref()?.to_lowercase();
+
+	provider
+		.assigned_accounts
+		.iter()
+		.find(|(address, _)| address.to_lowercase() == email)
+		.map(|(_, user_id)| user_id.clone())
 }
 
 #[tracing::instrument(

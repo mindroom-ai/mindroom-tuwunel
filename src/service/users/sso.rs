@@ -1,6 +1,9 @@
 use futures::StreamExt;
-use ruma::UserId;
-use tuwunel_core::{Result, utils};
+use ruma::{OwnedUserId, UserId};
+use tuwunel_core::{
+	Err, Result, utils,
+	utils::{MutexMapGuard, ReadyExt, result::NotFound},
+};
 use tuwunel_database::Deserialized;
 
 use super::{PASSWORD_SENTINEL, Service};
@@ -142,6 +145,47 @@ impl Service {
 
 		self.set_origin(user_id, "sso");
 		true
+	}
+
+	/// Check the account `assigned_accounts` gives a signing-in identity that
+	/// has none yet, and make it one SSO signs in to. The guard holds the
+	/// account's password lock until the caller has stored the link.
+	pub async fn assign_sso_account(
+		&self,
+		user_id: &UserId,
+	) -> Result<MutexMapGuard<OwnedUserId, ()>> {
+		let guard = self.changing_password.lock(user_id).await;
+		let sessions = self
+			.services
+			.oauth
+			.sessions
+			.get_sess_id_by_user(user_id);
+		let refusals = [
+			(user_id == self.services.globals.server_user, "is the server user"),
+			(!self.exists(user_id).await, "does not exist"),
+			// Unlike a deactivation, creation without a password records no reason.
+			(
+				self.is_deactivated(user_id).await.unwrap_or(true)
+					&& self.deactivation_reason(user_id).await.is_some(),
+				"is deactivated",
+			),
+			(sessions.ready_any(|id| !id.is_missing()).await, "is linked to another identity"),
+		];
+
+		if let Some((_, reason)) = refusals.into_iter().find(|(refused, _)| *refused) {
+			return Err!(Request(Forbidden(warn!(
+				"This sign-in is assigned to {user_id}, which {reason}."
+			))));
+		}
+
+		if !self.has_password(user_id).await? {
+			let mut txn = self.services.db.txn();
+			txn.insert_raw(&self.db.userid_origin, user_id, "sso");
+			txn.insert_raw(&self.db.userid_password, user_id, PASSWORD_SENTINEL);
+			txn.execute();
+		}
+
+		Ok(guard)
 	}
 
 	#[cfg(test)]

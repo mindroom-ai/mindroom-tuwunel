@@ -517,6 +517,37 @@ ip_source = "cf_connecting_ip"
 }
 
 #[test]
+fn check_refuses_assigned_accounts_of_other_servers() {
+	let config = |user_id: &str| {
+		config_from_toml(&format!(
+			r#"[global]
+server_name = "example.com"
+
+[[global.identity_provider]]
+brand = "keycloak"
+client_id = "keycloak"
+client_secret = "oauth-secret"
+assigned_accounts = {{ "alice@example.com" = "{user_id}" }}
+"#
+		))
+		.expect("assigned accounts config should parse")
+	};
+
+	let (result, _) = check_with_captured_logs(&config("@alice:example.com"));
+	result.expect("a local assigned account should pass config check");
+
+	let (result, _) = check_with_captured_logs(&config("@alice:elsewhere.example"));
+	let error = result.expect_err("a remote assigned account should fail config check");
+
+	assert!(
+		error
+			.to_string()
+			.contains("is not a local user ID"),
+		"{error}"
+	);
+}
+
+#[test]
 fn check_warns_when_mas_provisioning_provider_is_untrusted() {
 	let untrusted_provisioning = r#"[global]
 mas_secret = "provisioning-secret"

@@ -664,6 +664,27 @@ username is used. Upstream has the same bug. File:
 `src/api/client/session/sso.rs`; test in
 `src/main/tests/sso_fallback_account.rs`.
 
+### SSO sign-in can be assigned an account created ahead of it
+
+An operator migrating from another chat system can create each person's
+account before their first sign-in, for example through an appservice's
+`/register`, and fill it with history. That sign-in then got a new account,
+because an existing account SSO did not create is skipped, and
+`trusted = true` hands out any account whose name the claims give. A
+provider's `assigned_accounts` maps email addresses, compared
+case-insensitively, to local user IDs, which the config check requires. An
+identity with no account yet whose `email` claim is listed gets that account
+and no other: the sign-in is refused, with a warning naming the reason, when
+the account does not exist, is the server user, is deactivated (an empty
+password with a recorded reason), or is linked to another identity. The checks
+and the link are made under the account's password lock, and an account
+without a password gets the sentinel and origin `sso` in one write. Unlisted
+addresses and later sign-ins work as before. Upstream has no such option.
+Files: `src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
+`src/service/users/sso.rs`, `src/api/client/session/sso.rs`,
+`docs/authentication/providers.md`; tests in
+`src/main/tests/sso_assigned_account.rs` and `src/core/config/tests.rs`.
+
 ### Knock state is checked before it is stored
 
 A knock on a room this server is not in stored every non-member
@@ -1351,6 +1372,14 @@ mindroom_openid_audience = true
 [global]
 # On by default; false refuses sends and stops advertising the feature.
 mindroom_ephemeral_events_enabled = true
+```
+
+### Accounts assigned to SSO sign-ins
+```toml
+[[global.identity_provider]]
+# Empty by default; list only verified addresses your organization assigns,
+# and remove entries once their people have signed in.
+assigned_accounts = { "alice@example.com" = "@alice:example.com" }
 ```
 
 ### Native Sign in with Apple
