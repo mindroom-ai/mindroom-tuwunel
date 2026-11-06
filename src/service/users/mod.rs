@@ -118,6 +118,7 @@ struct Data {
 	userid_origin: Arc<Map>,
 	userid_selfsigningkeyid: Arc<Map>,
 	userid_suspended: Arc<Map>,
+	userid_unclaimed: Arc<Map>,
 	userid_usersigningkeyid: Arc<Map>,
 }
 
@@ -160,6 +161,7 @@ impl crate::Service for Service {
 				userid_origin: args.db["userid_origin"].clone(),
 				userid_selfsigningkeyid: args.db["userid_selfsigningkeyid"].clone(),
 				userid_suspended: args.db["userid_suspended"].clone(),
+				userid_unclaimed: args.db["userid_unclaimed"].clone(),
 				userid_usersigningkeyid: args.db["userid_usersigningkeyid"].clone(),
 			},
 		}))
@@ -281,9 +283,14 @@ impl Service {
 		// Set the password to "" to indicate a deactivated account. Hashes will never
 		// result in an empty string, so the user will not be able to log in again.
 		// Systems like changing the password without logging in should check if the
-		// account is deactivated.
-		self.set_password(user_id, None).await?;
+		// account is deactivated. The reason and the end of any claim on the account
+		// are written under the same password lock, so an identity provider sign-in
+		// never finds the empty password without them.
+		let password_guard = self.changing_password.lock(user_id).await;
+		self.set_password_locked(user_id, None).await?;
 		self.set_deactivation_reason(user_id, reason);
+		self.db.userid_unclaimed.remove(user_id);
+		drop(password_guard);
 		drop(admin_lock);
 
 		// Revoke any SSO authorizations, outside the lock since each is a request

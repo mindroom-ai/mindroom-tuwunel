@@ -454,7 +454,7 @@ pub(crate) async fn native_apple_login_route(
 		);
 	}
 
-	let (user_id, _) = complete_sso_session(&services, &provider, session, userinfo).await?;
+	let (user_id, _) = complete_sso_session(services, &provider, session, userinfo).await?;
 	let login_token = utils::random_string(TOKEN_LENGTH);
 	let expires_in_ms = services
 		.users

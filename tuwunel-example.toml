@@ -4256,34 +4256,34 @@
 #
 #trusted = false
 
-# Lets a sign-in take an existing account that nobody can sign in to yet,
-# such as one an appservice or the admin API created without a password
-# ahead of its owner's first sign-in. The names the claims above give are
-# tried in the same order as for a new registration, so a free name tried
-# first still gets a new account, and a forbidden name or one an
-# appservice reserves exclusively is never taken.
+# Lets a sign-in take an existing account that nobody can sign in to yet:
+# one an appservice's `/register` or the admin API created without a
+# password, ahead of its owner's first sign-in. An account a person
+# registered for themselves is never taken. The names the claims above
+# give are tried in the same order as for a new registration, so a free
+# name tried first still gets a new account, and a forbidden name or one
+# an appservice reserves exclusively is never taken.
 #
-# An account qualifies only when it is not the server user, its origin is
-# password or SSO, it holds no password (an empty one counts as created
-# without one unless a deactivation is recorded), and it has no device,
-# no linked identity of any provider and no pending admin-approved
-# association. Other existing accounts are skipped as before. A claimed
-# account becomes an SSO account linked to the identity, as if SSO had
-# registered it: it joins `auto_join_rooms` and takes the identity's name
-# and avatar where it still has its registration defaults, but no admin
-# grant. The next sign-in reaches it directly.
+# An account qualifies only while it is not the server user, its origin
+# is password or SSO, it holds no password, it is neither deactivated nor
+# locked, and it has no device, no linked identity of any provider and no
+# pending admin-approved association. Other existing accounts are skipped
+# as before. A claimed account becomes an SSO account linked to the
+# identity, as if SSO had registered it: it joins `auto_join_rooms` and
+# takes the identity's name and avatar where it still has its
+# registration defaults, but gets no admin grant. The next sign-in
+# reaches it directly.
 #
 # An unclaimed account stays claimable for as long as this is on, so
 # whoever later gets a matching identity from the provider, such as a
 # reissued email address, gets the account and its history. Turn this
 # off, or deactivate the accounts nobody claimed, once the migration is
-# over. Only set it for a provider whose claims name one person each: the
-# email claim keeps only the part before the `@`, so where a provider
-# signs in addresses of any domain, whoever first signs in with a
-# matching name takes the account. An account deactivated before
-# deactivation reasons were recorded, or adopted deactivated from another
-# server's database, looks like one created without a password and can be
-# claimed.
+# over. Only set it for a provider that assigns the names the claims
+# carry and verifies the addresses: a GitHub `login` or a
+# `preferred_username` is chosen by the person, the email claim keeps
+# only the part before the `@`, and `email_verified` is not checked.
+# Accounts of an appservice that is removed become claimable unless they
+# are deactivated, since only its exclusive namespace kept them out.
 #
 #claim_unlinked_accounts = false
 

@@ -61,6 +61,12 @@ pub async fn full_register(
 		.create(user_id, password, origin)
 		.await?;
 
+	// An appservice creating an account without a password does so for a person
+	// who may later claim it by signing in through an identity provider.
+	if is_appservice && !is_guest && password.is_none() {
+		self.mark_unclaimed(user_id);
+	}
+
 	let displayname_suffix = self
 		.services
 		.config

@@ -30,6 +30,7 @@ use ruma::{
 	},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use tuwunel_core::{
 	Err, Result, at,
 	config::IdentityProvider,
@@ -72,6 +73,9 @@ use crate::{
 /// A local account for a sign-in, with the claim on it if the sign-in claimed
 /// an existing account.
 type Candidate = (OwnedUserId, Option<Claim>);
+
+/// Task action that provisions an account a sign-in claimed.
+const CLAIM_PROVISION_ACTION: &str = "sso_claim_provision";
 
 /// Grant phase query string.
 #[derive(Debug, Serialize)]
@@ -413,8 +417,7 @@ pub(crate) async fn sso_callback_route(
 			})
 		})?;
 
-	let (user_id, session) =
-		complete_sso_session(&services, &provider, session, userinfo).await?;
+	let (user_id, session) = complete_sso_session(services, &provider, session, userinfo).await?;
 
 	let cookie = Cookie::build((GRANT_SESSION_COOKIE, EMPTY))
 		.path(grant_session_cookie_path(provider.callback_url.as_ref()))
@@ -632,11 +635,12 @@ fn display_login_target(mut target: Url) -> String {
 /// resulting user together with the committed session. Shared by the browser
 /// SSO callback and the native Apple login endpoint.
 async fn complete_sso_session(
-	services: &Services,
+	state: crate::State,
 	provider: &Provider,
 	session: Session,
 	userinfo: UserInfo,
 ) -> Result<(OwnedUserId, Session)> {
+	let services: &Services = &state;
 	let sess_id = session
 		.sess_id
 		.clone()
@@ -686,12 +690,11 @@ async fn complete_sso_session(
 		.await?;
 
 	// The identity is linked now, so release the account before the steps below
-	// take its password lock. Only this sign-in claims it, so the account is
-	// provisioned once.
+	// take its password lock.
+	let claimed = claim.is_some();
 	if let Some(claim) = claim {
 		drop(claim);
 		info!(%user_id, provider = provider.id(), "Claimed an unlinked account.");
-		provision_claimed(services, provider, &session, &userinfo, &user_id).await;
 	}
 
 	if services
@@ -732,6 +735,21 @@ async fn complete_sso_session(
 	}
 
 	services.users.locked_check(&user_id).await?;
+
+	// Only this sign-in claims the account, so it is provisioned once. The work
+	// outlives the request: a client that goes away mid-callback cannot cut it
+	// short, however many rooms the account is in.
+	if claimed {
+		let (provider, session, userinfo, user_id) =
+			(provider.clone(), session.clone(), userinfo.clone(), user_id.clone());
+
+		state
+			.tasks
+			.spawn(CLAIM_PROVISION_ACTION, user_id.to_string(), async move {
+				provision_claimed(&state, &provider, &session, &userinfo, &user_id).await;
+				Ok(JsonValue::Null)
+			});
+	}
 
 	Ok((user_id, session))
 }
@@ -897,10 +915,12 @@ async fn register_user(
 
 /// Give a claimed account what SSO registration gives a new one.
 ///
-/// The identity's name and avatar replace only what the account's own
-/// registration defaulted to, so a profile someone set for it stays, and the
-/// account joins the configured `auto_join_rooms`. The first user's admin grant
-/// is not given, since the account existed before.
+/// The account joins the configured `auto_join_rooms` first. The identity's
+/// name and avatar then replace only what the account's own registration
+/// defaulted to, so a profile someone set for it stays; each change updates
+/// every room the account is in. The admin room hears of the claim as it hears
+/// of a registration. The first user's admin grant is not given, since the
+/// account existed before.
 async fn provision_claimed(
 	services: &Services,
 	provider: &Provider,
@@ -908,6 +928,8 @@ async fn provision_claimed(
 	userinfo: &UserInfo,
 	user_id: &UserId,
 ) {
+	services.users.auto_join_rooms(user_id).await;
+
 	let suffix = services
 		.config
 		.new_user_displayname_suffix
@@ -952,7 +974,17 @@ async fn provision_claimed(
 			.ok();
 	}
 
-	services.users.auto_join_rooms(user_id).await;
+	let idp_name = provider
+		.name
+		.as_deref()
+		.unwrap_or(provider.brand.as_str());
+
+	let notice = format!(
+		"Existing user \"{user_id}\" was claimed on this server via {idp_name} ({})",
+		provider.id()
+	);
+
+	services.admin.notify(&notice).await;
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(user_id, avatar_url))]

@@ -28,8 +28,9 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	oauth::{fallback_localpart, unique_id_sub},
-	users::{DeactivationReason, PASSWORD_SENTINEL, Register},
+	oauth::{Session, UserInfo, fallback_localpart, unique_id_sub},
+	tasks::Status,
+	users::{DeactivationReason, PASSWORD_SENTINEL},
 };
 
 use self::fixture::boot;
@@ -53,17 +54,24 @@ const LOBBY: &str = "#lobby:localhost";
 /// Token of the local user who creates the lobby.
 const HOST_TOKEN: &str = "sso-claim-host-access-token-0123456789";
 
+/// Token that lets a person register an account for themselves.
+const REGISTRATION_TOKEN: &str = "sso-claim-registration-token";
+
+/// How long the background provisioning of a claim may take.
+const PROVISIONING: Duration = Duration::from_secs(10);
+
 /// A sign-in claims an account an appservice created without a password.
 ///
 /// The plain provider leaves the account alone as before. At the claiming
 /// provider the identity whose email names it gets it, as an SSO account linked
-/// to that identity: its login token logs in, and the account joins the
-/// auto-join room and takes the identity's name, once. The next sign-in reaches
-/// the same account. A name someone gave an account survives its claim. Every
-/// other identity naming the account, and identities naming an account with a
-/// password, a deactivated one, one with a device, one an admin association
-/// awaits, or the server user, get their own fallback account and leave those
-/// accounts as they were.
+/// to that identity: its login token logs in, and one background task joins the
+/// account to the auto-join room and gives it the identity's name. The next
+/// sign-in reaches the same account and provisions nothing. A name someone gave
+/// an account survives its claim. Identities naming an account that breaks one
+/// rule each get their own fallback account and leave that account as it was:
+/// one registered by its owner, one with a password, a deactivated one, a
+/// locked one, one with a device, one linked to another identity, one an admin
+/// association awaits, one another system signs in to, and the server user.
 #[test]
 fn sso_claim_unlinked_account() -> Result {
 	let provider = TcpListener::bind(("127.0.0.1", 0))?;
@@ -87,6 +95,8 @@ fn sso_claim_unlinked_account() -> Result {
 			option(CLAIM_IDP, "claim_unlinked_accounts", "true"),
 			"oidc_registration_allowed_redirect_hosts=[\"client.example\"]".to_owned(),
 			format!("auto_join_rooms=[\"{LOBBY}\"]"),
+			"allow_registration=true".to_owned(),
+			format!("registration_token=\"{REGISTRATION_TOKEN}\""),
 		])
 		.collect::<Vec<_>>();
 
@@ -161,14 +171,15 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 	register_appservice(services).await?;
 
-	client::register(services, "host", HOST_TOKEN).await?;
-
+	let host_id = client::register(services, "host", HOST_TOKEN).await?;
 	let host = client::Client { services, base, token: HOST_TOKEN };
 	let lobby = host
 		.create_room(&json!({"room_alias_name": "lobby", "preset": "public_chat"}))
 		.await?;
 
 	let alice = register_ahead(services, base, "alice", true).await?;
+
+	assert!(services.users.is_unclaimed(&alice).await, "alice is marked unclaimed");
 
 	// With the option off, an identity naming the account gets its fallback.
 	let response = sign_in(&client, base, PLAIN_IDP, "plain-alice", "alice").await?;
@@ -186,9 +197,12 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	assert_eq!(user_id, alice);
 	assert_eq!(services.users.origin(&alice).await?, "sso");
 	assert_eq!(services.users.password_hash(&alice).await?, PASSWORD_SENTINEL);
+	assert!(!services.users.is_unclaimed(&alice).await, "a claim removes the mark");
 	assert_eq!(linked_account(services, "alice").await?, alice);
 
-	// Provisioned as a new SSO account: the lobby and the identity's name.
+	// Provisioned once, as a new SSO account: the lobby and the identity's name.
+	provisioned(services, &alice).await?;
+
 	let suffix = &services.config.new_user_displayname_suffix;
 
 	assert!(
@@ -213,6 +227,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let response = sign_in(&client, base, CLAIM_IDP, "alice", "alice").await?;
 
 	assert_eq!(signed_in(services, &response).await?, alice);
+	provisioned(services, &alice).await?;
 	assert!(
 		!services
 			.state_cache
@@ -220,6 +235,15 @@ async fn exercise(services: &Services, base: &str) -> Result {
 			.await,
 		"alice stays out"
 	);
+
+	// Another identity naming the claimed account gets its own.
+	let response = sign_in(&client, base, CLAIM_IDP, "other-alice", "alice").await?;
+
+	assert_eq!(
+		signed_in(services, &response).await?,
+		fallback(services, CLAIM_IDP, "other-alice").await?
+	);
+	assert_eq!(linked_account(services, "alice").await?, alice);
 
 	// A name someone gave the account is kept.
 	let gina = register_ahead(services, base, "gina", true).await?;
@@ -232,6 +256,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let response = sign_in(&client, base, CLAIM_IDP, "gina", "gina").await?;
 
 	assert_eq!(signed_in(services, &response).await?, gina);
+	provisioned(services, &gina).await?;
 	assert_eq!(services.profile.displayname(&gina).await?, "Gina Example");
 	assert!(
 		services
@@ -241,33 +266,26 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		"gina joined the lobby"
 	);
 
-	// Linked now, the account is no longer free for another identity.
-	let response = sign_in(&client, base, CLAIM_IDP, "other-alice", "alice").await?;
+	// An account its owner registered is theirs, though it has no password.
+	let kim = register_self(&client, base, "kim").await?;
 
-	assert_eq!(
-		signed_in(services, &response).await?,
-		fallback(services, CLAIM_IDP, "other-alice").await?
-	);
-	assert_eq!(linked_account(services, "alice").await?, alice);
+	refused(services, &client, base, "kim", "kim").await?;
+	assert_unclaimed(services, &kim, "password", "").await?;
 
 	// An account with a password is someone's.
-	let bob = UserId::parse_with_server_name("bob", services.globals.server_name())?;
+	let bob = register_ahead(services, base, "bob", true).await?;
 
 	services
 		.users
-		.full_register(Register {
-			user_id: Some(&bob),
-			password: Some("sso-claim-test-password"),
-			..Default::default()
-		})
+		.set_password(&bob, Some("sso-claim-test-password"))
 		.await?;
 
 	let hash = services.users.password_hash(&bob).await?;
 
-	refused(services, &client, base, "bob").await?;
+	refused(services, &client, base, "bob", "bob").await?;
 	assert_unclaimed(services, &bob, "password", &hash).await?;
 
-	// A deactivated account stays deactivated, even a self-deactivated one.
+	// A deactivated account loses its mark, and stays deactivated even marked.
 	let carol = register_ahead(services, base, "carol", true).await?;
 
 	services
@@ -275,15 +293,37 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.deactivate_account(&carol, DeactivationReason::SelfService)
 		.await?;
 
-	refused(services, &client, base, "carol").await?;
+	assert!(!services.users.is_unclaimed(&carol).await, "deactivation removes the mark");
+	refused(services, &client, base, "carol", "carol").await?;
+
+	services.users.mark_unclaimed(&carol);
+
+	refused(services, &client, base, "carol-again", "carol").await?;
 	assert_unclaimed(services, &carol, "password", "").await?;
 	assert!(services.users.is_deactivated(&carol).await?, "carol stays deactivated");
+
+	// A locked account waits for an admin.
+	let lee = register_ahead(services, base, "lee", true).await?;
+
+	services.users.set_locked(&lee, &host_id);
+
+	refused(services, &client, base, "lee", "lee").await?;
+	assert_unclaimed(services, &lee, "password", "").await?;
 
 	// Whoever holds a device's token or keys already uses the account.
 	let dave = register_ahead(services, base, "dave", false).await?;
 
-	refused(services, &client, base, "dave").await?;
+	refused(services, &client, base, "dave", "dave").await?;
 	assert_unclaimed(services, &dave, "password", "").await?;
+
+	// An account linked to an identity without a claim, as adopting another
+	// server's links does, belongs to that identity.
+	let hank = register_ahead(services, base, "hank", true).await?;
+
+	link(services, &hank, "hank-elsewhere").await;
+	refused(services, &client, base, "hank", "hank").await?;
+	assert_eq!(services.users.password_hash(&hank).await?, "");
+	assert_eq!(linked_account(services, "hank-elsewhere").await?, hank);
 
 	// An account an admin set aside for an identity waits for that identity.
 	let erin = register_ahead(services, base, "erin", true).await?;
@@ -294,13 +334,27 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.sessions
 		.set_user_association_pending(CLAIM_IDP, &erin, claims);
 
-	refused(services, &client, base, "erin").await?;
+	refused(services, &client, base, "erin", "erin").await?;
 	assert_unclaimed(services, &erin, "password", "").await?;
 
-	// The server user is never claimed.
+	// Another system signs in to an account of its origin.
+	let ivan = register_ahead(services, base, "ivan", true).await?;
+
+	services.users.set_origin(&ivan, "jwt");
+	services
+		.users
+		.set_password(&ivan, Some(PASSWORD_SENTINEL))
+		.await?;
+
+	refused(services, &client, base, "ivan", "ivan").await?;
+	assert_unclaimed(services, &ivan, "jwt", PASSWORD_SENTINEL).await?;
+
+	// The server user is never claimed, even marked.
 	let server_user = &services.globals.server_user;
 
-	refused(services, &client, base, server_user.localpart()).await?;
+	services.users.mark_unclaimed(server_user);
+
+	refused(services, &client, base, "server", server_user.localpart()).await?;
 	assert_unclaimed(services, server_user, "password", "").await?;
 
 	Ok(())
@@ -312,7 +366,10 @@ async fn exercise(services: &Services, base: &str) -> Result {
 /// during a migration that fills their accounts before they do.
 async fn register_appservice(services: &Services) -> Result {
 	let namespaces = Namespaces {
-		users: vec![Namespace::new(false, "^@(alice|carol|dave|erin|gina):.*$".to_owned())],
+		users: vec![Namespace::new(
+			false,
+			"^@(alice|bob|carol|dave|erin|gina|hank|ivan|lee):.*$".to_owned(),
+		)],
 		..Default::default()
 	};
 
@@ -388,10 +445,89 @@ async fn log_in(
 	Ok((user_id, token))
 }
 
-/// Sign in at the claiming provider as `<localpart>-sub` naming `localpart`,
-/// and expect the identity's fallback account.
-async fn refused(services: &Services, client: &Client, base: &str, localpart: &str) -> Result {
-	let sub = format!("{localpart}-sub");
+/// Register an account for oneself, without a password and a device, with the
+/// registration token.
+async fn register_self(client: &Client, base: &str, localpart: &str) -> Result<OwnedUserId> {
+	let url = format!("{base}/_matrix/client/v3/register");
+	let body = json!({"username": localpart, "inhibit_login": true});
+	let challenge: Value = client
+		.post(url.as_str())
+		.json(&body)
+		.send()
+		.await?
+		.json()
+		.await?;
+	let session = challenge["session"]
+		.as_str()
+		.ok_or_else(|| err!("registration asked for no session"))?;
+
+	let auth = json!({
+		"type": "m.login.registration_token",
+		"token": REGISTRATION_TOKEN,
+		"session": session,
+	});
+
+	let mut body = body;
+	body["auth"] = auth;
+
+	let response: Value = client
+		.post(url.as_str())
+		.json(&body)
+		.send()
+		.await?
+		.error_for_status()?
+		.json()
+		.await?;
+
+	Ok(client::field(&response, "user_id")?.try_into()?)
+}
+
+/// Link the account to an identity of the claiming provider directly, without
+/// a sign-in.
+async fn link(services: &Services, user_id: &UserId, sub: &str) {
+	let session = Session {
+		idp_id: Some(CLAIM_IDP.to_owned()),
+		sess_id: Some(format!("{sub}-session")),
+		user_id: Some(user_id.to_owned()),
+		user_info: Some(UserInfo {
+			sub: sub.to_owned(),
+			..Default::default()
+		}),
+		..Default::default()
+	};
+
+	services.oauth.sessions.put(&session).await;
+}
+
+/// Wait for the account's one provisioning task to complete.
+async fn provisioned(services: &Services, user_id: &UserId) -> Result {
+	let complete = client::poll_until(PROVISIONING, async || {
+		services
+			.tasks
+			.by_resource(user_id.as_str())
+			.iter()
+			.any(|task| task.status == Status::Complete)
+	})
+	.await;
+
+	let tasks = services.tasks.by_resource(user_id.as_str());
+
+	assert!(complete, "{user_id} was provisioned: {tasks:?}");
+	assert_eq!(tasks.len(), 1, "{user_id} was provisioned once: {tasks:?}");
+
+	Ok(())
+}
+
+/// Sign in at the claiming provider as `<name>-sub` naming `localpart`, and
+/// expect the identity's fallback account.
+async fn refused(
+	services: &Services,
+	client: &Client,
+	base: &str,
+	name: &str,
+	localpart: &str,
+) -> Result {
+	let sub = format!("{name}-sub");
 	let response = sign_in(client, base, CLAIM_IDP, &sub, localpart).await?;
 
 	assert_eq!(

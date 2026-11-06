@@ -2,8 +2,9 @@
 //!
 //! An operator can create accounts before their owners first sign in, for
 //! example through an appservice that fills them with history from another
-//! system. With `claim_unlinked_accounts`, the first sign-in whose claims name
-//! such an account takes it, as long as nobody can sign in to it yet.
+//! system. Such an account is marked unclaimed when it is created. With
+//! `claim_unlinked_accounts`, the first sign-in whose claims name it takes it,
+//! as long as nobody can sign in to it yet.
 
 use std::fmt;
 
@@ -33,18 +34,39 @@ impl fmt::Debug for Claim {
 	}
 }
 
+/// Mark an account an appservice or an admin created without a password as
+/// unclaimed, so its owner's identity provider sign-in may claim it.
+///
+/// An account a person registered for themselves is never marked: anyone could
+/// otherwise register a name ahead of its owner and keep a way into it.
+#[implement(super::Service)]
+pub fn mark_unclaimed(&self, user_id: &UserId) { self.db.userid_unclaimed.insert(user_id, ""); }
+
+/// Whether an account carries the unclaimed mark.
+///
+/// A claim and a deactivation remove it.
+#[implement(super::Service)]
+pub async fn is_unclaimed(&self, user_id: &UserId) -> bool {
+	self.db
+		.userid_unclaimed
+		.get(user_id)
+		.await
+		.is_ok()
+}
+
 /// Turn an account nobody can sign in to into an SSO account, or change
 /// nothing and return `None`.
 ///
-/// The account gets the password sentinel and the SSO origin in one write, as
-/// SSO registration gives a new account. The caller has already refused names
-/// that are forbidden or that an appservice reserves exclusively, and links the
-/// identity while it holds the returned claim.
+/// The account gets the password sentinel and the SSO origin and loses its
+/// unclaimed mark in one write, as SSO registration gives a new account. The
+/// caller has already refused names that are forbidden or that an appservice
+/// reserves exclusively, and links the identity while it holds the returned
+/// claim.
 #[implement(super::Service)]
 pub async fn claim_unlinked(&self, user_id: &UserId) -> Option<Claim> {
 	let password_guard = self.changing_password.lock(user_id).await;
 
-	if !self.is_unclaimed(user_id).await {
+	if !self.is_claimable(user_id).await {
 		return None;
 	}
 
@@ -52,6 +74,7 @@ pub async fn claim_unlinked(&self, user_id: &UserId) -> Option<Claim> {
 
 	txn.insert_raw(&self.db.userid_origin, user_id, "sso");
 	txn.insert_raw(&self.db.userid_password, user_id, PASSWORD_SENTINEL);
+	txn.del_raw(&self.db.userid_unclaimed, user_id);
 	txn.execute();
 
 	Some(Claim { _password_guard: password_guard })
@@ -59,16 +82,17 @@ pub async fn claim_unlinked(&self, user_id: &UserId) -> Option<Claim> {
 
 /// Whether nobody can sign in to an existing local account.
 ///
-/// The account must not be the server user, must have the password or SSO
-/// origin (others sign in through LDAP, JWT or a delegated authentication
-/// service) and must hold no password. An empty password means the account
-/// was created without one unless a deactivation is recorded. It must have no
-/// device, whose token or keys someone holds, no identity linked and no
+/// The account must not be the server user and must carry the unclaimed mark.
+/// Its origin must be password or SSO (others sign in through LDAP, JWT or a
+/// delegated authentication service), it must hold no password, and an empty
+/// one must come with no recorded deactivation. It must not be locked, and must
+/// have no device, whose token or keys someone holds, no identity linked and no
 /// admin-approved association pending. Anything unreadable counts against it.
 #[implement(super::Service)]
-async fn is_unclaimed(&self, user_id: &UserId) -> bool {
+async fn is_claimable(&self, user_id: &UserId) -> bool {
 	if !self.services.globals.user_is_local(user_id)
 		|| user_id == self.services.globals.server_user
+		|| !self.is_unclaimed(user_id).await
 	{
 		return false;
 	}
@@ -92,6 +116,7 @@ async fn is_unclaimed(&self, user_id: &UserId) -> bool {
 
 	origin
 		&& passwordless
+		&& !self.is_locked(user_id).await
 		&& !self.has_devices(user_id).await
 		&& !self
 			.services

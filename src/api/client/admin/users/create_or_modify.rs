@@ -57,6 +57,12 @@ pub(crate) async fn admin_create_or_modify_route(
 			.users
 			.create(user_id, body.password.as_deref(), None)
 			.await?;
+
+		// Created without a password for a person who may later claim it by
+		// signing in through an identity provider.
+		if body.password.is_none() {
+			services.users.mark_unclaimed(user_id);
+		}
 	} else if let Some(password) = body.password.as_deref() {
 		services
 			.users

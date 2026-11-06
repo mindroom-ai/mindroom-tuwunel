@@ -651,23 +651,29 @@ account before their first sign-in, for example through an appservice's
 `/register`, and fill it with history. That sign-in then got a new account,
 because an existing account SSO did not create is skipped, while
 `trusted = true` also hands out accounts with passwords, devices or other
-identities. A provider with `claim_unlinked_accounts = true` (off by default)
-lets the identity whose claims name an existing account take it while nobody
-can sign in to it: not the server user, origin `password` or `sso`, no
-password (an empty one only without a recorded deactivation), no device, no
-linked identity and no pending admin-approved association. The account
-becomes an SSO account (sentinel password, origin `sso`) under its password
-lock, which is held until the identity's link is stored, so two identities
-cannot both claim it and a password change or deactivation waits. Any other
-account is skipped as before. The claiming sign-in then gives the account
-what SSO registration gives a new one, once: `auto_join_rooms`, and the
+identities. An account an appservice's `/register` or the admin API creates
+without a password is now marked unclaimed (`userid_unclaimed`), and a
+provider with `claim_unlinked_accounts = true` (off by default) lets the
+identity whose claims name a marked account take it while nobody can sign in
+to it: not the server user, origin `password` or `sso`, no password, not
+deactivated or locked, no device, no linked identity and no pending
+admin-approved association. Self-registered accounts are never marked, so
+nobody can register a name ahead of its owner and keep a way in. The account
+becomes an SSO account (sentinel password, origin `sso`, mark removed) under
+its password lock, which is held until the identity's link is stored, so two
+identities cannot both claim it and a password change or deactivation waits;
+deactivation now clears the password, records its reason and removes the mark
+under that one lock. Any other account is skipped as before. Once the sign-in
+passes the active and locked checks, a background task gives the account what
+SSO registration gives a new one, once: `auto_join_rooms`, then the
 identity's name and avatar where the account still has its registration
-defaults, but not the first user's admin grant. An unclaimed account stays
-claimable while the option is on, so operators turn it off after their
-migration. Upstream has no such option. Files: `src/core/config/mod.rs`,
-`tuwunel-example.toml`, `src/service/users/{claim.rs,register.rs}`,
-`src/service/oauth/sessions.rs`, `src/api/client/session/sso.rs`,
-`docs/authentication/providers.md`; test in
+defaults, and an admin-room notice, but not the first user's admin grant. An
+unclaimed account stays claimable while the option is on, so operators turn it
+off after their migration. Upstream has no such option. Files:
+`src/core/config/mod.rs`, `tuwunel-example.toml`, `src/database/maps.rs`,
+`src/service/users/{claim.rs,mod.rs,register.rs}`,
+`src/service/oauth/sessions.rs`, `src/api/client/admin/users/create_or_modify.rs`,
+`src/api/client/session/sso.rs`, `docs/authentication/providers.md`; test in
 `src/main/tests/sso_claim_unlinked_account.rs`.
 
 ### Knock state is checked before it is stored
