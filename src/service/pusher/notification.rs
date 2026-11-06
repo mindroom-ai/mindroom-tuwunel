@@ -1,6 +1,10 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use futures::{StreamExt, future::join4, stream::select};
+use futures::{
+	StreamExt,
+	future::{join, join4},
+	stream::select,
+};
 use ruma::{EventId, OwnedEventId, RoomId, UserId, events::receipt::ReceiptThread};
 use tuwunel_core::{
 	Result, implement,
@@ -28,6 +32,14 @@ type ThreadLastReads = BTreeMap<OwnedEventId, u64>;
 const RECOUNT_LIMIT: usize = 4096;
 type Unread = BTreeMap<Option<OwnedEventId>, (u64, u64)>;
 
+/// How far the user read one room: the whole room, as an unthreaded read
+/// does, and each context read on its own (`"main"` or a thread root).
+#[derive(Default)]
+struct ReadPositions {
+	room: Option<u64>,
+	contexts: Vec<(String, u64)>,
+}
+
 /// Retained for internal callers that explicitly read the present main timeline.
 #[implement(super::Service)]
 pub async fn reset_notification_counts(&self, user_id: &UserId, room_id: &RoomId) {
@@ -35,10 +47,45 @@ pub async fn reset_notification_counts(&self, user_id: &UserId, room_id: &RoomId
 		.await;
 }
 
+/// Keep inbox read flags and suppressed pushes aligned with the receipt's
+/// event and context. The bounded count-only recount remains independent.
+#[implement(super::Service)]
+pub async fn reset_notification_counts_for_thread(
+	&self,
+	user_id: &UserId,
+	room_id: &RoomId,
+	acknowledged: Option<&EventId>,
+	thread: &ReceiptThread,
+) {
+	if matches!(thread, ReceiptThread::Thread(root) if acknowledged == Some(root)) {
+		return;
+	}
+	let read_to = match acknowledged {
+		| Some(event) => match self.services.timeline.get_pdu_count(event).await {
+			| Ok(PduCount::Normal(count)) => count,
+			| _ => return,
+		},
+		| None => *self.services.globals.next_count(),
+	};
+	// Preserve legacy positions before the recount updates sync stamps. This
+	// lock covers position metadata only, never the bounded PDU recount scan.
+	{
+		let _lock = self
+			.notification_increment_mutex
+			.lock(&(room_id.to_owned(), user_id.to_owned()))
+			.await;
+		self.advance_read_position(user_id, room_id, thread, read_to)
+			.await;
+	}
+	self.clear_suppressed_room(user_id, room_id, thread, read_to);
+	self.recount_notification_counts_for_thread(user_id, room_id, acknowledged, thread)
+		.await;
+}
+
 /// Read only through the acknowledged event; an incomplete or raced recount
 /// keeps the previous counts. Own sends (`None`) still read their own context.
 #[implement(super::Service)]
-pub async fn reset_notification_counts_for_thread(
+async fn recount_notification_counts_for_thread(
 	&self,
 	user_id: &UserId,
 	room_id: &RoomId,
@@ -134,7 +181,6 @@ pub async fn reset_notification_counts_for_thread(
 		self.db
 			.roomuserid_lastnotificationread
 			.put((room_id, user_id), *stamp);
-		self.clear_suppressed_room(user_id, room_id);
 	}
 }
 
@@ -231,6 +277,157 @@ async fn unread_after(
 		counts.1 = counts.1.saturating_add(u64::from(highlight));
 	}
 	Some(unread)
+}
+
+/// Raise the position the user read `thread` up to in the room to `read_to`.
+///
+/// The first position stored for a room starts from the room's last-read
+/// stamps, which `/notifications` compared against before positions were kept,
+/// so notifications read then stay read.
+#[implement(super::Service)]
+async fn advance_read_position(
+	&self,
+	user_id: &UserId,
+	room_id: &RoomId,
+	thread: &ReceiptThread,
+	read_to: u64,
+) {
+	let mut positions = self.stored_read_positions(user_id, room_id).await;
+
+	if positions.room.is_none() && positions.contexts.is_empty() {
+		positions = self
+			.stamped_read_positions(user_id, room_id)
+			.await;
+
+		if let Some(position) = positions.room {
+			self.db
+				.roomuserthread_readposition
+				.put((room_id, user_id), position);
+		}
+
+		for (context, position) in &positions.contexts {
+			self.db
+				.roomuserthread_readposition
+				.put((room_id, user_id, context.as_str()), *position);
+		}
+	}
+
+	match thread {
+		| ReceiptThread::Main | ReceiptThread::Thread(_) => {
+			let context = thread.as_str().unwrap_or_default();
+			if positions
+				.context(context)
+				.is_none_or(|position| read_to > position)
+			{
+				self.db
+					.roomuserthread_readposition
+					.put((room_id, user_id, context), read_to);
+			}
+		},
+		| _ =>
+			if positions
+				.room
+				.is_none_or(|position| read_to > position)
+			{
+				self.db
+					.roomuserthread_readposition
+					.put((room_id, user_id), read_to);
+			},
+	}
+}
+
+/// Whether the user read the notified `event` at `count`: a read of the whole
+/// room reached it, or a read of its own context, its thread or the main
+/// timeline.
+#[implement(super::Service)]
+pub async fn notification_read<E>(&self, user_id: &UserId, event: &E, count: u64) -> bool
+where
+	E: Event + Send + Sync,
+{
+	let positions = self
+		.read_positions(user_id, event.room_id())
+		.await;
+
+	if positions
+		.room
+		.is_some_and(|position| position >= count)
+	{
+		return true;
+	}
+
+	let thread = self.services.threads.get_thread_id(event).await;
+	let context = thread.as_deref().map_or("main", EventId::as_str);
+
+	positions
+		.context(context)
+		.is_some_and(|position| position >= count)
+}
+
+/// How far the user read the room: the stored positions, or for a room with
+/// none yet, its last-read stamps.
+#[implement(super::Service)]
+async fn read_positions(&self, user_id: &UserId, room_id: &RoomId) -> ReadPositions {
+	let positions = self.stored_read_positions(user_id, room_id).await;
+
+	match positions.room.is_none() && positions.contexts.is_empty() {
+		| true =>
+			self.stamped_read_positions(user_id, room_id)
+				.await,
+		| false => positions,
+	}
+}
+
+#[implement(super::Service)]
+async fn stored_read_positions(&self, user_id: &UserId, room_id: &RoomId) -> ReadPositions {
+	let room = self
+		.db
+		.roomuserthread_readposition
+		.qry(&(room_id, user_id))
+		.await
+		.deserialized()
+		.ok();
+
+	let contexts = self
+		.db
+		.roomuserthread_readposition
+		.stream_prefix(&(room_id, user_id, Interfix))
+		.ignore_err()
+		.map(|((_, _, context), position): ((Ignore, Ignore, &str), u64)| {
+			(context.to_owned(), position)
+		})
+		.collect()
+		.await;
+
+	ReadPositions { room, contexts }
+}
+
+/// The read positions the last-read stamps imply: the main stamp, which main
+/// and unthreaded reads both wrote, for the whole room, and each thread's for
+/// its thread.
+#[implement(super::Service)]
+async fn stamped_read_positions(&self, user_id: &UserId, room_id: &RoomId) -> ReadPositions {
+	let (room, threads) = join(
+		self.last_notification_read(user_id, room_id),
+		self.thread_last_notification_reads(user_id, room_id),
+	)
+	.await;
+
+	ReadPositions {
+		room: room.ok(),
+		contexts: threads
+			.into_iter()
+			.map(|(root, position)| (root.to_string(), position))
+			.collect(),
+	}
+}
+
+impl ReadPositions {
+	fn context(&self, context: &str) -> Option<u64> {
+		self.contexts
+			.iter()
+			.find(|(stored, _)| stored == context)
+			.map(|&(_, position)| position)
+	}
 }
 
 #[implement(super::Service)]
@@ -415,6 +612,11 @@ pub async fn delete_room_notification_read(&self, room_id: &RoomId) -> Result {
 				.roomuserid_lastnotificationread
 				.remove(key);
 		})
+		.await;
+
+	self.db
+		.roomuserthread_readposition
+		.del_prefix(&key)
 		.await;
 
 	Ok(())

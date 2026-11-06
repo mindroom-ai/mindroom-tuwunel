@@ -1,4 +1,4 @@
-use futures::StreamExt;
+use futures::{StreamExt, future::join};
 use ruma::{
 	OwnedRoomId, OwnedUserId, RoomId, UserId, api::client::push::Pusher, presence::PresenceState,
 	push::Ruleset,
@@ -176,11 +176,21 @@ async fn flush_suppressed_room(
 	room_id: OwnedRoomId,
 	pdu_ids: Vec<RawPduId>,
 ) -> usize {
-	let unread = self
-		.services
-		.pusher
-		.notification_count(flush.user_id, &room_id)
-		.await;
+	// Threads count apart from the main timeline; a room is read only when
+	// both are.
+	let (main, threads) = join(
+		self.services
+			.pusher
+			.notification_count(flush.user_id, &room_id),
+		self.services
+			.pusher
+			.thread_notification_counts(flush.user_id, &room_id),
+	)
+	.await;
+
+	let unread = threads
+		.values()
+		.fold(main, |unread, &(notifications, _)| unread.saturating_add(notifications));
 
 	if unread == 0 {
 		trace!(user_id = ?flush.user_id, ?room_id, "Skipping suppressed push flush: no unread");
@@ -223,10 +233,14 @@ async fn flush_suppressed_pdu(
 		return true;
 	};
 
-	let requeued = self
-		.services
-		.pusher
-		.queue_suppressed_push(user_id, pushkey, room_id, pdu_id);
+	let thread = self.services.threads.get_thread_id(pdu).await;
+	let requeued = self.services.pusher.queue_suppressed_push(
+		user_id,
+		pushkey,
+		room_id,
+		pdu_id,
+		thread.as_deref(),
+	);
 
 	warn!(
 		?user_id,
@@ -251,16 +265,18 @@ pub(super) async fn enqueue_suppressed_push_events(
 		.stream()
 		.ready_filter_map(|event| extract_variant!(event, SendingEvent::Pdu))
 		.wide_filter_map(async |pdu_id| {
-			self.suppressable_pdu(user_id, pdu_id)
-				.await
-				.map(|pdu| (pdu_id, pdu))
+			let pdu = self.suppressable_pdu(user_id, pdu_id).await?;
+			let thread = self.services.threads.get_thread_id(&pdu).await;
+
+			Some((pdu_id, pdu, thread))
 		})
-		.ready_fold(0, |queued: usize, (pdu_id, pdu)| {
+		.ready_fold(0, |queued: usize, (pdu_id, pdu, thread)| {
 			let accepted = self.services.pusher.queue_suppressed_push(
 				user_id,
 				pushkey,
 				pdu.room_id(),
 				*pdu_id,
+				thread.as_deref(),
 			);
 
 			queued.saturating_add(usize::from(accepted))

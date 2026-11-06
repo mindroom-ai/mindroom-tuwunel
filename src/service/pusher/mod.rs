@@ -226,6 +226,7 @@ struct Data {
 	userroomid_highlightcount: Arc<Map>,
 	userroomid_notificationcount: Arc<Map>,
 	roomuserid_lastnotificationread: Arc<Map>,
+	roomuserthread_readposition: Arc<Map>,
 }
 
 impl crate::Service for Service {
@@ -242,6 +243,7 @@ impl crate::Service for Service {
 				userroomid_notificationcount: args.db["userroomid_notificationcount"].clone(),
 				roomuserid_lastnotificationread: args.db["roomuserid_lastnotificationread"]
 					.clone(),
+				roomuserthread_readposition: args.db["roomuserthread_readposition"].clone(),
 			},
 			suppressed: suppressed::SuppressedQueue::default(),
 			sent_badges: SentBadges::default(),

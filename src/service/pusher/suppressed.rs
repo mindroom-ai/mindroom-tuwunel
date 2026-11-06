@@ -8,8 +8,15 @@ use std::{
 	sync::Mutex,
 };
 
-use ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId};
-use tuwunel_core::{debug, implement, trace, utils};
+use ruma::{
+	EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UserId,
+	events::receipt::ReceiptThread,
+};
+use tuwunel_core::{
+	debug, implement,
+	matrix::pdu::{PduCount, PduId},
+	trace, utils,
+};
 
 use crate::rooms::timeline::RawPduId;
 
@@ -43,7 +50,21 @@ struct PushkeyQueue {
 #[derive(Clone, Debug)]
 struct SuppressedEvent {
 	pdu_id: RawPduId,
+	thread: Option<OwnedEventId>,
 	_inserted_at_ms: u64,
+}
+
+impl SuppressedEvent {
+	/// Whether a read in `thread` up to `read_to` covers this event.
+	fn read_by(&self, thread: &ReceiptThread, read_to: u64) -> bool {
+		let in_context = match thread {
+			| ReceiptThread::Main => self.thread.is_none(),
+			| ReceiptThread::Thread(root) => self.thread.as_ref() == Some(root),
+			| _ => true,
+		};
+
+		in_context && PduId::from(self.pdu_id).count <= PduCount::Normal(read_to)
+	}
 }
 
 impl SuppressedQueue {
@@ -73,6 +94,9 @@ impl SuppressedQueue {
 }
 
 /// Enqueue a PDU for later push delivery when suppression is active.
+///
+/// `thread` is the root of the thread the PDU is in, which decides the reads
+/// that drop it from the queue.
 #[implement(super::Service)]
 pub fn queue_suppressed_push(
 	&self,
@@ -80,6 +104,7 @@ pub fn queue_suppressed_push(
 	pushkey: &str,
 	room_id: &RoomId,
 	pdu_id: RawPduId,
+	thread: Option<&EventId>,
 ) -> bool {
 	let mut inner = self.suppressed.lock();
 	let user_entry = inner.entry(user_id.to_owned()).or_default();
@@ -132,6 +157,7 @@ pub fn queue_suppressed_push(
 
 	queue.push_back(SuppressedEvent {
 		pdu_id,
+		thread: thread.map(ToOwned::to_owned),
 		_inserted_at_ms: utils::millis_since_unix_epoch(),
 	});
 	push_entry.total_events = push_entry.total_events.saturating_add(1);
@@ -183,9 +209,19 @@ pub fn take_suppressed_for_user(&self, user_id: &UserId) -> SuppressedPushes {
 		.collect()
 }
 
-/// Clear suppressed PDUs for a specific room (across all pushkeys).
+/// Clear the suppressed PDUs of a room that a read in `thread` up to
+/// `read_to` covers (across all pushkeys).
+///
+/// A read of the main timeline leaves the queued replies of threads, and a
+/// read of one thread the rest of the room.
 #[implement(super::Service)]
-pub fn clear_suppressed_room(&self, user_id: &UserId, room_id: &RoomId) -> usize {
+pub fn clear_suppressed_room(
+	&self,
+	user_id: &UserId,
+	room_id: &RoomId,
+	thread: &ReceiptThread,
+	read_to: u64,
+) -> usize {
 	let mut inner = self.suppressed.lock();
 	let Some(user_entry) = inner.get_mut(user_id) else {
 		return 0;
@@ -193,11 +229,17 @@ pub fn clear_suppressed_room(&self, user_id: &UserId, room_id: &RoomId) -> usize
 
 	let mut removed: usize = 0;
 	user_entry.retain(|_, push_entry| {
-		if let Some(queue) = push_entry.rooms.remove(room_id) {
-			removed = removed.saturating_add(queue.len());
-			push_entry.total_events = push_entry
-				.total_events
-				.saturating_sub(queue.len());
+		if let Some(queue) = push_entry.rooms.get_mut(room_id) {
+			let before = queue.len();
+			queue.retain(|event| !event.read_by(thread, read_to));
+
+			let cleared = before.saturating_sub(queue.len());
+			removed = removed.saturating_add(cleared);
+			push_entry.total_events = push_entry.total_events.saturating_sub(cleared);
+
+			if queue.is_empty() {
+				push_entry.rooms.remove(room_id);
+			}
 		}
 
 		!push_entry.rooms.is_empty()
@@ -228,4 +270,53 @@ pub fn clear_suppressed_pushkey(&self, user_id: &UserId, pushkey: &str) -> usize
 	}
 
 	removed
+}
+
+#[cfg(test)]
+mod tests {
+	use ruma::{EventId, OwnedEventId, events::receipt::ReceiptThread};
+	use tuwunel_core::matrix::pdu::{PduCount, PduId};
+
+	use super::SuppressedEvent;
+
+	fn event(count: u64, thread: Option<&str>) -> SuppressedEvent {
+		SuppressedEvent {
+			pdu_id: PduId {
+				shortroomid: 1,
+				count: PduCount::Normal(count),
+			}
+			.into(),
+			thread: thread.map(|root| <&EventId>::try_from(root).unwrap().to_owned()),
+			_inserted_at_ms: 0,
+		}
+	}
+
+	fn root() -> OwnedEventId {
+		<&EventId>::try_from("$root:example.org")
+			.unwrap()
+			.to_owned()
+	}
+
+	#[test]
+	fn a_read_covers_its_context_up_to_its_position() {
+		let main = event(10, None);
+		let reply = event(10, Some("$root:example.org"));
+		let other = event(10, Some("$other:example.org"));
+
+		for (thread, covered) in [
+			(ReceiptThread::Main, [true, false, false]),
+			(ReceiptThread::Thread(root()), [false, true, false]),
+			(ReceiptThread::Unthreaded, [true, true, true]),
+		] {
+			let read = [&main, &reply, &other].map(|event| event.read_by(&thread, 10));
+
+			assert_eq!(read, covered, "{thread:?} up to the events");
+			assert!(
+				[&main, &reply, &other]
+					.iter()
+					.all(|event| !event.read_by(&thread, 9)),
+				"{thread:?} before the events"
+			);
+		}
+	}
 }

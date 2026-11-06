@@ -309,6 +309,32 @@ No column or index is added. Inbox read flags and per-thread suppressed pushes
 are a separate draft change. Tests cover old receipts, both marker fields,
 cross-room traffic, overflow, and a concurrent send behind 100,000 sibling rows.
 
+### Notification read flags and suppressed pushes follow receipt positions
+
+`/notifications` marked a notification read when the room's last main or
+unthreaded read came after it, comparing with the time of that read, so a
+`main` receipt marked every earlier thread reply read, and any receipt every
+event before the moment it was sent. Synapse compares each notification with
+the position of a receipt of the user in the room, whatever its thread. The
+server now keeps the position each read reaches: one for the whole room,
+written by unthreaded reads, and one per context. A main timeline event is
+read when the whole-room or the main position reaches it, a thread event when
+the whole-room or its thread's position does. A room without positions yet,
+as after an upgrade, is compared with the times of its reads as before, and
+its first read copies them in, so notifications read before stay read.
+
+With `suppress_push_when_active`, a main or unthreaded read dropped every push
+queued for the room, thread replies and events after the read included, and a
+flush skipped a room whose main timeline was read even with unread threads. A
+read now drops only the queued pushes of its context up to its position, and a
+flush goes ahead while any context of the room has unread notifications.
+
+Files: `src/service/pusher/{mod.rs,notification.rs,suppressed.rs}`,
+`src/service/sending/sender/dispatch/push/suppressed.rs`,
+`src/api/client/push/notifications.rs`, and `src/database/maps.rs`.
+Tests: `src/main/tests/notification_read_position.rs` and the suppressed-push
+unit test. This is parked separately from the bounded count-only fix in #140.
+
 ### A withdrawn knock does not move a former member's departure
 
 Under `shared` history visibility a former member reads events up to their
