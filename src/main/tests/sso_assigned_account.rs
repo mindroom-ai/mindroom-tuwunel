@@ -553,13 +553,9 @@ async fn chained(services: &Services, base: &str, client: &Client) -> Result {
 
 	// A listed address naming the carried account is refused when the provider
 	// says it is unverified.
-	let response = chain(
-		client,
-		base,
-		("chain-first", "chainfirst"),
-		("unverified-chain", "chainfirst"),
-	)
-	.await?;
+	let response =
+		chain(client, base, ("chain-first", "chainfirst"), ("unverified-chain", "chainfirst"))
+			.await?;
 
 	assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
@@ -567,7 +563,10 @@ async fn chained(services: &Services, base: &str, client: &Client) -> Result {
 	let message = error["error"].as_str().unwrap_or_default();
 
 	assert!(message.contains("unverified"), "{message}");
-	assert!(unlinked(services, "unverified-chain").await?, "unverified-chain is linked to nothing");
+	assert!(
+		unlinked(services, "unverified-chain").await?,
+		"unverified-chain is linked to nothing"
+	);
 
 	// An unlisted address of the second provider joins the carried account.
 	let response =

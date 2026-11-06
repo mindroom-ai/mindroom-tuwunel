@@ -650,7 +650,7 @@ async fn complete_sso_session(
 		};
 
 		let assigned_user_id = assigned_account(services, provider, &userinfo);
-		let (user_id, held) = match (session.user_id, old_user_id) {
+		let (user_id, mut held) = match (session.user_id, old_user_id) {
 			// A chained identity without a link of its own takes the carried
 			// account, which a listed address must name, verified.
 			| (Some(user_id), old_user_id) => match assigned_user_id {
@@ -726,6 +726,18 @@ async fn complete_sso_session(
 			};
 
 			register_user(services, provider, &session, &userinfo, &user_id, origin).await?;
+
+			// A new account is held from its creation (which takes the same lock)
+			// until its link is stored, so no assignment links it meanwhile; one
+			// that got in first keeps it and this sign-in is refused.
+			if held.is_none() {
+				held = Some(
+					services
+						.users
+						.hold_unlinked_account(&user_id)
+						.await?,
+				);
+			}
 		}
 
 		Ok((session, (user_id, held)))
