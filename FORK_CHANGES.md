@@ -673,27 +673,31 @@ because an existing account SSO did not create is skipped, and
 `trusted = true` hands out any account whose name the claims give. A
 provider's `assigned_accounts` maps email addresses, matched ignoring ASCII
 case, to local user IDs. The config check requires local IDs and distinct
-addresses; the map is read live, so a reload applies. An identity with no account yet whose `email`
-claim is listed gets that account and no other: the sign-in is refused, with
-a warning naming the reason, when the provider says the address is unverified
-(`email_verified` false, as a boolean or a string), or the account does not
-exist, is the server user, is deactivated (an empty password with a recorded
-reason, or a mark in the column a migrated database left; anything unreadable
-counts), or is linked to any identity, including one adopted from another
-server's database. A chained sign-in is refused when its listed address names
-another account than the one it carries. The checks are made under the
-account's password lock, which is held until the link is stored; only then
-does an account with an empty password get the sentinel and origin `sso`, in
-one synchronous write with a warning, so no reader finds it unlinked. Other
-accounts keep their password and origin. Deactivation now writes the empty
-password and its reason in one transaction under that lock. Unlisted
-addresses and later sign-ins work as before. Upstream has no such option.
-Files: `src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
-`src/service/users/{mod.rs,sso.rs,tests.rs}`,
+addresses; the map is read live, so a reload applies. An identity with no
+account yet whose `email` claim is listed gets that account and no other:
+the sign-in is refused, with a warning naming the reason, when the provider
+says the address is unverified (`email_verified` false, as a boolean or a
+string), or the account does not exist or cannot be read, is the server
+user, is deactivated (an empty password with a recorded reason, or a mark
+in the column a migrated database left; anything unreadable counts), or is
+linked to any identity, including one adopted from another server's
+database. A chained sign-in whose identity has no link yet is refused when
+its listed address names another account than the one it carries. The
+checks are made under the account's password lock, held until the link is
+stored, and an account with an empty password gets the sentinel and origin
+`sso` in the same write batch as the link, with a warning; other accounts
+keep their password and origin. A first sign-in that takes an existing
+account because no identity is linked to it (an identity's fallback
+username) now holds that lock as well and checks the links again under
+it, so it cannot link an account an assignment linked meanwhile.
+Deactivation writes the empty password and its reason in one transaction
+under that lock. Unlisted addresses and later sign-ins work as before.
+Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,
+`tuwunel-example.toml`, `src/service/users/{mod.rs,sso.rs,tests.rs}`,
 `src/service/oauth/{sessions.rs,user_info.rs}`,
-`src/api/client/session/sso.rs`, `docs/authentication/providers.md`; tests in
-`src/main/tests/sso_assigned_account.rs`, `src/service/users/tests.rs` and
-`src/core/config/tests.rs`.
+`src/api/client/session/sso.rs`, `docs/authentication/providers.md`; tests
+in `src/main/tests/sso_assigned_account.rs`, `src/service/users/tests.rs`
+and `src/core/config/tests.rs`.
 
 ### Knock state is checked before it is stored
 

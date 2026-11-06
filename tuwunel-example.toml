@@ -4262,13 +4262,12 @@
 # sign-in gets that account, or is refused if the account is missing, the
 # server user, deactivated, or linked to another identity, or if the provider
 # says the address is unverified; one with an empty password becomes an SSO
-# account. Whoever controls a listed address gets the account: use this only
-# with a provider where people cannot choose or change their address without
-# proving they own it, never a public or multi-tenant one or one whose users
-# edit their own address. List only accounts created for these people: one
-# deactivated before deactivation reasons were recorded has none and would be
-# reactivated. Remove entries once their people have signed in. A reload
-# applies to the next sign-in.
+# account. Whoever controls a listed address gets the account: use this with
+# an app restricted to your own organization, not a multi-tenant one, and not
+# with a provider whose users can set or edit their address unverified. List
+# only accounts created for these people: one deactivated before deactivation
+# reasons were recorded has none and would be reactivated. Remove entries
+# once their people have signed in. A reload applies to the next sign-in.
 #
 #assigned_accounts = {}
 

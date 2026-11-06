@@ -21,7 +21,7 @@ use tuwunel_core::{
 	warn,
 };
 use tuwunel_database::{
-	Cbor, Database, Deserialized, Ignore, KeyVal, Map, deserialize_from_slice,
+	Cbor, Database, Deserialized, Ignore, KeyVal, Map, Txn, deserialize_from_slice,
 };
 use url::Url;
 
@@ -247,7 +247,7 @@ pub async fn put(&self, session: &Session) {
 		| None => None,
 	};
 
-	self.put_locked(session, unique_id.as_deref())
+	self.put_locked(session, unique_id.as_deref(), |_| ())
 		.await;
 }
 
@@ -263,9 +263,29 @@ pub async fn commit_identity_session<T, F, Fut>(
 	build: F,
 ) -> Result<(Session, T, Option<SessionId>)>
 where
-	T: Send,
+	T: Send + Sync,
 	F: FnOnce(Option<OwnedUserId>) -> Fut + Send,
 	Fut: Future<Output = Result<(Session, T)>> + Send,
+{
+	self.commit_identity_session_with(unique_id, build, |_, _| ())
+		.await
+}
+
+/// Like `commit_identity_session`, with `also` adding the caller's writes for
+/// the callback's value to the batch that commits the session.
+#[implement(Sessions)]
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn commit_identity_session_with<T, F, Fut, A>(
+	&self,
+	unique_id: &str,
+	build: F,
+	also: A,
+) -> Result<(Session, T, Option<SessionId>)>
+where
+	T: Send + Sync,
+	F: FnOnce(Option<OwnedUserId>) -> Fut + Send,
+	Fut: Future<Output = Result<(Session, T)>> + Send,
+	A: FnOnce(&T, &mut Txn) + Send,
 {
 	let write_guard = self.write_locks.lock(unique_id).await;
 	let existing = self
@@ -280,14 +300,20 @@ where
 	let old_user_id = existing.and_then(|session| session.user_id);
 	let (session, value) = build(old_user_id).await?;
 
-	self.put_locked(&session, Some(unique_id)).await;
+	self.put_locked(&session, Some(unique_id), |txn| also(&value, txn))
+		.await;
 	drop(write_guard);
 
 	Ok((session, value, old_sess_id))
 }
 
 #[implement(Sessions)]
-async fn put_locked(&self, session: &Session, unique_id: Option<&str>) {
+async fn put_locked(
+	&self,
+	session: &Session,
+	unique_id: Option<&str>,
+	also: impl FnOnce(&mut Txn) + Send,
+) {
 	let sess_id = session
 		.sess_id
 		.as_deref()
@@ -322,6 +348,7 @@ async fn put_locked(&self, session: &Session, unique_id: Option<&str>) {
 		txn.raw_put(&self.db.userid_oauthid, user_id, sess_ids);
 	}
 
+	also(&mut txn);
 	txn.execute();
 }
 

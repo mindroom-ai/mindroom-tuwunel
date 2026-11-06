@@ -650,10 +650,11 @@ async fn complete_sso_session(
 		};
 
 		let assigned_user_id = assigned_account(services, provider, &userinfo);
-		let (user_id, assigned) = match (session.user_id, old_user_id) {
-			// A chained sign-in carries its account, which a listed address must name.
-			| (Some(user_id), ..) => match assigned_user_id {
-				| Some(assigned) if assigned != user_id =>
+		let (user_id, held) = match (session.user_id, old_user_id) {
+			// A chained identity without a link of its own takes the carried
+			// account, which a listed address must name.
+			| (Some(user_id), old_user_id) => match assigned_user_id {
+				| Some(assigned) if old_user_id.is_none() && assigned != user_id =>
 					return Err!(Request(Forbidden(warn!(
 						"This sign-in is assigned to {assigned}, not {user_id}, which it \
 						 carries."
@@ -672,10 +673,33 @@ async fn complete_sso_session(
 						.users
 						.assign_sso_account(&user_id)
 						.await?;
+
+					info!(
+						provider = provider.id(),
+						sub = %userinfo.sub,
+						%user_id,
+						"Linking the assigned account."
+					);
 					(user_id, Some(assignment))
 				},
-				| None =>
-					(decide_user_id(services, provider, &userinfo, &unique_id).await?, None),
+				| None => {
+					let (user_id, unlinked) =
+						decide_user_id(services, provider, &userinfo, &unique_id).await?;
+
+					// An account given because no identity is linked to it is held until
+					// this link is stored, so no assignment links it meanwhile.
+					let held = match unlinked {
+						| true => Some(
+							services
+								.users
+								.hold_unlinked_account(&user_id)
+								.await?,
+						),
+						| false => None,
+					};
+
+					(user_id, held)
+				},
 			},
 		};
 
@@ -698,28 +722,26 @@ async fn complete_sso_session(
 			register_user(services, provider, &session, &userinfo, &user_id, origin).await?;
 		}
 
-		Ok((session, (user_id, assigned)))
+		Ok((session, (user_id, held)))
 	};
 
-	let (session, (user_id, assigned), old_sess_id) = services
+	// An assigned account without a password becomes an SSO account in the
+	// batch that links it, so no reader finds one without the other.
+	let (session, (user_id, held), old_sess_id) = services
 		.oauth
 		.sessions
-		.commit_identity_session(&unique_id, complete_identity)
+		.commit_identity_session_with(&unique_id, complete_identity, |(user_id, held), txn| {
+			if held.as_ref().is_some_and(at!(1)) {
+				services
+					.users
+					.convert_assigned_account(txn, user_id);
+			}
+		})
 		.await?;
 
-	// The link is stored, so the assignment completes, synchronously, and the
-	// account is released before the steps below lock it.
-	if let Some(assignment) = assigned {
-		services
-			.users
-			.complete_sso_assignment(&user_id, assignment);
-		info!(
-			provider = provider.id(),
-			sub = %userinfo.sub,
-			%user_id,
-			"Linked the assigned account."
-		);
-	}
+	// The link is stored, so the account is released before the steps below
+	// lock it.
+	drop(held);
 
 	if services
 		.users
@@ -992,6 +1014,8 @@ fn assigned_account(
 		.map(|(_, user_id)| user_id.clone())
 }
 
+/// Returns the user ID, and whether it names an existing account given only
+/// because no identity is linked to it.
 #[tracing::instrument(
 	level = "debug",
 	ret(level = "debug")
@@ -1003,7 +1027,7 @@ async fn decide_user_id(
 	provider: &Provider,
 	userinfo: &UserInfo,
 	unique_id: &str,
-) -> Result<OwnedUserId> {
+) -> Result<(OwnedUserId, bool)> {
 	if let Some(user_id) = services
 		.oauth
 		.sessions
@@ -1016,7 +1040,7 @@ async fn decide_user_id(
 			"Matched pending association"
 		);
 
-		return Ok(user_id);
+		return Ok((user_id, false));
 	}
 
 	let explicit = |claim: &str| provider.userid_claims.contains(claim);
@@ -1058,13 +1082,17 @@ async fn decide_user_id(
 
 	for choice in choices.into_iter().flatten() {
 		if let Some(user_id) = try_user_id(services, provider, &choice, false).await {
-			return Ok(user_id);
+			return Ok((user_id, false));
 		}
 	}
 
+	// Without `trusted`, an existing account here is the identity's fallback,
+	// which try_user_id gives only while no identity is linked to it.
 	let localpart = fallback_localpart(unique_id);
 	if let Some(user_id) = try_user_id(services, provider, &localpart, true).await {
-		return Ok(user_id);
+		let unlinked = !provider.trusted && services.users.exists(&user_id).await;
+
+		return Ok((user_id, unlinked));
 	}
 
 	Err!(Request(UserInUse("User ID is not available.")))

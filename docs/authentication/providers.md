@@ -72,7 +72,7 @@ please refer to the section on [environment variables](#configuring-via-environm
 |---|---|---|
 | `userid_claims` | all | Claims used to compute the Matrix localpart for new registrations. When empty, Tuwunel avoids generated IDs where possible. The special value `"unique"` forces generated IDs exclusively. The claim `"sub"` takes precedence over all others when listed. |
 | `trusted` | `false` | Inverts user matching: instead of registering a new account when claims conflict with existing users, Tuwunel finds the first matching user and grants access to it. **Only set this for providers you self-host and fully control. Never use with public providers (GitHub, GitLab, Google, etc.); it enables account takeover.** For migrated databases, prefer durable bulk adoption or individual association to temporarily enabling this option. |
-| `assigned_accounts` | `{}` | Assigns existing local accounts to people by the address in their `email` claim, matched ignoring ASCII case. A listed address's first sign-in gets that account or is refused, never another account. **Only for providers where people cannot choose or change their address without proving they own it; whoever controls a listed address gets the account.** See [Assigning accounts created before the first sign-in](#assigning-accounts-created-before-the-first-sign-in). |
+| `assigned_accounts` | `{}` | Assigns existing local accounts to people by the address in their `email` claim, matched ignoring ASCII case. A listed address's first sign-in gets that account or is refused, never another account. **Only for an app restricted to your own organization; whoever controls a listed address gets the account.** See [Assigning accounts created before the first sign-in](#assigning-accounts-created-before-the-first-sign-in). |
 | `unique_id_fallbacks` | `true` | When no claim maps cleanly to an available username, generate a unique random localpart as a fallback. Set to `false` on private servers where random usernames are undesirable — a misconfiguration will produce an error instead. |
 | `registration` | `true` | Whether this provider can create new Matrix accounts. Set to `false` to restrict the provider to existing users only. |
 
@@ -287,20 +287,22 @@ that claim (request the `email` scope):
 
 ```toml
 [[global.identity_provider]]
-# A provider your organization runs, where people cannot set their own address.
+# An app restricted to your own organization.
 client_id = "tuwunel"
 # ...
 assigned_accounts = { "alice@example.com" = "@alice:example.com" }
 ```
 
-**Use this only with a provider where people cannot choose or change their
-address without proving they own it.** Whoever controls a listed address gets
-the account and everything in it. Never use it with public or multi-tenant
-providers (GitHub, GitLab, Google, etc.), or with a provider whose users can
-edit their own profile's address, as Keycloak allows unless that is turned
-off. A sign-in whose provider says the address is unverified
-(`email_verified` false) is refused; most providers do not send the claim,
-and its absence is not checked.
+**Use this with an app restricted to your own organization**, such as a Google
+Workspace app with the "Internal" user type or a single-tenant Microsoft Entra
+ID app, whose addresses the organization assigns. Whoever controls a listed
+address gets the account and everything in it. Avoid multi-tenant apps, and
+providers whose users can set or edit their own address without verifying it
+(Keycloak, for one, lets users edit their email unless verification is
+required). A sign-in whose provider says the address is unverified
+(`email_verified` false) is refused. Many providers send that claim, such as
+Google, Keycloak, Okta, Auth0, GitLab and Authentik; others, such as Microsoft
+Entra ID and GitHub, do not, and its absence is not checked.
 
 Each value must be a local user ID, and no address may be listed twice; the
 server refuses to start otherwise. Addresses are compared ignoring ASCII case
@@ -311,10 +313,11 @@ the reason, when the account does not exist, is the server user, is
 deactivated, or is already linked to an identity (also one adopted from
 another server's database). A chained sign-in through several default
 providers is refused when a listed address names an account other than the
-one the chain carries. Otherwise the identity is linked to the account, which
-the log records. An account with an empty password, such as one an appservice
-registered, becomes an SSO account (origin `sso`, no password) once the link
-is stored, with a warning in the log; an account with a password or another
+one the chain carries, unless that identity is already linked. Otherwise the
+identity is linked to the account, which the log records. An account with an
+empty password, such as one an appservice registered, becomes an SSO account
+(origin `sso`, no password) in the same write that stores the link, with a
+warning in the log; an account with a password or another
 sign-in system's marker keeps it. The person's later sign-ins follow the link;
 addresses not listed are mapped as described below. Joining rooms and setting
 profiles is left to whatever created the accounts.

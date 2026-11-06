@@ -1,16 +1,16 @@
 use futures::StreamExt;
 use ruma::{OwnedUserId, UserId};
 use tuwunel_core::{
-	Err, Result, utils,
+	Err, Error, Result, utils,
 	utils::{MutexMapGuard, result::NotFound},
 	warn,
 };
-use tuwunel_database::Deserialized;
+use tuwunel_database::{Deserialized, Txn};
 
 use super::{PASSWORD_SENTINEL, Service};
 
-/// An account assigned to a signing-in identity: its password lock, and
-/// whether it has an empty password.
+/// An account a first sign-in links: its password lock, held until the link
+/// is stored, and whether the account has an empty password to convert.
 pub type SsoAssignment = (MutexMapGuard<OwnedUserId, ()>, bool);
 
 /// Why deactivations carry a reason. Fork-only: neither Synapse nor upstream
@@ -104,14 +104,6 @@ impl Service {
 			.ok()
 	}
 
-	/// Stores why an account was deactivated.
-	#[inline]
-	pub fn set_deactivation_reason(&self, user_id: &UserId, reason: DeactivationReason) {
-		self.db
-			.userid_deactivation_reason
-			.insert(user_id, reason.as_str());
-	}
-
 	/// Compatibility repair for legacy SSO users whose origin was accidentally
 	/// rewritten to `password` during account creation.
 	pub async fn maybe_repair_legacy_sso_origin(&self, user_id: &UserId) -> bool {
@@ -153,14 +145,16 @@ impl Service {
 	}
 
 	/// Check the account `assigned_accounts` gives a signing-in identity that
-	/// has none yet. The assignment holds the account's password lock, and says
-	/// whether it has an empty password, until `complete_sso_assignment`.
+	/// has none yet. The assignment holds the account's password lock until the
+	/// link is stored, and says whether the account has an empty password.
 	pub async fn assign_sso_account(&self, user_id: &UserId) -> Result<SsoAssignment> {
 		let guard = self.changing_password.lock(user_id).await;
-		let empty = self.is_deactivated(user_id).await.unwrap_or(true);
+		let password = self.password_hash(user_id).await;
+		let empty = password.as_deref().is_ok_and(str::is_empty);
 		let refusals = [
 			(user_id == self.services.globals.server_user, "is the server user"),
-			(!self.exists(user_id).await, "does not exist"),
+			(password.as_ref().is_err_and(Error::is_missing), "does not exist"),
+			(password.is_err(), "cannot be read"),
 			(empty && self.deactivation_recorded(user_id).await, "is deactivated"),
 			(
 				self.services
@@ -181,20 +175,33 @@ impl Service {
 		Ok((guard, empty))
 	}
 
-	/// Complete an assignment once the identity's link is stored: only then
-	/// does an account with an empty password become one SSO signs in to, so
-	/// no reader finds it unlinked. Other accounts keep their password and
-	/// origin. The account's password lock is released.
-	pub fn complete_sso_assignment(&self, user_id: &UserId, (guard, empty): SsoAssignment) {
-		if empty {
-			warn!(%user_id, "Making the assigned account, without a password, an SSO account.");
-			let mut txn = self.services.db.txn();
-			txn.insert_raw(&self.db.userid_origin, user_id, "sso");
-			txn.insert_raw(&self.db.userid_password, user_id, PASSWORD_SENTINEL);
-			txn.execute();
+	/// Hold an existing account a first sign-in takes because no identity is
+	/// linked to it, until the link is stored. It is refused if another
+	/// identity, such as an assignment's, was linked to it meanwhile.
+	pub async fn hold_unlinked_account(&self, user_id: &UserId) -> Result<SsoAssignment> {
+		let guard = self.changing_password.lock(user_id).await;
+
+		if self
+			.services
+			.oauth
+			.sessions
+			.is_linked(user_id)
+			.await
+		{
+			return Err!(Request(UserInUse(warn!(
+				"{user_id} was linked to another identity meanwhile."
+			))));
 		}
 
-		drop(guard);
+		Ok((guard, false))
+	}
+
+	/// Make an assigned account without a password one SSO signs in to, in the
+	/// batch that stores its link, so no reader finds one without the other.
+	pub fn convert_assigned_account(&self, txn: &mut Txn, user_id: &UserId) {
+		warn!(%user_id, "Making the assigned account, without a password, an SSO account.");
+		txn.insert_raw(&self.db.userid_origin, user_id, "sso");
+		txn.insert_raw(&self.db.userid_password, user_id, PASSWORD_SENTINEL);
 	}
 
 	/// Whether a deactivation is recorded for the account, here or in the

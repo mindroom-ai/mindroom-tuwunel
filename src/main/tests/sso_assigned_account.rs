@@ -7,7 +7,16 @@
 mod client;
 mod fixture;
 
-use std::{collections::HashMap, net::TcpListener, pin::pin, time::Duration};
+use std::{
+	collections::HashMap,
+	env::{current_exe, var},
+	fs::remove_dir_all,
+	net::TcpListener,
+	path::{Path, PathBuf},
+	pin::pin,
+	process::Command,
+	time::Duration,
+};
 
 use axum::{
 	Form, Json, Router,
@@ -16,13 +25,18 @@ use axum::{
 	routing::{get, post},
 };
 use axum_server::from_tcp;
-use futures::future::select;
+use futures::{
+	FutureExt, TryFutureExt,
+	future::{join, select},
+};
 use reqwest::{
 	Client, Response, StatusCode, Url,
 	header::{AUTHORIZATION, COOKIE, LOCATION, SET_COOKIE},
 	redirect::Policy,
 };
+use rust_rocksdb::{DB, Options};
 use serde_json::{Value, json};
+use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{
 	Err, Result,
 	config::check::reload,
@@ -62,11 +76,18 @@ const ASSIGNED: &str = r#"{
 	"gina@example.com" = "@gina:localhost",
 	"kim@example.com" = "@kim:localhost",
 	"lee@example.com" = "@lee:localhost",
+	"mig@example.com" = "@mig:localhost",
 	"nobody@example.com" = "@nobody:localhost",
 	"pat@example.com" = "@pat:localhost",
 	"server@example.com" = "@conduit:localhost",
-	"uma@example.com" = "@uma:localhost"
+	"uma@example.com" = "@uma:localhost",
+	"vera@example.com" = "@vera:localhost"
 }"#;
+
+/// Environment of a child process that runs one phase of
+/// `sso_assigned_migrated_deactivation` on a database that outlives it.
+const PHASE_ENV: &str = "SSO_ASSIGNED_PHASE";
+const DATABASE_ENV: &str = "SSO_ASSIGNED_DATABASE";
 
 /// Two default providers, so a sign-in at the first continues at the second,
 /// carrying its account; the second assigns Hank's account.
@@ -90,11 +111,173 @@ fn sso_assigned_account() -> Result {
 	let provider = TcpListener::bind(("127.0.0.1", 0))?;
 	let issuer = format!("http://{}", provider.local_addr()?);
 
+	provider.set_nonblocking(true)?;
+
+	boot(
+		"sso-assigned-account",
+		provider_options(&issuer),
+		async move |services, base| {
+			let serve = serve_provider(provider, issuer);
+
+			select(pin!(serve), pin!(exercise(services, base)))
+				.await
+				.factor_first()
+				.0
+		},
+	)
+}
+
+/// An account another server's database marks deactivated in a column of its
+/// own, which its migration left with an empty password and no reason, is
+/// refused.
+///
+/// The column is written while no server holds the database, between a
+/// child process that creates the account and one that signs in.
+#[test]
+fn sso_assigned_migrated_deactivation() -> Result {
+	if let Ok(phase) = var(PHASE_ENV) {
+		let database = PathBuf::from(var(DATABASE_ENV).expect("the phase names its database"));
+
+		return match phase.as_str() {
+			| "create" => boot_at(&database, true, Vec::new(), async |services, _| {
+				let mig = UserId::parse_with_server_name("mig", services.globals.server_name())?;
+
+				services.users.create(&mig, None, None).await
+			}),
+			| "assign" => assign_migrated(&database),
+			| _ => Err!("unknown phase {phase}"),
+		};
+	}
+
+	let database = Args::test_database_path("sso-assigned-migrated");
+	let outcome = run_phase(&database, "create")
+		.and_then(|()| mark_deactivated(&database))
+		.and_then(|()| run_phase(&database, "assign"));
+
+	remove_dir_all(&database).ok();
+	outcome
+}
+
+/// Sign in, in the second phase, naming the account the first created.
+fn assign_migrated(database: &Path) -> Result {
+	let provider = TcpListener::bind(("127.0.0.1", 0))?;
+	let issuer = format!("http://{}", provider.local_addr()?);
+
+	provider.set_nonblocking(true)?;
+
+	boot_at(database, false, provider_options(&issuer), async move |services, base| {
+		let serve = serve_provider(provider, issuer);
+		let refusal = async {
+			refused(services, &test_client()?, base, "mig", "mig", "is deactivated").await
+		};
+
+		select(pin!(serve), pin!(refusal))
+			.await
+			.factor_first()
+			.0
+	})
+}
+
+/// Run one phase of `sso_assigned_migrated_deactivation` in a child process.
+fn run_phase(database: &Path, phase: &str) -> Result {
+	let output = Command::new(current_exe()?)
+		.args(["--exact", "sso_assigned_migrated_deactivation"])
+		.env(PHASE_ENV, phase)
+		.env(DATABASE_ENV, database)
+		.output()?;
+
+	if !output.status.success() {
+		let stdout = String::from_utf8_lossy(&output.stdout);
+		let stderr = String::from_utf8_lossy(&output.stderr);
+
+		return Err!("phase {phase} failed: {}\n{stdout}\n{stderr}", output.status);
+	}
+
+	Ok(())
+}
+
+/// Mark the account deactivated in the column another server's database keeps.
+fn mark_deactivated(database: &Path) -> Result {
+	let opts = Options::default();
+	let columns = DB::list_cf(&opts, database).map_err(|e| err!("{e}"))?;
+	let db = DB::open_cf(&opts, database, &columns).map_err(|e| err!("{e}"))?;
+
+	db.create_cf("userid_deactivated", &opts)
+		.map_err(|e| err!("{e}"))?;
+
+	let marks = db
+		.cf_handle("userid_deactivated")
+		.ok_or_else(|| err!("the column was just created"))?;
+
+	db.put_cf(&marks, "@mig:localhost", b"")
+		.map_err(|e| err!("{e}"))?;
+	db.flush_wal(true).map_err(|e| err!("{e}"))
+}
+
+/// Boot a server on `database` and run one exercise on it, as `fixture::boot`
+/// does, but keeping the database; `fresh` creates it anew.
+fn boot_at<Exercise>(
+	database: &Path,
+	fresh: bool,
+	options: Vec<String>,
+	exercise: Exercise,
+) -> Result
+where
+	Exercise: AsyncFnOnce(&Services, &str) -> Result,
+{
+	let listener = TcpListener::bind(("127.0.0.1", 0))?;
+	let address = listener.local_addr()?;
+	let tests: &[&str] = if fresh { &["fresh"] } else { &[] };
+	let args = Args::default_test(tests)
+		.with_database_path(database)
+		.with_option(format!("address=[\"{}\"]", address.ip()))
+		.with_option(format!("port={}", address.port()))
+		.with_option("listening=true");
+
+	let args = options.into_iter().fold(args, Args::with_option);
+	let runtime = Runtime::new(Some(&args))?;
+	let server = Server::new(Some(&args), Some(&runtime))?;
+	let outcome = runtime.block_on(async {
+		let services = async_start(&server).await?;
+		let base = format!("http://{address}");
+
+		drop(listener);
+
+		let session = async {
+			let outcome = client::wait_until_ready(&services, &base)
+				.and_then(|()| exercise(&services, &base))
+				.boxed_local()
+				.await;
+
+			let shutdown = server.server.shutdown();
+
+			outcome.and(shutdown)
+		};
+
+		let (running, outcome) = join(async_run(&server), session).await;
+
+		drop(services);
+
+		async_stop(&server)
+			.await
+			.and(running)
+			.and(outcome)
+	});
+
+	drop(runtime);
+
+	outcome
+}
+
+/// The test's providers: the one assigning accounts, and a chain of two
+/// default ones, all served by one stand-in at `issuer`.
+fn provider_options(issuer: &str) -> Vec<String> {
 	let option =
 		|idp: &str, key: &str, value: &str| format!("identity_provider.{idp}.{key}={value}");
 
 	let assigned = ASSIGNED.replace(['\n', '\t'], "");
-	let options = [IDP, CHAIN[0], CHAIN[1]]
+
+	[IDP, CHAIN[0], CHAIN[1]]
 		.into_iter()
 		.flat_map(|idp| {
 			[
@@ -116,18 +299,14 @@ fn sso_assigned_account() -> Result {
 				r#"{ "hank@example.com" = "@hank:localhost" }"#,
 			),
 		])
-		.collect::<Vec<_>>();
+		.collect()
+}
 
-	provider.set_nonblocking(true)?;
-
-	boot("sso-assigned-account", options, async move |services, base| {
-		let serve = serve_provider(provider, issuer);
-
-		select(pin!(serve), pin!(exercise(services, base)))
-			.await
-			.factor_first()
-			.0
-	})
+fn test_client() -> Result<Client> {
+	Ok(Client::builder()
+		.redirect(Policy::none())
+		.timeout(Duration::from_secs(10))
+		.build()?)
 }
 
 /// Serve the identity provider endpoints until the test is done.
@@ -184,16 +363,15 @@ async fn userinfo(headers: HeaderMap) -> Json<Value> {
 	// Some providers send the claim as a string.
 	if sub.starts_with("unverified") {
 		claims["email_verified"] = json!("false");
+	} else if sub.starts_with("verified") {
+		claims["email_verified"] = json!(true);
 	}
 
 	Json(claims)
 }
 
 async fn exercise(services: &Services, base: &str) -> Result {
-	let client = Client::builder()
-		.redirect(Policy::none())
-		.timeout(Duration::from_secs(10))
-		.build()?;
+	let client = test_client()?;
 
 	register_appservice(services).await?;
 
@@ -212,6 +390,16 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let response = sign_in(&client, base, "alice", "Alice").await?;
 
 	assert_eq!(signed_in(services, &response).await?, alice);
+
+	// A provider that says the address is verified is believed, and the claim
+	// survives the stored session.
+	let vera = register_ahead(services, base, "vera").await?;
+
+	for _ in 0..2 {
+		let response = sign_in(&client, base, "verified-vera", "vera").await?;
+
+		assert_eq!(signed_in(services, &response).await?, vera);
+	}
 
 	// An account with a password, or another sign-in system's marker, keeps it.
 	let pat = UserId::parse_with_server_name("pat", services.globals.server_name())?;
@@ -341,24 +529,13 @@ async fn refusals(services: &Services, base: &str, client: &Client) -> Result {
 }
 
 /// A chained sign-in whose listed address names another account than the one
-/// it carries is refused, and the carried account is left alone.
+/// it carries is refused, and the carried account is left alone. A chained
+/// identity with a link of its own follows it.
 async fn chained(services: &Services, base: &str, client: &Client) -> Result {
 	let hank = register_ahead(services, base, "hank").await?;
-	let response = sign_in_at(client, base, CHAIN[0], "chain-first", "chainfirst").await?;
 	let carried = UserId::parse_with_server_name("chainfirst", services.globals.server_name())?;
-
-	assert_eq!(linked_account(services, "chain-first").await?, carried);
-
-	// The first provider hands over to the second instead of the client.
-	let state = parameter(&location(&response)?, "state");
-	let cookie = cookie(&response);
-	let url = format!("{base}/_matrix/client/unstable/login/sso/callback/{}", CHAIN[1]);
-	let response = client
-		.get(url)
-		.query(&[("code", "chain-second:hank"), ("state", &state)])
-		.header(COOKIE, cookie)
-		.send()
-		.await?;
+	let response =
+		chain(client, base, ("chain-first", "chainfirst"), ("chain-second", "hank")).await?;
 
 	assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
@@ -370,10 +547,42 @@ async fn chained(services: &Services, base: &str, client: &Client) -> Result {
 	assert_eq!(linked_account(services, "chain-first").await?, carried);
 	assert_eq!(services.users.password_hash(&hank).await?, "");
 
+	// An unlisted address of the second provider joins the carried account.
+	let response =
+		chain(client, base, ("chain-first", "chainfirst"), ("chain-linked", "chainlinked"))
+			.await?;
+
+	assert_eq!(signed_in(services, &response).await?, carried);
+	assert_eq!(linked_account(services, "chain-linked").await?, carried);
+
 	Ok(())
 }
 
-/// An address a reload adds is assigned at the next sign-in.
+/// Sign in at the first default provider, which hands over to the second, and
+/// return the second callback's response.
+async fn chain(
+	client: &Client,
+	base: &str,
+	(first_sub, first_localpart): (&str, &str),
+	(sub, localpart): (&str, &str),
+) -> Result<Response> {
+	let response = sign_in_at(client, base, CHAIN[0], first_sub, first_localpart).await?;
+	let state = parameter(&location(&response)?, "state");
+	let url = format!("{base}/_matrix/client/unstable/login/sso/callback/{}", CHAIN[1]);
+	let code = format!("{sub}:{localpart}");
+
+	client
+		.get(url)
+		.query(&[("code", code.as_str()), ("state", &state)])
+		.header(COOKIE, cookie(&response))
+		.send()
+		.await
+		.map_err(Into::into)
+}
+
+/// Addresses a reload lists are assigned at the next sign-in, and a chained
+/// identity already linked keeps following its link when a reload lists its
+/// address for another account.
 async fn reloaded(services: &Services, base: &str, client: &Client) -> Result {
 	let rita = register_ahead(services, base, "rita").await?;
 	let response = sign_in(client, base, "rita-early", "rita").await?;
@@ -381,23 +590,33 @@ async fn reloaded(services: &Services, base: &str, client: &Client) -> Result {
 	assert_eq!(signed_in(services, &response).await?, fallback(services, "rita-early").await?);
 
 	let mut config = (*services.server.config.clone()).clone();
+	let mut assign = |idp: &str, address: &str, user_id: &UserId| {
+		config
+			.identity_provider
+			.values_mut()
+			.filter(|provider| provider.id() == idp)
+			.for_each(|provider| {
+				provider
+					.assigned_accounts
+					.insert(address.to_owned(), user_id.to_owned());
+			});
+	};
 
-	config
-		.identity_provider
-		.values_mut()
-		.filter(|provider| provider.id() == IDP)
-		.for_each(|provider| {
-			provider
-				.assigned_accounts
-				.insert("rita@example.com".to_owned(), rita.clone());
-		});
-
+	assign(IDP, "rita@example.com", &rita);
+	assign(CHAIN[1], "chainlinked@example.com", &rita);
 	reload(&services.config, &config)?;
 	services.server.config.update(config)?;
 
 	let response = sign_in(client, base, "rita", "rita").await?;
 
 	assert_eq!(signed_in(services, &response).await?, rita);
+
+	let carried = UserId::parse_with_server_name("chainfirst", services.globals.server_name())?;
+	let response =
+		chain(client, base, ("chain-first", "chainfirst"), ("chain-linked", "chainlinked"))
+			.await?;
+
+	assert_eq!(signed_in(services, &response).await?, carried);
 
 	Ok(())
 }
@@ -410,7 +629,7 @@ async fn register_appservice(services: &Services) -> Result {
 	let namespaces = Namespaces {
 		users: vec![Namespace::new(
 			true,
-			"^@(alice|carol|dave|gina|hank|kim|rita|uma):.*$".to_owned(),
+			"^@(alice|carol|dave|gina|hank|kim|rita|uma|vera):.*$".to_owned(),
 		)],
 		..Default::default()
 	};
