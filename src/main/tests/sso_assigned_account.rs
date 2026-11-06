@@ -364,9 +364,14 @@ async fn userinfo(headers: HeaderMap) -> Json<Value> {
 	// Header values are ASCII, so the KELVIN SIGN, which lowercases to `k`, is
 	// spelled out.
 	let localpart = localpart.replace("KELVIN", "\u{212A}");
+	// An address at another domain shares its local part with a listed one.
+	let domain = match sub.starts_with("elsewhere") {
+		| true => "elsewhere.example",
+		| false => "example.com",
+	};
 	let mut claims = json!({
 		"sub": sub,
-		"email": format!("{localpart}@example.com"),
+		"email": format!("{localpart}@{domain}"),
 	});
 
 	// Some providers send the claim as a string.
@@ -475,6 +480,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 	refusals(services, base, &client).await?;
 	chained(services, base, &client).await?;
+	reserved(services, base, &client).await?;
 	reloaded(services, base, &client).await
 }
 
@@ -618,6 +624,22 @@ async fn chain(
 		.send()
 		.await
 		.map_err(Into::into)
+}
+
+/// An unlisted address whose name is a listed account gets the identity's
+/// fallback, and the listed account, which does not exist yet and is outside
+/// the appservice's namespace, is not created: it is only for its address.
+async fn reserved(services: &Services, base: &str, client: &Client) -> Result {
+	let nobody = UserId::parse_with_server_name("nobody", services.globals.server_name())?;
+	let response = sign_in(client, base, "elsewhere-nobody", "nobody").await?;
+
+	assert_eq!(
+		signed_in(services, &response).await?,
+		fallback(services, "elsewhere-nobody").await?
+	);
+	assert!(!services.users.exists(&nobody).await, "the listed account is not created");
+
+	Ok(())
 }
 
 /// Addresses a reload lists are assigned at the next sign-in, and a chained

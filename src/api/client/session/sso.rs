@@ -725,6 +725,8 @@ async fn complete_sso_session(
 		// is stored (creating it takes the same lock), so no assignment links it
 		// meanwhile; one that got in first keeps it and this sign-in is refused. A
 		// name chosen as free that someone else created since is not this one's.
+		// Listed accounts are skipped by name already; the hold also covers one a
+		// config reload lists after the name was chosen.
 		if let Some(existed) = taken {
 			if !existed && !created {
 				return Err!(Request(UserInUse(warn!(
