@@ -1046,6 +1046,31 @@ Behavior:
   state types, the delegated restart without an access token, and the
   endpoints that list scheduled and finished events.
 
+### `/messages` ends at the room's creation event
+
+A backward `/messages` page that reached the room's creation event still gave
+an `end` token, so a client asked again and only an empty page without `end`
+ended the history. The spec omits `end` when no further events exist. Synapse
+also gives `end` with the page holding the creation event, and omits it on
+the empty page after. A backward page that reaches the creation event now
+gives no `end`, also when a filter leaves the creation event out or the page
+is full because it ends exactly there. A page that ends at the oldest local
+event of a room whose earlier history is not stored yet keeps its `end`, so
+the next request can backfill. Upstream has the same bug. File:
+`src/api/client/message.rs`; test in
+`src/main/tests/messages_pagination_bounds.rs`.
+
+### The last `/notifications` page has no `next_token`
+
+Every non-empty `/notifications` page carried a `next_token`, also the page
+that reached the oldest notification, so clients asked for one more, empty
+page, and an inbox kept offering older notifications until then. The spec
+gives `next_token` only while more results exist. Synapse also gives it on
+every non-empty page. A page now reads one notification past its limit and
+gives `next_token` only when that notification exists. Upstream has the same
+bug. File: `src/api/client/push/notifications.rs`; test in
+`src/main/tests/notifications_next_token.rs`.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`

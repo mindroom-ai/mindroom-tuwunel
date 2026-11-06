@@ -196,7 +196,7 @@ pub(crate) async fn get_messages(
 	};
 
 	let events: Vec<_> = it
-		.inspect(|(count, _)| scanned = Some(*count))
+		.inspect(|(count, pdu)| scanned = Some((*count, is_room_create(pdu))))
 		.ready_take_while(|(count, _)| !reached_to(*count))
 		.ready_filter_map(|item| event_filter(item, filter))
 		.wide_filter_map(|item| related_by_filter(services, shortroomid, filter, item))
@@ -240,9 +240,21 @@ pub(crate) async fn get_messages(
 
 	// `inspect` records the rejected boundary item, distinguishing a `to` stop
 	// from stream exhaustion.
-	let stopped_at_to = scanned.is_some_and(reached_to);
+	let stopped_at_to = scanned.is_some_and(|(count, _)| reached_to(count));
 	let exhausted = matches!(dir, Direction::Backward) && events.len() < limit && !stopped_at_to;
-	let next_token = if exhausted { scanned } else { events.last().map(at!(0)) };
+	let edge = match exhausted {
+		| true => scanned,
+		| false => events
+			.last()
+			.map(|(count, pdu)| (*count, is_room_create(pdu))),
+	};
+
+	// Nothing precedes the room's creation event, so a backward page that
+	// reaches it ends the history and gives no `end` (the spec omits it when no
+	// further events exist).
+	let next_token = edge
+		.filter(|&(_, create)| !(create && matches!(dir, Direction::Backward)))
+		.map(at!(0));
 
 	let chunk = events
 		.into_iter()
@@ -416,6 +428,12 @@ where
 pub(crate) fn event_filter(item: PdusIterItem, filter: &RoomEventFilter) -> Option<PdusIterItem> {
 	let (_, pdu) = &item;
 	filter.matches(pdu).then_some(item)
+}
+
+/// Whether `pdu` is the room's creation event, the first event of its history.
+#[inline]
+fn is_room_create(pdu: &PduEvent) -> bool {
+	*pdu.kind() == RoomCreate && pdu.state_key() == Some("")
 }
 
 /// MSC4115: stamp `unsigned.membership` on a served PDU with the requesting
