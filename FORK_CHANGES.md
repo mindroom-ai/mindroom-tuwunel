@@ -1012,6 +1012,41 @@ gives `next_token` only when that notification exists. Upstream has the same
 bug. File: `src/api/client/push/notifications.rs`; test in
 `src/main/tests/notifications_next_token.rs`.
 
+### The user directory leaves out deactivated accounts
+
+On servers that list all local users (`show_all_local_users_in_user_directory
+= true`), `/user_directory/search` otherwise returns deactivated accounts with
+the active ones, and with the option off it still returns one that keeps a
+room membership. Synapse removes an account from its directory when it is
+deactivated; upstream Tuwunel (checked on `main`, `d5151f783`) has no such
+filter.
+
+Files: `src/api/client/user_directory.rs`; tests in
+`src/mindroom-tests/tests/user_directory_deactivated.rs` (option on) and
+`src/mindroom-tests/tests/user_directory_deactivated_rooms.rs` (option off),
+with helpers in `src/mindroom-tests/tests/support/directory.rs`.
+
+Behavior:
+- A local account is left out of every search, whatever
+  `show_all_local_users_in_user_directory` and
+  `show_appservice_users_in_user_directory` say, when its stored password is
+  empty and a deactivation is recorded for it (`deactivation_recorded`, the
+  same test SSO assignment uses: a recorded reason, or a mark in the column a
+  migrated database left; anything unreadable counts). Every deactivation
+  this server performs goes through `deactivate_account`, which records the
+  reason, and every reactivation replaces the empty password.
+- An empty password alone does not hide an account: remote users, appservice
+  senders, and users created without a password store one too, and keep
+  their earlier visibility.
+- Accounts deactivated with neither a reason nor a mark stay listed: those
+  deactivated before the fork started recording reasons (release
+  `v1.5.0-mindroom.16`, 2026-03-04), and deactivations imported from Conduit
+  databases. Running
+  `!admin users deactivate --no-leave-rooms <user>` again on such an account
+  records a reason and hides it; SSO self-reactivation stays refused.
+- The appservice filtering and the public-room and shared-room rules are
+  unchanged.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
@@ -1302,9 +1337,11 @@ device-key immutability/cleanup/
 concurrency, real gateway stream/invite notifications and finished-stream
 unread counts, and audience-bound
 OpenID tokens with the option on and off (`openid_audience.rs`,
-`openid_audience_disabled.rs`), and OpenID userinfo room membership
-(`openid_room_membership.rs`). Stream classification
-also has unit tests in `src/service/pusher/tests.rs`.
+`openid_audience_disabled.rs`), OpenID userinfo room membership
+(`openid_room_membership.rs`), and deactivated accounts left out of the user
+directory with `show_all_local_users_in_user_directory` on and off
+(`user_directory_deactivated.rs`, `user_directory_deactivated_rooms.rs`).
+Stream classification also has unit tests in `src/service/pusher/tests.rs`.
 
 The v1.9.3 rebase adds pins for its semantic overlaps:
 `uiaa_sso_policy.rs` (the advertised UIAA flows per account origin and
