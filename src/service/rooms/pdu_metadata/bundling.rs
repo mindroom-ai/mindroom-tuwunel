@@ -556,11 +556,11 @@ const REPLY: &str = "io.mindroom.latest_reply";
 /// Thread relation rows, and edit rows per preview, read for the previews.
 const PREVIEW_ROWS: usize = 50;
 
-/// MindRoom previews beside the standard thread summary: the newest title (a
-/// thread event with an `io.mindroom.thread_summary` object, from the root's
-/// sender or a sender of a conversational reply in the window) and the newest
-/// conversational reply, each with its newest valid edit the requester may
-/// see. Unencrypted rooms only; a field outside the window is omitted.
+/// MindRoom previews beside the standard thread summary: the newest title (an
+/// `m.notice` thread event with an `io.mindroom.thread_summary` object) and
+/// the newest other thread event, each with its newest valid edit the
+/// requester may see. Unencrypted rooms only; a field outside the window is
+/// omitted.
 #[implement(Service)]
 async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result {
 	let services = &self.services;
@@ -576,7 +576,6 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 	thread.remove(TITLE);
 	thread.remove(REPLY);
 	if !access.is_encrypted_room(root.room_id()).await
-		&& access.user_can_see_event(user, root).await
 		&& let Ok(root_id) = services
 			.timeline
 			.get_pdu_id(root.event_id())
@@ -596,25 +595,15 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 				pdu.room_id() == root.room_id()
 					&& pdu.state_key().is_none()
 					&& *pdu.kind() != TimelineEventType::RoomEncrypted
-			})
-			.map(|(count, pdu)| {
-				let title = pdu
-					.get_content::<Value>()
-					.is_ok_and(|content| content["io.mindroom.thread_summary"].is_object());
-				(count, title, pdu)
-			})
-			.collect::<Vec<_>>()
-			.await;
-		let authors: BTreeSet<_> = replies
-			.iter()
-			.filter(|(_, title, _)| !title)
-			.map(|(_, _, pdu)| pdu.sender().to_owned())
-			.chain([root.sender().to_owned()])
-			.collect();
-		for (count, title, mut child) in replies {
+			});
+		pin_mut!(replies);
+		while let Some((count, mut child)) = replies.next().await {
+			let title = child.get_content::<Value>().is_ok_and(|content| {
+				content["msgtype"] == "m.notice"
+					&& content["io.mindroom.thread_summary"].is_object()
+			});
 			let field = if title { TITLE } else { REPLY };
 			if thread.contains_key(field)
-				|| (title && !authors.contains(child.sender()))
 				|| ignored.ignored_users.contains_key(child.sender())
 				|| config.is_forbidden_remote_server_name(child.sender().server_name())
 				|| !self.preview_visible(user, &child).await

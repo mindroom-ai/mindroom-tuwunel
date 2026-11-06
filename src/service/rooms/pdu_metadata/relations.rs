@@ -76,7 +76,7 @@ pub fn add_relation(&self, from: PduCount, to: PduCount) {
 
 	match from {
 		| PduCount::Normal(from) => {
-			let key: &[u64] = &[u64::from_be_bytes(to.to_be_bytes()), from];
+			let key: &[u64] = &[to.into_unsigned(), from];
 
 			self.db
 				.tofrom_relation

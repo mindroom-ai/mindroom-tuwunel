@@ -68,13 +68,13 @@ mod tests {
 
 		let case = fresh_device(&router, &base).await;
 		let outer = endpoint_bundles(&services, &router, &base, &room, &case).await;
-		redactions_and_rebuild(&services, &router, &base, &case, &outer).await?;
+		redactions(&router, &base, &case, &outer).await;
 		ignored_users(&router, &base).await;
 		bounded_seeks(&router, &base).await;
 		history_visibility(&router, &base, &case).await;
-		authorship(&router).await;
+		title_rule(&router).await;
 		backfilled_root(&services, &router, &base).await?;
-		large_room(&services, &router, &base).await;
+		large_room(&router, &base).await;
 		marker_and_encryption(&router, &base, &case.root).await;
 		Ok(())
 	}
@@ -106,18 +106,19 @@ mod tests {
 		);
 
 		let edit = send(router, base, OWNER, "edit", json!({"msgtype":"m.notice","body":"* final answer","m.new_content":{"msgtype":"m.notice","body":"final answer","io.mindroom.thread_summary":{"title":"must not promote this reply"}},"m.relates_to":{"rel_type":"m.replace","event_id":reply}})).await;
-		let newest_title =
-			send(router, base, OWNER, "new-title", title(&root, "new topic")).await;
-		// A marked ordinary member's event remains a standard thread event,
-		// but cannot overwrite the trusted title or become a display reply.
-		let spoof = send(router, base, MEMBER, "spoof", title(&root, "forged")).await;
+		// A member who never posted in the thread renames it, as both clients
+		// write a manual title.
+		let mut rename = title(&root, "renamed topic");
+		rename["io.mindroom.thread_summary"] =
+			json!({"version":1,"summary":"renamed topic","model":"manual","pinned":true});
+		let newest_title = send(router, base, MEMBER, "rename", rename).await;
 		let served = event(router, base, MEMBER, &root).await;
 		let summary = &served["unsigned"]["m.relations"]["m.thread"];
 		assert_eq!(
-			summary["latest_event"]["event_id"], spoof,
-			"unauthorized metadata remains the standard latest event"
+			summary["latest_event"]["event_id"], newest_title,
+			"the rename remains the standard latest event"
 		);
-		assert_eq!(summary["count"], 4, "edits do not increment the direct thread count");
+		assert_eq!(summary["count"], 3, "edits do not increment the direct thread count");
 		assert_eq!(
 			summary["current_user_participated"], true,
 			"metadata sends still count as participation"
@@ -219,13 +220,7 @@ mod tests {
 		send(router, base, OWNER, "outer", thread(root, "m.text", "newer reply")).await
 	}
 
-	async fn redactions_and_rebuild(
-		services: &Services,
-		router: &Router,
-		base: &str,
-		case: &ThreadCase,
-		outer: &str,
-	) -> Result {
+	async fn redactions(router: &Router, base: &str, case: &ThreadCase, outer: &str) {
 		let root = case.root.as_str();
 		let reply = case.reply.as_str();
 		let first_title = case.first_title.as_str();
@@ -251,28 +246,6 @@ mod tests {
 				.is_none(),
 			"redacted edits must not be bundled"
 		);
-
-		// Older binaries never wrote preview rows. Reads must use native relations,
-		// even when the typed relation index has no preview data after rollback.
-		services.db["relatesto_typed"].clear().await;
-		let unindexed = event(router, base, MEMBER, root).await;
-		assert_eq!(
-			unindexed["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["event_id"],
-			first_title,
-			"previews must not depend on derived index rows after rollback"
-		);
-		services
-			.pdu_metadata
-			.rebuild_typed_relations()
-			.await?;
-		let served = event(router, base, MEMBER, root).await;
-		assert_eq!(
-			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["event_id"],
-			first_title,
-			"native edit-index rebuild must not change thread titles"
-		);
-
-		Ok(())
 	}
 
 	async fn ignored_users(router: &Router, base: &str) {
@@ -329,15 +302,15 @@ mod tests {
 			json!({"msgtype":"m.text","body":"bounded lookup"}),
 		)
 		.await;
-		send(router, base, OWNER, "bounded-reply", thread(&root, "m.text", "answer")).await;
-		send(router, base, OWNER, "bounded-title", title(&root, "trusted")).await;
+		send(router, base, OWNER, "bounded-title", title(&root, "old topic")).await;
+		let mut newest = String::new();
 		for index in 0..50 {
-			send(
+			newest = send(
 				router,
 				base,
 				MEMBER,
-				&format!("bounded-forgery-{index}"),
-				title(&root, "forged"),
+				&format!("bounded-reply-{index}"),
+				thread(&root, "m.text", "more"),
 			)
 			.await;
 		}
@@ -346,13 +319,13 @@ mod tests {
 		let summary = &served["unsigned"]["m.relations"]["m.thread"];
 		assert!(
 			summary.get("io.mindroom.title").is_none(),
-			"exhausted seek must stop before the older authorized title"
+			"a title outside the fifty-row window is omitted"
 		);
-		assert!(
-			summary.get("io.mindroom.latest_reply").is_none(),
-			"a reply outside the shared fifty-row bound is omitted"
+		assert_eq!(
+			summary["io.mindroom.latest_reply"]["event_id"], newest,
+			"the newest reply is served"
 		);
-		eprintln!("PREVIEW_FLOOD rows=50 elapsed_ms={}", start.elapsed().as_millis());
+		eprintln!("PREVIEW_BOUND rows=50 elapsed_ms={}", start.elapsed().as_millis());
 	}
 
 	async fn history_visibility(router: &Router, base: &str, case: &ThreadCase) {
@@ -426,7 +399,7 @@ mod tests {
 		);
 	}
 
-	async fn authorship(router: &Router) {
+	async fn title_rule(router: &Router) {
 		let room = request(
 			router,
 			"POST",
@@ -442,74 +415,34 @@ mod tests {
 		let base = base.as_str();
 		request(router, "POST", &format!("{base}/join"), MEMBER, json!({})).await;
 		let root =
-			send(router, base, OWNER, "auth-root", json!({"msgtype":"m.text","body":"question"}))
+			send(router, base, OWNER, "rule-root", json!({"msgtype":"m.text","body":"question"}))
 				.await;
-		send(router, base, OWNER, "auth-owner-reply", thread(&root, "m.text", "answer")).await;
-		let trusted =
-			send(router, base, OWNER, "auth-owner-title", title(&root, "trusted topic")).await;
-		let mut early = String::new();
-		for index in 0..3 {
-			early = send(
-				router,
-				base,
-				MEMBER,
-				&format!("auth-early-title-{index}"),
-				title(&root, "early topic"),
-			)
-			.await;
-		}
+		send(router, base, OWNER, "rule-reply", thread(&root, "m.text", "answer")).await;
+		send(router, base, OWNER, "rule-title", title(&root, "first topic")).await;
+		// An agent retitling a thread it never replied in, at power level zero.
+		let retitle = send(router, base, MEMBER, "rule-retitle", title(&root, "renamed")).await;
 		let served = event(router, base, OWNER, &root).await;
 		assert_eq!(
 			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["event_id"],
-			trusted,
-			"a sender without a reply or the root cannot hide a real title within the bound"
+			retitle,
+			"any sender's marked notice is the newest title"
 		);
-		let reply =
-			send(router, base, MEMBER, "auth-member-reply", thread(&root, "m.text", "DM answer"))
-				.await;
-		let served = event(router, base, OWNER, &root).await;
-		assert_eq!(
-			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["event_id"], early,
-			"a reply qualifies its sender's earlier titles, such as a tool call's"
-		);
-		// The root's sender may title its thread without replying, like a
-		// welcome message or an automation prompt.
-		let welcome = send(
-			router,
-			base,
-			MEMBER,
-			"auth-welcome",
-			json!({"msgtype":"m.text","body":"welcome"}),
-		)
-		.await;
-		let welcome_title =
-			send(router, base, MEMBER, "auth-welcome-title", title(&welcome, "Welcome")).await;
-		send(router, base, OWNER, "auth-welcome-forgery", title(&welcome, "forged welcome"))
-			.await;
-		let served = event(router, base, OWNER, &welcome).await;
-		assert_eq!(
-			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["event_id"],
-			welcome_title,
-			"the root's sender may title its thread; a sender who did not reply may not"
-		);
-		// The responding member stays at the DM preset's default power level zero.
-		let approved =
-			send(router, base, MEMBER, "auth-member-title", title(&root, "DM topic")).await;
-		let edit = send(router, base, MEMBER, "auth-member-title-edit", json!({"msgtype":"m.notice","body":"* revised DM topic","m.new_content":{"msgtype":"m.notice","body":"revised DM topic","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":approved}})).await;
+		// Only an `m.notice` is a title, as the clients read it.
+		let mut text = thread(&root, "m.text", "marked text");
+		text["io.mindroom.thread_summary"] = json!({"summary":"not a title"});
+		let text = send(router, base, MEMBER, "rule-marked-text", text).await;
+		let edit = send(router, base, MEMBER, "rule-retitle-edit", json!({"msgtype":"m.notice","body":"* revised","m.new_content":{"msgtype":"m.notice","body":"revised","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":retitle}})).await;
 		let served = event(router, base, OWNER, &root).await;
 		let summary = &served["unsigned"]["m.relations"]["m.thread"];
+		assert_eq!(summary["io.mindroom.title"]["event_id"], retitle, "{summary}");
 		assert_eq!(
-			summary["io.mindroom.title"]["event_id"], approved,
-			"a responding power-zero DM member can title the thread"
-		);
-		assert_eq!(
-			summary["io.mindroom.latest_reply"]["event_id"], reply,
-			"the participant's actual reply is preserved"
+			summary["io.mindroom.latest_reply"]["event_id"], text,
+			"a marked m.text is a conversational reply"
 		);
 		assert_eq!(
 			summary["io.mindroom.title"]["unsigned"]["m.relations"]["m.replace"]["event_id"],
 			edit,
-			"a power-zero title author can edit their title"
+			"a title's sender can edit it"
 		);
 	}
 
@@ -534,33 +467,22 @@ mod tests {
 		let topic =
 			send(router, base, OWNER, "backfilled-root-title", title(&root, "historical topic"))
 				.await;
-		for rebuild in [false, true] {
-			if rebuild {
-				services
-					.pdu_metadata
-					.rebuild_typed_relations()
-					.await?;
-			}
-			let served = event(router, base, MEMBER, &root).await;
-			let summary = &served["unsigned"]["m.relations"]["m.thread"];
-			assert_eq!(summary["count"], 2, "backfilled root retains the standard count");
-			assert_eq!(
-				summary["latest_event"]["event_id"], topic,
-				"backfilled root retains the standard latest event"
-			);
-			assert_eq!(
-				summary["io.mindroom.title"]["event_id"], topic,
-				"backfilled root needs a title, rebuild={rebuild}"
-			);
-			assert_eq!(
-				summary["io.mindroom.latest_reply"]["event_id"], reply,
-				"backfilled root needs a reply, rebuild={rebuild}"
-			);
-		}
+		let served = event(router, base, MEMBER, &root).await;
+		let summary = &served["unsigned"]["m.relations"]["m.thread"];
+		assert_eq!(summary["count"], 2, "backfilled root retains the standard count");
+		assert_eq!(
+			summary["latest_event"]["event_id"], topic,
+			"backfilled root retains the standard latest event"
+		);
+		assert_eq!(summary["io.mindroom.title"]["event_id"], topic, "backfilled root title");
+		assert_eq!(
+			summary["io.mindroom.latest_reply"]["event_id"], reply,
+			"backfilled root reply"
+		);
 		Ok(())
 	}
 
-	async fn large_room(services: &Services, router: &Router, base: &str) {
+	async fn large_room(router: &Router, base: &str) {
 		let mut expected = BTreeMap::new();
 		for index in 0..505 {
 			let root = send(
@@ -584,9 +506,6 @@ mod tests {
 					.await;
 			expected.insert(root, (reply, topic));
 		}
-		// Model writes received on an older binary: native relations exist,
-		// while derived preview rows are absent at re-upgrade.
-		services.db["relatesto_typed"].clear().await;
 		let endpoint = format!("{}/threads?limit=100", base.replace("/v3/", "/v1/"));
 		let mut path = endpoint.clone();
 		let start = Instant::now();
@@ -603,13 +522,10 @@ mod tests {
 						"standard latest event on {id}"
 					);
 					assert_eq!(summary["count"], 2, "standard count on {id}");
-					assert_eq!(
-						summary["io.mindroom.title"]["event_id"], topic,
-						"title without derived rows on {id}"
-					);
+					assert_eq!(summary["io.mindroom.title"]["event_id"], topic, "title on {id}");
 					assert_eq!(
 						summary["io.mindroom.latest_reply"]["event_id"], reply,
-						"reply without derived rows on {id}"
+						"reply on {id}"
 					);
 				}
 			}
@@ -679,7 +595,7 @@ mod tests {
 		let summary = &served["unsigned"]["m.relations"]["m.thread"];
 		assert_eq!(
 			summary["io.mindroom.title"]["event_id"], only_title,
-			"the root's sender may title a thread without a reply"
+			"a title needs no reply"
 		);
 		assert!(
 			summary.get("io.mindroom.latest_reply").is_none(),
@@ -690,22 +606,21 @@ mod tests {
 			base,
 			OWNER,
 			"title-root-reply",
-			thread(&title_root, "m.text", "qualifying reply"),
+			thread(&title_root, "m.text", "later reply"),
 		)
 		.await;
-		let qualified_title =
-			send(router, base, OWNER, "qualified-title", title(&title_root, "qualified topic"))
-				.await;
+		let later_title =
+			send(router, base, OWNER, "later-title", title(&title_root, "later topic")).await;
 		// Redacting a root retains its live children's standard thread summary.
 		redact(router, base, &title_root, "redact-root").await;
 		let served = event(router, base, OWNER, &title_root).await;
 		let summary = &served["unsigned"]["m.relations"]["m.thread"];
 		assert_eq!(
-			summary["latest_event"]["event_id"], qualified_title,
+			summary["latest_event"]["event_id"], later_title,
 			"root redaction must preserve the standard latest event"
 		);
 		assert_eq!(
-			summary["io.mindroom.title"]["event_id"], qualified_title,
+			summary["io.mindroom.title"]["event_id"], later_title,
 			"a redacted root must retain its live title"
 		);
 

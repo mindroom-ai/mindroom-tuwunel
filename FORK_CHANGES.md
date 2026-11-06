@@ -1569,28 +1569,29 @@ newer edit falls back to an earlier valid one. `latest_event`, `count` and
 `/context`, `/event`, `/relations`, `/threads` and the v3 and sliding sync
 timelines through the shared bundler. Encrypted rooms receive neither field.
 
-A title is a direct, non-state, unencrypted `m.thread` event whose content has
-an `io.mindroom.thread_summary` **object**. Its sender must be the root's
-sender or the sender of a direct non-title reply in the same window. That
-holds for responding agents at power level 0 (agents added after room
-creation, user-made rooms, DMs), for a router titling its own welcome
-message, and for automation prompts. A member who has not replied in the
-thread, and did not send its root, cannot set the title; their marked events
-are skipped and the walk keeps looking. Any participant can. Marked events
-are never conversational replies, and a marker inside an edit's
-`m.new_content` never makes a title: clients read the title only from
-`io.mindroom.title`.
+A title is a direct, non-state, unencrypted `m.thread` event with
+`msgtype: m.notice` and an `io.mindroom.thread_summary` **object**, from any
+sender, as MindRoom and its clients read titles: agents retitle threads they
+never replied in, and any member can rename a thread. Every other direct
+thread event is a conversational reply, including an `m.text` with a marker.
+A marker inside an edit's `m.new_content` never makes a title: clients read
+the title only from `io.mindroom.title`.
 
 Reads skip redacted, ignored-user, forbidden-server and erased events and
-enforce the requester's history visibility for the root, each candidate and
-each edit. A redacted root keeps previews of its live children.
+enforce the requester's history visibility for each candidate and each edit.
+A redacted root keeps previews of its live children.
 
-Cost: each served root walks its native thread relations (the rows
-`latest_event` already uses) newest first, reading at most **50 relation
-rows** and at most 50 edit rows per selected preview, and stops once both
-fields are found. A field whose event is outside that window is omitted;
-clients fall back to opening the thread. There is no preview index,
-migration, purge hook or configuration option. Live relations to backfilled
-events now enter the native relation index (`add_relation`), so a backfilled
-root's live replies are found; such relations received before this change
-were never stored and stay absent.
+Cost: each served root reads its native relation rows (every event relating
+to the root: thread events, reactions, edits of the root, rich replies)
+newest first and stops as soon as both fields are found, reading at most
+**50 rows**, plus at most 50 edit rows per selected preview. A field whose event is not within those 50 rows is
+omitted; clients fall back to opening the thread. There is no preview index,
+migration, purge hook or configuration option.
+
+Live relations to backfilled events now enter the native relation index
+(`add_relation`), so a backfilled root's live replies are found. Such
+relations received before this change were never stored and stay absent.
+This also reaches other readers of that index: a duplicate reaction to a
+backfilled event is rejected, and `related_by_*` filters see live relations
+to backfilled events. `/relations` still answers an empty page for a
+backfilled target (`src/api/client/relations.rs`).
