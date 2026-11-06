@@ -37,8 +37,9 @@ pub struct UserInfo {
 	/// Email address (`email` scope).
 	pub email: Option<String>,
 
-	/// Whether the provider verified `email`, when it says so. Some providers
-	/// send `"true"` or `"false"` as a string; anything else reads as unknown.
+	/// Whether the provider verified `email` (read by `email_verified` below): any
+	/// value it sends other than `true` reads as unverified, and only an absent
+	/// or null claim as unknown.
 	#[serde(
 		default,
 		deserialize_with = "lenient_bool",
@@ -54,9 +55,16 @@ pub struct UserInfo {
 }
 
 fn lenient_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
-	Ok(match Option::<Value>::deserialize(deserializer)? {
-		| Some(Value::Bool(value)) => Some(value),
-		| Some(Value::String(text)) => text.parse().ok(),
-		| _ => None,
-	})
+	Ok(Option::<Value>::deserialize(deserializer)?.map(|value| email_verified(&value)))
+}
+
+/// Whether an `email_verified` claim a provider sent says verified: `true`, or
+/// `"true"` in any case, as some providers send it. Any other value does not.
+#[must_use]
+pub fn email_verified(value: &Value) -> bool {
+	match value {
+		| Value::Bool(verified) => *verified,
+		| Value::String(verified) => verified.eq_ignore_ascii_case("true"),
+		| _ => false,
+	}
 }

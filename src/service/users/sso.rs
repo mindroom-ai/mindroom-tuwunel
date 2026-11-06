@@ -189,7 +189,7 @@ impl Service {
 			.await
 		{
 			return Err!(Request(UserInUse(warn!(
-				"{user_id} was linked to another identity meanwhile."
+				"{user_id} is linked to another identity."
 			))));
 		}
 

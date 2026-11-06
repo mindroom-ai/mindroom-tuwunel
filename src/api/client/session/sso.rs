@@ -625,6 +625,14 @@ fn display_login_target(mut target: Url) -> String {
 	target.into()
 }
 
+/// Refuse a listed address its provider says is unverified. Only the log names
+/// the account: whoever set an unverified copy of the address does not learn it.
+fn refuse_unverified<T>(user_id: &UserId) -> Result<T> {
+	warn!(%user_id, "Refused an assigned sign-in: the provider says its address is unverified.");
+
+	Err!(Request(Forbidden("The provider says this sign-in's address is unverified.")))
+}
+
 /// Map an authenticated SSO/OIDC identity onto a local account and return the
 /// resulting user together with the committed session. Shared by the browser
 /// SSO callback and the native Apple login endpoint.
@@ -654,26 +662,20 @@ async fn complete_sso_session(
 			// A chained identity without a link of its own takes the carried
 			// account, which a listed address must name, verified.
 			| (Some(user_id), old_user_id) => match assigned_user_id {
+				| Some(assigned)
+					if old_user_id.is_none() && userinfo.email_verified == Some(false) =>
+					return refuse_unverified(&assigned),
 				| Some(assigned) if old_user_id.is_none() && assigned != user_id =>
 					return Err!(Request(Forbidden(warn!(
 						"This sign-in is assigned to {assigned}, not {user_id}, which it \
 						 carries."
-					)))),
-				| Some(assigned)
-					if old_user_id.is_none() && userinfo.email_verified == Some(false) =>
-					return Err!(Request(Forbidden(warn!(
-						"This sign-in is assigned to {assigned}, but the provider says its \
-						 address is unverified."
 					)))),
 				| _ => (user_id, None),
 			},
 			| (None, Some(user_id)) => (user_id, None),
 			| (None, None) => match assigned_user_id {
 				| Some(user_id) if userinfo.email_verified == Some(false) =>
-					return Err!(Request(Forbidden(warn!(
-						"This sign-in is assigned to {user_id}, but the provider says its \
-						 address is unverified."
-					)))),
+					return refuse_unverified(&user_id),
 				| Some(user_id) => {
 					let assignment = services
 						.users

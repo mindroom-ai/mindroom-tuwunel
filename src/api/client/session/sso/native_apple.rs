@@ -21,7 +21,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	oauth::{Provider, SESSION_ID_LENGTH, Session, UserInfo},
+	oauth::{Provider, SESSION_ID_LENGTH, Session, UserInfo, user_info},
 };
 
 use super::{super::TOKEN_LENGTH, complete_sso_session};
@@ -154,14 +154,12 @@ fn apple_userinfo_from_validated_claims(
 	))
 }
 
-/// Whether Apple verified the address: a boolean or its string form, anything
-/// else unknown.
+/// Whether Apple verified the address, read like any provider's claim; absent
+/// or null is unknown.
 fn email_verified(value: Option<&JsonValue>) -> Option<bool> {
-	match value? {
-		| JsonValue::Bool(verified) => Some(*verified),
-		| JsonValue::String(verified) => verified.parse().ok(),
-		| _ => None,
-	}
+	value
+		.filter(|value| !value.is_null())
+		.map(user_info::email_verified)
 }
 
 fn apple_userinfo_from_claim_values(
@@ -706,7 +704,11 @@ mod tests {
 			(json!("true"), Some(true)),
 			(json!(false), Some(false)),
 			(json!(true), Some(true)),
-			(json!("maybe"), None),
+			(json!("TRUE"), Some(true)),
+			(json!("False"), Some(false)),
+			(json!("maybe"), Some(false)),
+			(json!(0), Some(false)),
+			(json!(null), None),
 		] {
 			let session = apple_session_with_claims(&json!({
 				"sub": "apple-user-123",

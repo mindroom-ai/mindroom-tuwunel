@@ -115,6 +115,12 @@ const CHAIN: [&str; 2] = ["chain-a", "chain-b"];
 /// assigned at the next sign-in.
 #[test]
 fn sso_assigned_account() -> Result {
+	// A child process of `sso_assigned_migrated_deactivation` runs every test of
+	// this binary, since the server's arguments leave no room for a test filter.
+	if var(PHASE_ENV).is_ok() {
+		return Ok(());
+	}
+
 	let provider = TcpListener::bind(("127.0.0.1", 0))?;
 	let issuer = format!("http://{}", provider.local_addr()?);
 
@@ -188,7 +194,6 @@ fn assign_migrated(database: &Path) -> Result {
 /// Run one phase of `sso_assigned_migrated_deactivation` in a child process.
 fn run_phase(database: &Path, phase: &str) -> Result {
 	let output = Command::new(current_exe()?)
-		.args(["--exact", "sso_assigned_migrated_deactivation"])
 		.env(PHASE_ENV, phase)
 		.env(DATABASE_ENV, database)
 		.output()?;
