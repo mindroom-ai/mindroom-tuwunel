@@ -363,7 +363,9 @@ assigns threads to push actions. Other threads keep their counts. Synapse resets
 (its counts follow receipts only, and it never counts the sender's own event).
 Upstream has the same code on `main`. Files:
 `src/service/rooms/timeline/append.rs`; test in
-`src/mindroom-tests/tests/sync_thread_counts.rs`.
+`src/mindroom-tests/tests/sync_thread_counts.rs`. Upstream's
+`src/main/tests/private_receipt_room.rs` took its unthreaded private markers
+from the user's own sends; it now sets them with receipts first.
 
 ### send_join response events are checked before they are stored
 
