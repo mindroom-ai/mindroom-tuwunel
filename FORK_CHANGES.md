@@ -105,7 +105,11 @@ Sliding sync uses the same position for membership activity and the e2ee
 extension's newly joined member burst; profile updates no longer trigger
 that burst. The profile visibility readers only test whether the join row
 exists. Room timeline and profile watchers still wake sync for profile
-events. Upstream has the same bug. Files:
+events. Upstream fixed this on 2026-11-03 in `b890115247` with a different
+design (`replaced_join`, read from the event's own previous state; forced state
+replays always rewrite the position). This fork does not have that commit yet:
+at the next upstream rebase, take upstream's version and drop this change, do
+not keep both. Files:
 `src/service/rooms/state_cache/update.rs`; HTTP regression in
 `src/main/tests/sync_profile_membership.rs` covers two rooms, two devices,
 display name and avatar changes, sliding sync, and a real rejoin.
