@@ -634,6 +634,14 @@ fn display_login_target(mut target: Url) -> String {
 	target.into()
 }
 
+/// Refuse a listed address its provider says is unverified. Only the log names
+/// the account: whoever set an unverified copy of the address does not learn it.
+fn refuse_unverified<T>(user_id: &UserId) -> Result<T> {
+	warn!(%user_id, "Refused an assigned sign-in: the provider says its address is unverified.");
+
+	Err!(Request(Forbidden("The provider says this sign-in's address is unverified.")))
+}
+
 /// Map an authenticated SSO/OIDC identity onto a local account and return the
 /// resulting user together with the committed session. Shared by the browser
 /// SSO callback and the native Apple login endpoint.
@@ -658,9 +666,48 @@ async fn complete_sso_session(
 			..session
 		};
 
-		let user_id = match (session.user_id, old_user_id) {
-			| (Some(user_id), ..) | (None, Some(user_id)) => user_id,
-			| (None, None) => decide_user_id(services, provider, &userinfo, &unique_id).await?,
+		let assigned_user_id = assigned_account(services, provider, &userinfo);
+		let mut taken = None;
+		let (user_id, mut held) = match (session.user_id, old_user_id) {
+			// A chained identity without a link of its own takes the carried
+			// account, which a listed address must name, verified.
+			| (Some(user_id), old_user_id) => match assigned_user_id {
+				| Some(assigned)
+					if old_user_id.is_none() && userinfo.email_verified == Some(false) =>
+					return refuse_unverified(&assigned),
+				| Some(assigned) if old_user_id.is_none() && assigned != user_id =>
+					return Err!(Request(Forbidden(warn!(
+						"This sign-in is assigned to {assigned}, not {user_id}, which it \
+						 carries."
+					)))),
+				| _ => (user_id, None),
+			},
+			| (None, Some(user_id)) => (user_id, None),
+			| (None, None) => match assigned_user_id {
+				| Some(user_id) if userinfo.email_verified == Some(false) =>
+					return refuse_unverified(&user_id),
+				| Some(user_id) => {
+					let assignment = services
+						.users
+						.assign_sso_account(&user_id)
+						.await?;
+
+					info!(
+						provider = provider.id(),
+						sub = %userinfo.sub,
+						%user_id,
+						"Linking the assigned account."
+					);
+					(user_id, Some(assignment))
+				},
+				| None => {
+					let (user_id, takes) =
+						decide_user_id(services, provider, &userinfo, &unique_id).await?;
+
+					taken = takes;
+					(user_id, None)
+				},
+			},
 		};
 
 		let session = Session {
@@ -668,7 +715,8 @@ async fn complete_sso_session(
 			..session
 		};
 
-		if !services.users.exists(&user_id).await {
+		let created = !services.users.exists(&user_id).await;
+		if created {
 			let origin = match provider.registration {
 				| true => "sso",
 				// Present in LDAP is an existing user to provision, not a new registration.
@@ -682,14 +730,47 @@ async fn complete_sso_session(
 			register_user(services, provider, &session, &userinfo, &user_id, origin).await?;
 		}
 
-		Ok((session, user_id))
+		// An account a first sign-in takes by name is held from here until its link
+		// is stored (creating it takes the same lock), so no assignment links it
+		// meanwhile; one that got in first keeps it and this sign-in is refused. A
+		// name chosen as free that someone else created since is not this one's.
+		// Listed accounts are skipped by name already; the hold also covers one a
+		// config reload lists after the name was chosen.
+		if let Some(existed) = taken {
+			if !existed && !created {
+				return Err!(Request(UserInUse(warn!(
+					"{user_id} was created after this sign-in chose it."
+				))));
+			}
+
+			held = Some(
+				services
+					.users
+					.hold_unlinked_account(&user_id)
+					.await?,
+			);
+		}
+
+		Ok((session, (user_id, held)))
 	};
 
-	let (session, user_id, old_sess_id) = services
+	// An assigned account without a password becomes an SSO account in the
+	// batch that links it, so no reader finds one without the other.
+	let (session, (user_id, held), old_sess_id) = services
 		.oauth
 		.sessions
-		.commit_identity_session(&unique_id, complete_identity)
+		.commit_identity_session_with(&unique_id, complete_identity, |(user_id, held), txn| {
+			if held.as_ref().is_some_and(at!(1)) {
+				services
+					.users
+					.convert_assigned_account(txn, user_id);
+			}
+		})
 		.await?;
+
+	// The link is stored, so the account is released before the steps below
+	// lock it.
+	drop(held);
 
 	if services
 		.users
@@ -964,6 +1045,43 @@ async fn bind_email(services: &Services, user_id: &UserId, email: &str) -> Resul
 	bind_new_account_email(services, user_id, &email).await
 }
 
+/// The account `assigned_accounts` gives the identity's email address, if any.
+///
+/// The map is read from the live configuration, so a reload applies to the next
+/// sign-in. Addresses match ignoring ASCII case only.
+fn assigned_account(
+	services: &Services,
+	provider: &Provider,
+	userinfo: &UserInfo,
+) -> Option<OwnedUserId> {
+	let email = userinfo.email.as_deref()?;
+
+	services
+		.oauth
+		.providers
+		.find_config(provider.id())
+		.ok()?
+		.assigned_accounts
+		.iter()
+		.find(|(address, _)| address.eq_ignore_ascii_case(email))
+		.map(|(_, user_id)| user_id.clone())
+}
+
+/// Whether any provider's `assigned_accounts` lists the account, which is then
+/// only for its listed address and never given to a sign-in by name.
+fn listed(services: &Services, user_id: &UserId) -> bool {
+	services
+		.config
+		.identity_provider
+		.values()
+		.flat_map(|provider| provider.assigned_accounts.values())
+		.any(|listed| listed.as_str() == user_id.as_str())
+}
+
+/// Returns the user ID, and, for an account taken by name, whether it existed
+/// then: the sign-in holds such an account until its link is stored. None when
+/// the provider is trusted (it may take linked accounts) or an admin associated
+/// the account.
 #[tracing::instrument(
 	level = "debug",
 	ret(level = "debug")
@@ -975,7 +1093,7 @@ async fn decide_user_id(
 	provider: &Provider,
 	userinfo: &UserInfo,
 	unique_id: &str,
-) -> Result<OwnedUserId> {
+) -> Result<(OwnedUserId, Option<bool>)> {
 	if let Some(user_id) = services
 		.oauth
 		.sessions
@@ -988,9 +1106,10 @@ async fn decide_user_id(
 			"Matched pending association"
 		);
 
-		return Ok(user_id);
+		return Ok((user_id, None));
 	}
 
+	let hold = !provider.trusted;
 	let explicit = |claim: &str| provider.userid_claims.contains(claim);
 
 	let allowed = |claim: &str| provider.userid_claims.is_empty() || explicit(claim);
@@ -1028,15 +1147,20 @@ async fn decide_user_id(
 			.filter(|_| allowed("email")),
 	];
 
+	// A listed account is only for its listed address, never for a name.
 	for choice in choices.into_iter().flatten() {
-		if let Some(user_id) = try_user_id(services, provider, &choice, false).await {
-			return Ok(user_id);
+		if let Some((user_id, existed)) = try_user_id(services, provider, &choice, false).await
+			&& !listed(services, &user_id)
+		{
+			return Ok((user_id, hold.then_some(existed)));
 		}
 	}
 
 	let localpart = fallback_localpart(unique_id);
-	if let Some(user_id) = try_user_id(services, provider, &localpart, true).await {
-		return Ok(user_id);
+	if let Some((user_id, existed)) = try_user_id(services, provider, &localpart, true).await
+		&& !listed(services, &user_id)
+	{
+		return Ok((user_id, hold.then_some(existed)));
 	}
 
 	Err!(Request(UserInUse("User ID is not available.")))
@@ -1048,7 +1172,7 @@ async fn try_user_id(
 	provider: &Provider,
 	username: &str,
 	unique_id: bool,
-) -> Option<OwnedUserId> {
+) -> Option<(OwnedUserId, bool)> {
 	let server_name = services.globals.server_name();
 	let user_id = parse_user_id(server_name, username)
 		.inspect_err(|e| warn!(?username, "Username invalid: {e}"))
@@ -1073,7 +1197,8 @@ async fn try_user_id(
 		return None;
 	}
 
-	if services.users.exists(&user_id).await {
+	let existed = services.users.exists(&user_id).await;
+	if existed {
 		if provider.trusted {
 			info!(
 				?username,
@@ -1081,7 +1206,7 @@ async fn try_user_id(
 				"Authorizing trusted provider access to existing account."
 			);
 
-			return Some(user_id);
+			return Some((user_id, existed));
 		}
 
 		if services
@@ -1141,7 +1266,7 @@ async fn try_user_id(
 		}
 	}
 
-	Some(user_id)
+	Some((user_id, existed))
 }
 
 fn parse_user_id(server_name: &ServerName, username: &str) -> Result<OwnedUserId> {

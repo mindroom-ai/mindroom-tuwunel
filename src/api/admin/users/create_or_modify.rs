@@ -60,10 +60,11 @@ pub(crate) async fn admin_create_or_modify_route(
 		refuse_server_user(services, user_id)?;
 	}
 
+	// An account created since the check above is refused, not overwritten.
 	if created {
 		services
 			.users
-			.create(user_id, body.password.as_deref(), None)
+			.create_new(user_id, body.password.as_deref(), None)
 			.await?;
 	} else if let Some(password) = body.password.as_deref() {
 		services
