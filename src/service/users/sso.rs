@@ -177,7 +177,9 @@ impl Service {
 
 	/// Hold an account a first sign-in takes by name, new or existing, until its
 	/// link is stored. It is refused if another identity, such as an
-	/// assignment's, is linked to it.
+	/// assignment's, is linked to it by the account's index, which every
+	/// sign-in's link writes; reading only that, an unreadable session of some
+	/// other account does not refuse every first sign-in.
 	pub async fn hold_unlinked_account(&self, user_id: &UserId) -> Result<SsoAssignment> {
 		let guard = self.changing_password.lock(user_id).await;
 
@@ -185,7 +187,7 @@ impl Service {
 			.services
 			.oauth
 			.sessions
-			.is_linked(user_id)
+			.has_indexed_link(user_id)
 			.await
 		{
 			return Err!(Request(UserInUse(warn!("{user_id} is linked to another identity."))));

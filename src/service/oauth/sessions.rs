@@ -396,15 +396,23 @@ pub fn get_sess_id_by_user(&self, user_id: &UserId) -> impl Stream<Item = Result
 		.try_flatten_stream()
 }
 
+/// Whether an identity is linked to `user_id` through the account's own
+/// index, which every sign-in's link writes; anything unreadable counts. It
+/// reads only that account's entries, unlike `is_linked`.
+#[implement(Sessions)]
+pub async fn has_indexed_link(&self, user_id: &UserId) -> bool {
+	self.get_sess_id_by_user(user_id)
+		.ready_any(|sess_id| !sess_id.is_missing())
+		.await
+}
+
 /// Whether any identity is linked to `user_id`.
 ///
 /// The sessions themselves are read too, since an adopted link has no entry in
 /// the user's index.
 #[implement(Sessions)]
 pub async fn is_linked(&self, user_id: &UserId) -> bool {
-	self.get_sess_id_by_user(user_id)
-		.ready_any(|sess_id| !sess_id.is_missing())
-		.await
+	self.has_indexed_link(user_id).await
 		|| self
 			.db
 			.oauthid_session

@@ -686,10 +686,13 @@ its listed address names another account than the one it carries. The
 checks are made under the account's password lock, held until the link is
 stored, and an account with an empty password gets the sentinel and origin
 `sso` in the same write batch as the link, with a warning; other accounts
-keep their password and origin. A first sign-in that takes an existing
-account because no identity is linked to it (an identity's fallback
-username) now holds that lock as well and checks the links again under
-it, so it cannot link an account an assignment linked meanwhile.
+keep their password and origin. Every first sign-in that takes an
+account by name, new or existing (a new registration, or an identity's
+fallback username), now holds that lock from after any registration until
+its link is stored and checks the account's link index again under it, so
+it cannot link an account an assignment linked meanwhile; such a sign-in
+is refused, as is one whose name, chosen as free, was created by someone
+else since. Trusted providers and admin associations are unchanged.
 Deactivation writes the empty password and its reason in one transaction
 under that lock. Unlisted addresses and later sign-ins work as before.
 Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,

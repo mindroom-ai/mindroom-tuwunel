@@ -295,14 +295,15 @@ assigned_accounts = { "alice@example.com" = "@alice:example.com" }
 
 **Use this with an app restricted to your own organization**, such as a Google
 Workspace app with the "Internal" user type or a single-tenant Microsoft Entra
-ID app, whose addresses the organization assigns. Whoever controls a listed
-address gets the account and everything in it. Avoid multi-tenant apps, and
-providers whose users can set or edit their own address without verifying it
-(Keycloak, for one, lets users edit their email unless verification is
-required). A sign-in whose provider says the address is unverified
-(`email_verified` false) is refused. Many providers send that claim, such as
-Google, Keycloak, Okta, Auth0, GitLab and Authentik; others, such as Microsoft
-Entra ID and GitHub, do not, and its absence is not checked.
+ID app, whose addresses the organization assigns; list only its members'
+addresses (an Entra app also admits guests, whose addresses it does not assign).
+Whoever controls a listed address gets the account and everything in it. Avoid
+multi-tenant apps, and providers whose users can set or edit their own address
+without verifying it (Keycloak, for one, lets users edit their email unless
+verification is required). A sign-in whose provider says the address is
+unverified (any `email_verified` other than `true`) is refused. Many providers send that claim,
+such as Google, Keycloak, Okta, Auth0, GitLab and Authentik; others, such as
+Microsoft Entra ID and GitHub, do not, and its absence is not checked.
 
 Each value must be a local user ID, and no address may be listed twice; the
 server refuses to start otherwise. Addresses are compared ignoring ASCII case

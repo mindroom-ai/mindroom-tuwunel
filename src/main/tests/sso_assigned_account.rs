@@ -539,7 +539,7 @@ async fn refusals(services: &Services, base: &str, client: &Client) -> Result {
 
 /// A chained sign-in whose listed address names another account than the one
 /// it carries is refused, and the carried account is left alone. A chained
-/// identity with a link of its own follows it.
+/// identity with a link of its own takes the carried account, as chains do.
 async fn chained(services: &Services, base: &str, client: &Client) -> Result {
 	let hank = register_ahead(services, base, "hank").await?;
 	let carried = UserId::parse_with_server_name("chainfirst", services.globals.server_name())?;
@@ -607,8 +607,8 @@ async fn chain(
 }
 
 /// Addresses a reload lists are assigned at the next sign-in, and a chained
-/// identity already linked keeps following its link when a reload lists its
-/// address for another account.
+/// identity already linked still takes the carried account when a reload lists
+/// its address for another account.
 async fn reloaded(services: &Services, base: &str, client: &Client) -> Result {
 	let rita = register_ahead(services, base, "rita").await?;
 	let response = sign_in(client, base, "rita-early", "rita").await?;
