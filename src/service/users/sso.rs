@@ -9,6 +9,10 @@ use tuwunel_database::Deserialized;
 
 use super::{PASSWORD_SENTINEL, Service};
 
+/// An account assigned to a signing-in identity: its password lock, and
+/// whether it has an empty password.
+pub type SsoAssignment = (MutexMapGuard<OwnedUserId, ()>, bool);
+
 /// Why deactivations carry a reason. Fork-only: neither Synapse nor upstream
 /// Tuwunel has this concept.
 ///
@@ -149,28 +153,15 @@ impl Service {
 	}
 
 	/// Check the account `assigned_accounts` gives a signing-in identity that
-	/// has none yet, and make it one SSO signs in to. The guard holds the
-	/// account's password lock until the caller has stored the link.
-	pub async fn assign_sso_account(
-		&self,
-		user_id: &UserId,
-	) -> Result<MutexMapGuard<OwnedUserId, ()>> {
+	/// has none yet. The assignment holds the account's password lock, and says
+	/// whether it has an empty password, until `complete_sso_assignment`.
+	pub async fn assign_sso_account(&self, user_id: &UserId) -> Result<SsoAssignment> {
 		let guard = self.changing_password.lock(user_id).await;
+		let empty = self.is_deactivated(user_id).await.unwrap_or(true);
 		let refusals = [
 			(user_id == self.services.globals.server_user, "is the server user"),
 			(!self.exists(user_id).await, "does not exist"),
-			// Unlike a deactivation, creation without a password records no reason;
-			// an unreadable reason counts.
-			(
-				self.is_deactivated(user_id).await.unwrap_or(true)
-					&& !self
-						.db
-						.userid_deactivation_reason
-						.get(user_id)
-						.await
-						.is_not_found(),
-				"is deactivated",
-			),
+			(empty && self.deactivation_recorded(user_id).await, "is deactivated"),
 			(
 				self.services
 					.oauth
@@ -187,9 +178,15 @@ impl Service {
 			))));
 		}
 
-		// Only an empty password is converted, so another sign-in system's
-		// sentinel keeps its origin.
-		if self.password_hash(user_id).await?.is_empty() {
+		Ok((guard, empty))
+	}
+
+	/// Complete an assignment once the identity's link is stored: only then
+	/// does an account with an empty password become one SSO signs in to, so
+	/// no reader finds it unlinked. Other accounts keep their password and
+	/// origin. The account's password lock is released.
+	pub fn complete_sso_assignment(&self, user_id: &UserId, (guard, empty): SsoAssignment) {
+		if empty {
 			warn!(%user_id, "Making the assigned account, without a password, an SSO account.");
 			let mut txn = self.services.db.txn();
 			txn.insert_raw(&self.db.userid_origin, user_id, "sso");
@@ -197,7 +194,26 @@ impl Service {
 			txn.execute();
 		}
 
-		Ok(guard)
+		drop(guard);
+	}
+
+	/// Whether a deactivation is recorded for the account, here or in the
+	/// column a migrated database left behind. Creation without a password
+	/// records neither; anything unreadable counts.
+	async fn deactivation_recorded(&self, user_id: &UserId) -> bool {
+		let migrated = match self.services.db.open_cf("userid_deactivated") {
+			| Ok(Some(marks)) => !marks.get(user_id).await.is_missing(),
+			| Ok(None) => false,
+			| Err(_) => true,
+		};
+
+		migrated
+			|| !self
+				.db
+				.userid_deactivation_reason
+				.get(user_id)
+				.await
+				.is_missing()
 	}
 
 	#[cfg(test)]

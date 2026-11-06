@@ -3,7 +3,7 @@ use ruma::user_id;
 use tokio::sync::Notify;
 use tuwunel_core::{Result, config::Figment};
 
-use super::PASSWORD_SENTINEL;
+use super::{DeactivationReason, PASSWORD_SENTINEL};
 use crate::test_utils::fixture;
 
 const OLD_PASSWORD: &str = "old password";
@@ -80,6 +80,51 @@ async fn password_change_before_deactivation_leaves_disabled() -> Result {
 	password_change?;
 	password_clear?;
 	assert!(users.is_deactivated(user_id).await?);
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn assignment_never_reactivates_a_deactivation_it_waits_for() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let users = &fixture.services.users;
+	let user_id = user_id!("@assigned-deactivated:localhost");
+
+	users.create(user_id, None, None).await?;
+
+	let password_guard = users.changing_password.lock(user_id).await;
+	let deactivate = users.deactivate_account(user_id, DeactivationReason::Admin);
+	let assign = async {
+		let assignment = users.assign_sso_account(user_id).await?;
+
+		users.complete_sso_assignment(user_id, assignment);
+		Ok::<_, tuwunel_core::Error>(())
+	};
+
+	pin_mut!(deactivate);
+	pin_mut!(assign);
+	assert!(poll!(deactivate.as_mut()).is_pending());
+	assert!(poll!(assign.as_mut()).is_pending());
+
+	drop(password_guard);
+
+	// Whichever takes the lock first, the account ends deactivated: a
+	// deactivation first is seen whole and refuses the assignment, and one after
+	// the assignment empties the password it set.
+	let (deactivated, _) = join(deactivate, assign).await;
+
+	deactivated?;
+	assert!(users.is_deactivated(user_id).await?);
+	assert_eq!(
+		users
+			.deactivation_reason(user_id)
+			.await
+			.as_deref(),
+		Some("admin")
+	);
 
 	Ok(())
 }

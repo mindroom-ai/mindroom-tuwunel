@@ -20,7 +20,9 @@ use tuwunel_core::{
 	},
 	warn,
 };
-use tuwunel_database::{Cbor, Database, Deserialized, Ignore, Map};
+use tuwunel_database::{
+	Cbor, Database, Deserialized, Ignore, KeyVal, Map, deserialize_from_slice,
+};
 use url::Url;
 
 pub use self::adopt::Counts;
@@ -370,26 +372,39 @@ pub fn get_sess_id_by_user(&self, user_id: &UserId) -> impl Stream<Item = Result
 /// Whether any identity is linked to `user_id`.
 ///
 /// The sessions themselves are read too, since an adopted link has no entry in
-/// the user's index. Anything unreadable counts as a link.
+/// the user's index.
 #[implement(Sessions)]
 pub async fn is_linked(&self, user_id: &UserId) -> bool {
-	let linked = |session: Result<(Ignore, Cbor<Session>)>| match session {
-		| Ok((_, Cbor(session))) => session.user_id.as_deref() == Some(user_id),
-		| Err(e) => {
-			warn!(%user_id, error = %e, "Unreadable identity link.");
-			true
-		},
-	};
-
 	self.get_sess_id_by_user(user_id)
 		.ready_any(|sess_id| !sess_id.is_missing())
 		.await
 		|| self
 			.db
 			.oauthid_session
-			.stream()
-			.ready_any(linked)
+			.raw_stream()
+			.ready_any(|row| row_links(row, user_id))
 			.await
+}
+
+/// Whether a stored session links `user_id`. A row that cannot be read may be
+/// anyone's link, so it counts, and the warning names the row, not this user.
+fn row_links(row: Result<KeyVal<'_>>, user_id: &UserId) -> bool {
+	let (key, val) = match row {
+		| Ok(row) => row,
+		| Err(e) => {
+			warn!(error = %e, "An unreadable session row blocks account assignments.");
+			return true;
+		},
+	};
+
+	match deserialize_from_slice::<Cbor<Session>>(val) {
+		| Ok(Cbor(session)) => session.user_id.as_deref() == Some(user_id),
+		| Err(e) => {
+			let key = String::from_utf8_lossy(key);
+			warn!(%key, error = %e, "An unreadable session blocks account assignments.");
+			true
+		},
+	}
 }
 
 /// Resolve the `sess_id` from an associated provider issuer and subject hash.

@@ -24,7 +24,9 @@ use reqwest::{
 };
 use serde_json::{Value, json};
 use tuwunel_core::{
-	Err, Result, err,
+	Err, Result,
+	config::check::reload,
+	err,
 	result::NotFound,
 	ruma::{
 		OwnedUserId, UserId,
@@ -62,8 +64,13 @@ const ASSIGNED: &str = r#"{
 	"lee@example.com" = "@lee:localhost",
 	"nobody@example.com" = "@nobody:localhost",
 	"pat@example.com" = "@pat:localhost",
-	"server@example.com" = "@conduit:localhost"
+	"server@example.com" = "@conduit:localhost",
+	"uma@example.com" = "@uma:localhost"
 }"#;
+
+/// Two default providers, so a sign-in at the first continues at the second,
+/// carrying its account; the second assigns Hank's account.
+const CHAIN: [&str; 2] = ["chain-a", "chain-b"];
 
 /// A listed address signs in to its assigned account, and only to it.
 ///
@@ -73,24 +80,43 @@ const ASSIGNED: &str = r#"{
 /// password or another system's marker keep it. Unlisted addresses, and a
 /// listed one spelled with a non-ASCII lookalike, are mapped as before. A
 /// listed address whose account is deactivated, linked to another identity
-/// (also by adoption), missing, or the server user is refused, linked to
-/// nothing and given no other account, and the account is left as it was.
+/// (also by adoption), missing, or the server user, or whose address the
+/// provider says is unverified, or which names another account than a chained
+/// sign-in carries, is refused, linked to nothing and given no other account,
+/// and the account is left as it was. An address listed by a reload is
+/// assigned at the next sign-in.
 #[test]
 fn sso_assigned_account() -> Result {
 	let provider = TcpListener::bind(("127.0.0.1", 0))?;
 	let issuer = format!("http://{}", provider.local_addr()?);
 
-	let option = |key: &str, value: &str| format!("identity_provider.{IDP}.{key}={value}");
+	let option =
+		|idp: &str, key: &str, value: &str| format!("identity_provider.{idp}.{key}={value}");
+
 	let assigned = ASSIGNED.replace(['\n', '\t'], "");
-	let options = [
-		"oidc_registration_allowed_redirect_hosts=[\"client.example\"]".to_owned(),
-		option("client_id", &format!("\"{IDP}\"")),
-		option("client_secret", "\"test-secret\""),
-		option("brand", "\"test\""),
-		option("issuer_url", &format!("\"{issuer}\"")),
-		option("userid_claims", "[\"email\"]"),
-		option("assigned_accounts", &assigned),
-	];
+	let options = [IDP, CHAIN[0], CHAIN[1]]
+		.into_iter()
+		.flat_map(|idp| {
+			[
+				option(idp, "client_id", &format!("\"{idp}\"")),
+				option(idp, "client_secret", "\"test-secret\""),
+				option(idp, "brand", "\"test\""),
+				option(idp, "issuer_url", &format!("\"{issuer}\"")),
+				option(idp, "userid_claims", "[\"email\"]"),
+			]
+		})
+		.chain([
+			"oidc_registration_allowed_redirect_hosts=[\"client.example\"]".to_owned(),
+			option(IDP, "assigned_accounts", &assigned),
+			option(CHAIN[0], "default", "true"),
+			option(CHAIN[1], "default", "true"),
+			option(
+				CHAIN[1],
+				"assigned_accounts",
+				r#"{ "hank@example.com" = "@hank:localhost" }"#,
+			),
+		])
+		.collect::<Vec<_>>();
 
 	provider.set_nonblocking(true)?;
 
@@ -150,11 +176,17 @@ async fn userinfo(headers: HeaderMap) -> Json<Value> {
 	// Header values are ASCII, so the KELVIN SIGN, which lowercases to `k`, is
 	// spelled out.
 	let localpart = localpart.replace("KELVIN", "\u{212A}");
-
-	Json(json!({
+	let mut claims = json!({
 		"sub": sub,
 		"email": format!("{localpart}@example.com"),
-	}))
+	});
+
+	// Some providers send the claim as a string.
+	if sub.starts_with("unverified") {
+		claims["email_verified"] = json!("false");
+	}
+
+	Json(claims)
 }
 
 async fn exercise(services: &Services, base: &str) -> Result {
@@ -244,6 +276,13 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 	assert_eq!(signed_in(services, &response).await?, fallback(services, "bob").await?);
 
+	refusals(services, base, &client).await?;
+	chained(services, base, &client).await?;
+	reloaded(services, base, &client).await
+}
+
+/// Listed addresses whose sign-in is refused, each for one reason.
+async fn refusals(services: &Services, base: &str, client: &Client) -> Result {
 	// A deactivated account stays deactivated.
 	let carol = register_ahead(services, base, "carol").await?;
 
@@ -252,17 +291,16 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.deactivate_account(&carol, DeactivationReason::SelfService)
 		.await?;
 
-	refused(services, &client, base, "carol", "carol", "is deactivated").await?;
+	refused(services, client, base, "carol", "carol", "is deactivated").await?;
 	assert_eq!(services.users.password_hash(&carol).await?, "");
 
 	// An account linked to one identity is refused to another listed address.
 	let dave = register_ahead(services, base, "dave").await?;
-	let response = sign_in(&client, base, "dave", "dave").await?;
+	let response = sign_in(client, base, "dave", "dave").await?;
 
 	assert_eq!(signed_in(services, &response).await?, dave);
 
-	refused(services, &client, base, "dave-second", "dave.second", "is linked to another")
-		.await?;
+	refused(services, client, base, "dave-second", "dave.second", "is linked to another").await?;
 	assert_eq!(linked_account(services, "dave").await?, dave);
 
 	// A link adopted from another server's database has no entry in the user's
@@ -270,12 +308,12 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let gina = register_ahead(services, base, "gina").await?;
 
 	adopt(services, &gina, "gina-adopted").await?;
-	refused(services, &client, base, "gina", "gina", "is linked to another").await?;
+	refused(services, client, base, "gina", "gina", "is linked to another").await?;
 	assert_eq!(linked_account(services, "gina-adopted").await?, gina);
 	assert_eq!(services.users.password_hash(&gina).await?, "");
 
 	// A missing account is not created.
-	refused(services, &client, base, "nobody", "nobody", "does not exist").await?;
+	refused(services, client, base, "nobody", "nobody", "does not exist").await?;
 
 	let nobody = UserId::parse_with_server_name("nobody", services.globals.server_name())?;
 
@@ -284,9 +322,82 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	// The server user is never given out.
 	let server_user = &services.globals.server_user;
 
-	refused(services, &client, base, "server", "server", "is the server user").await?;
+	refused(services, client, base, "server", "server", "is the server user").await?;
 	assert_eq!(services.users.password_hash(server_user).await?, "");
 	assert_eq!(services.users.origin(server_user).await?, "password");
+
+	// A provider that says the address is unverified is not believed; one that
+	// says nothing is.
+	let uma = register_ahead(services, base, "uma").await?;
+
+	refused(services, client, base, "unverified-uma", "uma", "is unverified").await?;
+	assert_eq!(services.users.password_hash(&uma).await?, "");
+
+	let response = sign_in(client, base, "uma", "uma").await?;
+
+	assert_eq!(signed_in(services, &response).await?, uma);
+
+	Ok(())
+}
+
+/// A chained sign-in whose listed address names another account than the one
+/// it carries is refused, and the carried account is left alone.
+async fn chained(services: &Services, base: &str, client: &Client) -> Result {
+	let hank = register_ahead(services, base, "hank").await?;
+	let response = sign_in_at(client, base, CHAIN[0], "chain-first", "chainfirst").await?;
+	let carried = UserId::parse_with_server_name("chainfirst", services.globals.server_name())?;
+
+	assert_eq!(linked_account(services, "chain-first").await?, carried);
+
+	// The first provider hands over to the second instead of the client.
+	let state = parameter(&location(&response)?, "state");
+	let cookie = cookie(&response);
+	let url = format!("{base}/_matrix/client/unstable/login/sso/callback/{}", CHAIN[1]);
+	let response = client
+		.get(url)
+		.query(&[("code", "chain-second:hank"), ("state", &state)])
+		.header(COOKIE, cookie)
+		.send()
+		.await?;
+
+	assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+	let error: Value = response.json().await?;
+	let message = error["error"].as_str().unwrap_or_default();
+
+	assert!(message.contains("which it carries"), "{message}");
+	assert!(unlinked(services, "chain-second").await?, "chain-second is linked to nothing");
+	assert_eq!(linked_account(services, "chain-first").await?, carried);
+	assert_eq!(services.users.password_hash(&hank).await?, "");
+
+	Ok(())
+}
+
+/// An address a reload adds is assigned at the next sign-in.
+async fn reloaded(services: &Services, base: &str, client: &Client) -> Result {
+	let rita = register_ahead(services, base, "rita").await?;
+	let response = sign_in(client, base, "rita-early", "rita").await?;
+
+	assert_eq!(signed_in(services, &response).await?, fallback(services, "rita-early").await?);
+
+	let mut config = (*services.server.config.clone()).clone();
+
+	config
+		.identity_provider
+		.values_mut()
+		.filter(|provider| provider.id() == IDP)
+		.for_each(|provider| {
+			provider
+				.assigned_accounts
+				.insert("rita@example.com".to_owned(), rita.clone());
+		});
+
+	reload(&services.config, &config)?;
+	services.server.config.update(config)?;
+
+	let response = sign_in(client, base, "rita", "rita").await?;
+
+	assert_eq!(signed_in(services, &response).await?, rita);
 
 	Ok(())
 }
@@ -297,7 +408,10 @@ async fn exercise(services: &Services, base: &str) -> Result {
 /// new account in it, so only the assignment signs the people in to theirs.
 async fn register_appservice(services: &Services) -> Result {
 	let namespaces = Namespaces {
-		users: vec![Namespace::new(true, "^@(alice|carol|dave|gina|kim):.*$".to_owned())],
+		users: vec![Namespace::new(
+			true,
+			"^@(alice|carol|dave|gina|hank|kim|rita|uma):.*$".to_owned(),
+		)],
 		..Default::default()
 	};
 
@@ -357,14 +471,7 @@ async fn refused(
 	assert_eq!(error["errcode"], "M_FORBIDDEN");
 	assert!(message.contains(reason), "{localpart}: {message}");
 
-	let provider = services.oauth.providers.get(IDP).await?;
-	let linked = services
-		.oauth
-		.sessions
-		.get_by_unique_id(&unique_id_sub((&provider, sub))?)
-		.await;
-
-	assert!(linked.is_not_found(), "{sub} is linked to no account");
+	assert!(unlinked(services, sub).await?, "{sub} is linked to no account");
 	assert!(
 		!services
 			.users
@@ -374,6 +481,19 @@ async fn refused(
 	);
 
 	Ok(())
+}
+
+/// Whether the identity `sub` is linked to no account. All the test's providers
+/// share one issuer, so an identity is the same at each.
+async fn unlinked(services: &Services, sub: &str) -> Result<bool> {
+	let provider = services.oauth.providers.get(IDP).await?;
+	let linked = services
+		.oauth
+		.sessions
+		.get_by_unique_id(&unique_id_sub((&provider, sub))?)
+		.await;
+
+	Ok(linked.is_not_found())
 }
 
 /// Link the account to the identity `sub` as adopting another server's database
@@ -460,7 +580,18 @@ async fn linked_account(services: &Services, sub: &str) -> Result<OwnedUserId> {
 /// The callback's response returns unfollowed, so the caller reads its status
 /// and where it redirects.
 async fn sign_in(client: &Client, base: &str, sub: &str, localpart: &str) -> Result<Response> {
-	let url = format!("{base}/_matrix/client/v3/login/sso/redirect/{IDP}");
+	sign_in_at(client, base, IDP, sub, localpart).await
+}
+
+/// Sign in at the provider `idp` as `sub` with `<localpart>@example.com`.
+async fn sign_in_at(
+	client: &Client,
+	base: &str,
+	idp: &str,
+	sub: &str,
+	localpart: &str,
+) -> Result<Response> {
+	let url = format!("{base}/_matrix/client/v3/login/sso/redirect/{idp}");
 	let redirect = client
 		.get(url)
 		.query(&[("redirectUrl", CLIENT)])
@@ -470,14 +601,8 @@ async fn sign_in(client: &Client, base: &str, sub: &str, localpart: &str) -> Res
 	assert_eq!(redirect.status(), StatusCode::FOUND);
 
 	let state = parameter(&location(&redirect)?, "state");
-	let cookie = redirect.headers()[SET_COOKIE]
-		.to_str()
-		.expect("cookie header text")
-		.split(';')
-		.next()
-		.expect("cookie pair");
-
-	let url = format!("{base}/_matrix/client/unstable/login/sso/callback/{IDP}");
+	let cookie = cookie(&redirect);
+	let url = format!("{base}/_matrix/client/unstable/login/sso/callback/{idp}");
 	let code = format!("{sub}:{localpart}");
 
 	client
@@ -503,6 +628,16 @@ async fn signed_in(services: &Services, response: &Response) -> Result<OwnedUser
 		.users
 		.find_from_login_token(&parameter(&destination, "loginToken"))
 		.await
+}
+
+/// The grant cookie a response sets, as a request sends it back.
+fn cookie(response: &Response) -> &str {
+	response.headers()[SET_COOKIE]
+		.to_str()
+		.expect("cookie header text")
+		.split(';')
+		.next()
+		.expect("cookie pair")
 }
 
 fn location(response: &Response) -> Result<Url> {

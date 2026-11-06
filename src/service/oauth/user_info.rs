@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 /// Selection of userinfo response claims.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -36,9 +37,26 @@ pub struct UserInfo {
 	/// Email address (`email` scope).
 	pub email: Option<String>,
 
+	/// Whether the provider verified `email`, when it says so. Some providers
+	/// send `"true"` or `"false"` as a string; anything else reads as unknown.
+	#[serde(
+		default,
+		deserialize_with = "lenient_bool",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub email_verified: Option<bool>,
+
 	/// URL to pfp (github/gitlab)
 	pub avatar_url: Option<String>,
 
 	/// URL to pfp (google)
 	pub picture: Option<String>,
+}
+
+fn lenient_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+	Ok(match Option::<Value>::deserialize(deserializer)? {
+		| Some(Value::Bool(value)) => Some(value),
+		| Some(Value::String(text)) => text.parse().ok(),
+		| _ => None,
+	})
 }

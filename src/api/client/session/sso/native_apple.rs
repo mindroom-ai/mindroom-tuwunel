@@ -173,6 +173,7 @@ fn apple_userinfo_from_claim_values(
 		given_name,
 		family_name,
 		email,
+		email_verified: None,
 		avatar_url: None,
 		picture: None,
 	}

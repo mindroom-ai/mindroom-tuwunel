@@ -649,15 +649,30 @@ async fn complete_sso_session(
 			..session
 		};
 
+		let assigned_user_id = assigned_account(services, provider, &userinfo);
 		let (user_id, assigned) = match (session.user_id, old_user_id) {
-			| (Some(user_id), ..) | (None, Some(user_id)) => (user_id, None),
-			| (None, None) => match assigned_account(services, provider, &userinfo) {
+			// A chained sign-in carries its account, which a listed address must name.
+			| (Some(user_id), ..) => match assigned_user_id {
+				| Some(assigned) if assigned != user_id =>
+					return Err!(Request(Forbidden(warn!(
+						"This sign-in is assigned to {assigned}, not {user_id}, which it \
+						 carries."
+					)))),
+				| _ => (user_id, None),
+			},
+			| (None, Some(user_id)) => (user_id, None),
+			| (None, None) => match assigned_user_id {
+				| Some(user_id) if userinfo.email_verified == Some(false) =>
+					return Err!(Request(Forbidden(warn!(
+						"This sign-in is assigned to {user_id}, but the provider says its \
+						 address is unverified."
+					)))),
 				| Some(user_id) => {
-					let guard = services
+					let assignment = services
 						.users
 						.assign_sso_account(&user_id)
 						.await?;
-					(user_id, Some(guard))
+					(user_id, Some(assignment))
 				},
 				| None =>
 					(decide_user_id(services, provider, &userinfo, &unique_id).await?, None),
@@ -692,9 +707,12 @@ async fn complete_sso_session(
 		.commit_identity_session(&unique_id, complete_identity)
 		.await?;
 
-	// The link is stored, so release the account before the steps below lock it.
-	if let Some(guard) = assigned {
-		drop(guard);
+	// The link is stored, so the assignment completes, synchronously, and the
+	// account is released before the steps below lock it.
+	if let Some(assignment) = assigned {
+		services
+			.users
+			.complete_sso_assignment(&user_id, assignment);
 		info!(
 			provider = provider.id(),
 			sub = %userinfo.sub,

@@ -44,7 +44,7 @@ pub use self::{
 	keys::{DeviceKeysUpdate, DeviceListChange, DeviceListRecord, parse_master_key},
 	register::Register,
 	server_user::SERVER_USER_KEY,
-	sso::DeactivationReason,
+	sso::{DeactivationReason, SsoAssignment},
 };
 
 pub const PASSWORD_SENTINEL: &str = "*";

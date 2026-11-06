@@ -518,7 +518,7 @@ ip_source = "cf_connecting_ip"
 
 #[test]
 fn check_refuses_assigned_accounts_of_other_servers_or_twice() {
-	let config = |accounts: &str| {
+	let config = |lines: &str| {
 		config_from_toml(&format!(
 			r#"[global]
 server_name = "example.com"
@@ -527,36 +527,31 @@ server_name = "example.com"
 brand = "keycloak"
 client_id = "keycloak"
 client_secret = "oauth-secret"
-assigned_accounts = {{ {accounts} }}
+{lines}
 "#
 		))
 		.expect("assigned accounts config should parse")
 	};
 
-	let (result, _) = check_with_captured_logs(&config(r#""a@example.com" = "@a:example.com""#));
+	let refused = |lines: &str, message: &str| {
+		let (result, _) = check_with_captured_logs(&config(lines));
+		let error = result.expect_err("the assigned accounts should fail config check");
+
+		assert!(error.to_string().contains(message), "{error}");
+	};
+
+	let local = r#"assigned_accounts = { "a@example.com" = "@a:example.com" }"#;
+	let (result, _) = check_with_captured_logs(&config(local));
+
 	result.expect("a local assigned account should pass config check");
 
-	let remote = config(r#""a@example.com" = "@a:elsewhere.example""#);
-	let (result, _) = check_with_captured_logs(&remote);
-	let error = result.expect_err("a remote assigned account should fail config check");
-
-	assert!(
-		error
-			.to_string()
-			.contains("is not a local user ID"),
-		"{error}"
+	refused(
+		r#"assigned_accounts = { "a@example.com" = "@a:elsewhere.example" }"#,
+		"is not a local user ID",
 	);
-
-	let twice =
-		config(r#""a@example.com" = "@a:example.com", "A@Example.com" = "@b:example.com""#);
-	let (result, _) = check_with_captured_logs(&twice);
-	let error = result.expect_err("an address listed twice should fail config check");
-
-	assert!(
-		error
-			.to_string()
-			.contains("lists an address twice"),
-		"{error}"
+	refused(
+		r#"assigned_accounts = { "a@example.com" = "@a:example.com", "A@example.com" = "@b:example.com" }"#,
+		"lists an address twice",
 	);
 }
 
