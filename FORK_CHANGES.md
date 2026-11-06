@@ -350,19 +350,36 @@ bug (`ced2a51bc`). Files: `src/api/client/sync/v3.rs`; test in
 ### A user's own event reads only its own thread
 
 The server marks each event read for its sender. It did that as an unthreaded
-read, inherited from Conduit: any message zeroed the sender's counts for the
+read, inherited from Conduit: any event zeroed the sender's counts for the
 whole room, the main timeline and every thread, and moved their private read
 marker past all of them. Threads the user never opened then disappeared from
 badges, push counts and the user's other devices, while their client still
-showed them unread. MSC3771 reads each thread on its own, so the own event now
-counts like a receipt in the context it belongs to: an event in a thread
-(a reply, or a reaction, edit or redaction of a thread event) resets that
-thread's counts and private read marker, and any other event the main
-timeline's, state events and relations to a thread root included, as Synapse
-assigns threads to push actions. Other threads keep their counts. Synapse resets nothing on a send
-(its counts follow receipts only, and it never counts the sender's own event).
-Upstream has the same code on `main`. Files:
-`src/service/rooms/timeline/append.rs`; test in
+showed them unread. MSC3771 reads each thread on its own, so a local sender's
+own event now counts like a receipt in the context it belongs to. An event in
+a thread (a reply, or a reaction, edit or redaction of a thread event) resets
+that thread's counts and private read marker; any other event resets the main
+timeline's, relations to a thread root included. That is how Synapse assigns
+an event with an `m.relates_to` to a thread for push actions. Synapse puts a
+redaction in the main timeline, while this fork resolves it through the
+redacted event, as its pusher already did.
+
+A state event reads nothing: a topic, a thread tag (MindRoom resolves and tags
+threads with state events), or a profile change, which sends a member event to
+every joined room. Only the user's own join still reads the whole room. Synapse
+resets nothing on a send: its counts follow receipts only, it never counts the
+sender's own event, and without an unthreaded receipt it counts from the
+user's current membership event. Events from remote senders mark nothing.
+
+The server writes the sender's private read marker without announcing it, so
+an explicit private receipt for the same event was refused as not newer and
+never reached the user's other devices. An announced private receipt now
+publishes a position the marker already holds unless it was announced before;
+it resets no counts then, since later events may have arrived, and a repeat
+still changes nothing.
+
+Upstream has the same bug: every send resets the whole room. Files:
+`src/service/rooms/timeline/append.rs`,
+`src/service/rooms/read_receipt/data.rs`; test in
 `src/mindroom-tests/tests/sync_thread_counts.rs`. Upstream's
 `src/main/tests/private_receipt_room.rs` took its unthreaded private markers
 from the user's own sends; it now sets them with receipts first.
