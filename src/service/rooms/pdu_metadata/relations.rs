@@ -74,15 +74,15 @@ pub struct RelationQuery<'a> {
 pub fn add_relation(&self, from: PduCount, to: PduCount) {
 	const BUFSIZE: usize = size_of::<u64>() * 2;
 
-	match (from, to) {
-		| (PduCount::Normal(from), PduCount::Normal(to)) => {
-			let key: &[u64] = &[to, from];
+	match from {
+		| PduCount::Normal(from) => {
+			let key: &[u64] = &[to.into_unsigned(), from];
 
 			self.db
 				.tofrom_relation
 				.aput_raw::<BUFSIZE, _, _>(key, []);
 		},
-		| _ => {}, // TODO: Relations with backfilled pdus
+		| _ => {}, // Backfilled children remain outside the native relation index.
 	}
 }
 
