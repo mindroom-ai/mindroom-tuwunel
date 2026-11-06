@@ -652,12 +652,18 @@ async fn complete_sso_session(
 		let assigned_user_id = assigned_account(services, provider, &userinfo);
 		let (user_id, held) = match (session.user_id, old_user_id) {
 			// A chained identity without a link of its own takes the carried
-			// account, which a listed address must name.
+			// account, which a listed address must name, verified.
 			| (Some(user_id), old_user_id) => match assigned_user_id {
 				| Some(assigned) if old_user_id.is_none() && assigned != user_id =>
 					return Err!(Request(Forbidden(warn!(
 						"This sign-in is assigned to {assigned}, not {user_id}, which it \
 						 carries."
+					)))),
+				| Some(assigned)
+					if old_user_id.is_none() && userinfo.email_verified == Some(false) =>
+					return Err!(Request(Forbidden(warn!(
+						"This sign-in is assigned to {assigned}, but the provider says its \
+						 address is unverified."
 					)))),
 				| _ => (user_id, None),
 			},

@@ -84,6 +84,13 @@ const ASSIGNED: &str = r#"{
 	"vera@example.com" = "@vera:localhost"
 }"#;
 
+/// The second chained provider's map: one address for an account of its own,
+/// one for the account the first provider carries.
+const CHAIN_ASSIGNED: &str = r#"{
+	"hank@example.com" = "@hank:localhost",
+	"chainfirst@example.com" = "@chainfirst:localhost"
+}"#;
+
 /// Environment of a child process that runs one phase of
 /// `sso_assigned_migrated_deactivation` on a database that outlives it.
 const PHASE_ENV: &str = "SSO_ASSIGNED_PHASE";
@@ -276,6 +283,7 @@ fn provider_options(issuer: &str) -> Vec<String> {
 		|idp: &str, key: &str, value: &str| format!("identity_provider.{idp}.{key}={value}");
 
 	let assigned = ASSIGNED.replace(['\n', '\t'], "");
+	let chain_assigned = CHAIN_ASSIGNED.replace(['\n', '\t'], "");
 
 	[IDP, CHAIN[0], CHAIN[1]]
 		.into_iter()
@@ -293,11 +301,7 @@ fn provider_options(issuer: &str) -> Vec<String> {
 			option(IDP, "assigned_accounts", &assigned),
 			option(CHAIN[0], "default", "true"),
 			option(CHAIN[1], "default", "true"),
-			option(
-				CHAIN[1],
-				"assigned_accounts",
-				r#"{ "hank@example.com" = "@hank:localhost" }"#,
-			),
+			option(CHAIN[1], "assigned_accounts", &chain_assigned),
 		])
 		.collect()
 }
@@ -546,6 +550,24 @@ async fn chained(services: &Services, base: &str, client: &Client) -> Result {
 	assert!(unlinked(services, "chain-second").await?, "chain-second is linked to nothing");
 	assert_eq!(linked_account(services, "chain-first").await?, carried);
 	assert_eq!(services.users.password_hash(&hank).await?, "");
+
+	// A listed address naming the carried account is refused when the provider
+	// says it is unverified.
+	let response = chain(
+		client,
+		base,
+		("chain-first", "chainfirst"),
+		("unverified-chain", "chainfirst"),
+	)
+	.await?;
+
+	assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+	let error: Value = response.json().await?;
+	let message = error["error"].as_str().unwrap_or_default();
+
+	assert!(message.contains("unverified"), "{message}");
+	assert!(unlinked(services, "unverified-chain").await?, "unverified-chain is linked to nothing");
 
 	// An unlisted address of the second provider joins the carried account.
 	let response =
