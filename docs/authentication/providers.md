@@ -72,7 +72,7 @@ please refer to the section on [environment variables](#configuring-via-environm
 |---|---|---|
 | `userid_claims` | all | Claims used to compute the Matrix localpart for new registrations. When empty, Tuwunel avoids generated IDs where possible. The special value `"unique"` forces generated IDs exclusively. The claim `"sub"` takes precedence over all others when listed. |
 | `trusted` | `false` | Inverts user matching: instead of registering a new account when claims conflict with existing users, Tuwunel finds the first matching user and grants access to it. **Only set this for providers you self-host and fully control. Never use with public providers (GitHub, GitLab, Google, etc.); it enables account takeover.** For migrated databases, prefer durable bulk adoption or individual association to temporarily enabling this option. |
-| `assigned_accounts` | `{}` | Assigns existing local accounts to people by the address in their `email` claim, compared case-insensitively. A listed address's first sign-in gets that account or is refused, never another account. See [Assigning accounts created before the first sign-in](#assigning-accounts-created-before-the-first-sign-in). |
+| `assigned_accounts` | `{}` | Assigns existing local accounts to people by the address in their `email` claim, matched ignoring ASCII case. A listed address's first sign-in gets that account or is refused, never another account. See [Assigning accounts created before the first sign-in](#assigning-accounts-created-before-the-first-sign-in). |
 | `unique_id_fallbacks` | `true` | When no claim maps cleanly to an available username, generate a unique random localpart as a fallback. Set to `false` on private servers where random usernames are undesirable — a misconfiguration will produce an error instead. |
 | `registration` | `true` | Whether this provider can create new Matrix accounts. Set to `false` to restrict the provider to existing users only. |
 
@@ -292,23 +292,31 @@ client_id = "tuwunel"
 assigned_accounts = { "alice@example.com" = "@alice:example.com" }
 ```
 
-Each value must be a local user ID; the server refuses to start otherwise.
-Addresses are compared case-insensitively. When an identity with no account
-yet signs in with a listed address, it gets that account and no other: the
-sign-in is refused, with a warning in the log naming the reason, when the
+Each value must be a local user ID, and no address may be listed twice; the
+server refuses to start otherwise. Addresses match ignoring ASCII case only,
+so a lookalike non-ASCII character does not match. When an identity with no
+account yet signs in with a listed address, it gets that account and no other:
+the sign-in is refused, with a warning in the log naming the reason, when the
 account does not exist, is the server user, is deactivated, or is already
-linked to another identity. Otherwise the identity is linked to the account,
-and an account without a password, such as one an appservice registered,
-becomes an SSO account (origin `sso`, no password) so the sign-in succeeds.
-The person's later sign-ins follow that link; addresses not listed are mapped
-as described below. Joining rooms and setting profiles is left to whatever
-created the accounts.
+linked to an identity (also one adopted from another server's database).
+Otherwise the identity is linked to the account, which the log records. An
+account with an empty password, such as one an appservice registered, becomes
+an SSO account (origin `sso`, no password) so the sign-in succeeds, with a
+warning in the log; an account with a password or another sign-in system's
+marker keeps it. The person's later sign-ins follow the link; addresses not
+listed are mapped as described below. Joining rooms and setting profiles is
+left to whatever created the accounts.
+
+**List only accounts created for these people.** An account deactivated
+before this server recorded deactivation reasons, or emptied by the migration
+of another server's database, has an empty password and no reason, looks like
+an account created without a password, and would be reactivated.
 
 **Whoever controls a listed address gets the account and everything in it.**
-List only addresses this provider verifies and your organization assigns, and
-remove the entries once their people have signed in or the migration window
-ends. The configuration is the only record of the assignments, so they
-survive restarts and apply until removed.
+Tuwunel does not check whether the provider verified the address, so list only
+addresses your organization assigns, and remove the entries once their people
+have signed in or the migration window ends. The configuration is the only
+record of the assignments; a reload applies to the next sign-in.
 
 ### How Tuwunel derives Matrix user IDs from claims
 

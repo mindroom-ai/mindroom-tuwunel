@@ -31,9 +31,10 @@ use tuwunel_core::{
 		api::appservice::{Namespace, Namespaces, Registration, RegistrationInit},
 	},
 };
+use tuwunel_database::Cbor;
 use tuwunel_service::{
 	Services,
-	oauth::{fallback_localpart, unique_id_sub},
+	oauth::{Session, UserInfo, fallback_localpart, unique_id_sub},
 	users::{DeactivationReason, PASSWORD_SENTINEL, Register},
 };
 
@@ -56,18 +57,24 @@ const ASSIGNED: &str = r#"{
 	"carol@example.com" = "@carol:localhost",
 	"dave@example.com" = "@dave:localhost",
 	"dave.second@example.com" = "@dave:localhost",
+	"gina@example.com" = "@gina:localhost",
+	"kim@example.com" = "@kim:localhost",
+	"lee@example.com" = "@lee:localhost",
 	"nobody@example.com" = "@nobody:localhost",
+	"pat@example.com" = "@pat:localhost",
 	"server@example.com" = "@conduit:localhost"
 }"#;
 
 /// A listed address signs in to its assigned account, and only to it.
 ///
-/// Alice's account was registered by an appservice without a password: her
-/// first sign-in lands in it, its login token logs in, and her next sign-in
-/// follows the stored link. Unlisted addresses are mapped as before. A listed
-/// address whose account is deactivated, linked to another identity, missing,
-/// or the server user is refused, linked to nothing and given no other
-/// account, and the account is left as it was.
+/// Alice's account was registered by an appservice, in its exclusive
+/// namespace, without a password: her first sign-in lands in it, its login
+/// token logs in, and her next sign-in follows the stored link. Accounts with a
+/// password or another system's marker keep it. Unlisted addresses, and a
+/// listed one spelled with a non-ASCII lookalike, are mapped as before. A
+/// listed address whose account is deactivated, linked to another identity
+/// (also by adoption), missing, or the server user is refused, linked to
+/// nothing and given no other account, and the account is left as it was.
 #[test]
 fn sso_assigned_account() -> Result {
 	let provider = TcpListener::bind(("127.0.0.1", 0))?;
@@ -140,6 +147,10 @@ async fn userinfo(headers: HeaderMap) -> Json<Value> {
 		.split_once(':')
 		.expect("subject and localpart");
 
+	// Header values are ASCII, so the KELVIN SIGN, which lowercases to `k`, is
+	// spelled out.
+	let localpart = localpart.replace("KELVIN", "\u{212A}");
+
 	Json(json!({
 		"sub": sub,
 		"email": format!("{localpart}@example.com"),
@@ -169,6 +180,47 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let response = sign_in(&client, base, "alice", "Alice").await?;
 
 	assert_eq!(signed_in(services, &response).await?, alice);
+
+	// An account with a password, or another sign-in system's marker, keeps it.
+	let pat = UserId::parse_with_server_name("pat", services.globals.server_name())?;
+
+	services
+		.users
+		.full_register(Register {
+			user_id: Some(&pat),
+			password: Some("sso-assigned-test-password"),
+			..Default::default()
+		})
+		.await?;
+
+	let hash = services.users.password_hash(&pat).await?;
+	let response = sign_in(&client, base, "pat", "pat").await?;
+
+	assert_eq!(signed_in(services, &response).await?, pat);
+	assert_eq!(services.users.password_hash(&pat).await?, hash);
+	assert_eq!(services.users.origin(&pat).await?, "password");
+	assert_eq!(linked_account(services, "pat").await?, pat);
+
+	let lee = UserId::parse_with_server_name("lee", services.globals.server_name())?;
+
+	services
+		.users
+		.create(&lee, Some(PASSWORD_SENTINEL), Some("ldap"))
+		.await?;
+
+	let response = sign_in(&client, base, "lee", "lee").await?;
+
+	assert_eq!(signed_in(services, &response).await?, lee);
+	assert_eq!(services.users.origin(&lee).await?, "ldap");
+	assert_eq!(linked_account(services, "lee").await?, lee);
+
+	// A non-ASCII lookalike of a listed address is not that address.
+	let kim = register_ahead(services, base, "kim").await?;
+	let response = sign_in(&client, base, "kelvin", "KELVINim").await?;
+
+	assert_eq!(signed_in(services, &response).await?, fallback(services, "kelvin").await?);
+	assert_eq!(services.users.password_hash(&kim).await?, "");
+	assert_eq!(services.users.origin(&kim).await?, "password");
 
 	// Unlisted addresses are mapped as before: a free name gets a new account,
 	// a taken one the identity's fallback.
@@ -213,6 +265,15 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.await?;
 	assert_eq!(linked_account(services, "dave").await?, dave);
 
+	// A link adopted from another server's database has no entry in the user's
+	// index, and still makes the account another identity's.
+	let gina = register_ahead(services, base, "gina").await?;
+
+	adopt(services, &gina, "gina-adopted").await?;
+	refused(services, &client, base, "gina", "gina", "is linked to another").await?;
+	assert_eq!(linked_account(services, "gina-adopted").await?, gina);
+	assert_eq!(services.users.password_hash(&gina).await?, "");
+
 	// A missing account is not created.
 	refused(services, &client, base, "nobody", "nobody", "does not exist").await?;
 
@@ -230,13 +291,13 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	Ok(())
 }
 
-/// Register an appservice that may create accounts for the test's people.
+/// Register an appservice that creates accounts for the test's people.
 ///
-/// Its namespace is not exclusive, so the people may sign in themselves, as
-/// during a migration that fills their accounts before they do.
+/// Its namespace is exclusive, as a migration's usually is: SSO never names a
+/// new account in it, so only the assignment signs the people in to theirs.
 async fn register_appservice(services: &Services) -> Result {
 	let namespaces = Namespaces {
-		users: vec![Namespace::new(false, "^@(alice|carol|dave):.*$".to_owned())],
+		users: vec![Namespace::new(true, "^@(alice|carol|dave|gina|kim):.*$".to_owned())],
 		..Default::default()
 	};
 
@@ -311,6 +372,29 @@ async fn refused(
 			.await,
 		"{sub} has no account"
 	);
+
+	Ok(())
+}
+
+/// Link the account to the identity `sub` as adopting another server's database
+/// does: the session and its identity index, without the user's index.
+async fn adopt(services: &Services, user_id: &UserId, sub: &str) -> Result {
+	let provider = services.oauth.providers.get(IDP).await?;
+	let unique_id = unique_id_sub((&provider, sub))?;
+	let sess_id = format!("{sub}-session");
+	let session = Session {
+		idp_id: Some(IDP.to_owned()),
+		sess_id: Some(sess_id.clone()),
+		user_id: Some(user_id.to_owned()),
+		user_info: Some(UserInfo {
+			sub: sub.to_owned(),
+			..Default::default()
+		}),
+		..Default::default()
+	};
+
+	services.db["oauthid_session"].raw_put(&sess_id, Cbor(&session));
+	services.db["oauthuniqid_oauthid"].insert(unique_id.as_str(), &sess_id);
 
 	Ok(())
 }

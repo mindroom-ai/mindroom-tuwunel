@@ -5130,12 +5130,16 @@ pub struct IdentityProvider {
 	pub trusted: bool,
 
 	/// Assigns existing local accounts by the address in the `email` claim,
-	/// compared case-insensitively: `{ "alice@example.com" = "@alice:example.com" }`.
-	/// A listed address's first sign-in gets that account, made an SSO account if
-	/// it has no password, or is refused if the account is missing, the server
-	/// user, deactivated, or linked to another identity. Whoever controls a listed
-	/// address gets the account: list only addresses this provider verifies and
-	/// your organization assigns, and remove entries once their people signed in.
+	/// matched ignoring ASCII case: `{ "alice@example.com" = "@alice:example.com" }`.
+	/// A listed address's first sign-in gets that account, or is refused if the
+	/// account is missing, the server user, deactivated, or linked to another
+	/// identity; one with an empty password becomes an SSO account. List only
+	/// accounts created for these people: one deactivated before deactivation
+	/// reasons were recorded, or emptied by a database migration, has no reason
+	/// and would be reactivated. Whoever controls a listed address gets the
+	/// account, and the provider's verification of it is not checked, so list
+	/// only addresses your organization assigns and remove entries once their
+	/// people have signed in. A reload applies to the next sign-in.
 	///
 	/// default: {}
 	#[serde(default)]

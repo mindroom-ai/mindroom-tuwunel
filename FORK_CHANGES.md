@@ -671,18 +671,25 @@ account before their first sign-in, for example through an appservice's
 `/register`, and fill it with history. That sign-in then got a new account,
 because an existing account SSO did not create is skipped, and
 `trusted = true` hands out any account whose name the claims give. A
-provider's `assigned_accounts` maps email addresses, compared
-case-insensitively, to local user IDs, which the config check requires. An
-identity with no account yet whose `email` claim is listed gets that account
-and no other: the sign-in is refused, with a warning naming the reason, when
-the account does not exist, is the server user, is deactivated (an empty
-password with a recorded reason), or is linked to another identity. The checks
-and the link are made under the account's password lock, and an account
-without a password gets the sentinel and origin `sso` in one write. Unlisted
-addresses and later sign-ins work as before. Upstream has no such option.
-Files: `src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
-`src/service/users/sso.rs`, `src/api/client/session/sso.rs`,
-`docs/authentication/providers.md`; tests in
+provider's `assigned_accounts` maps email addresses, matched ignoring ASCII
+case, to local user IDs; the config check requires local IDs and distinct
+addresses, and the map is read live, so a reload applies. An identity with no
+account yet whose `email` claim is listed gets that account and no other: the
+sign-in is refused, with a warning naming the reason, when the account does
+not exist, is the server user, is deactivated (an empty password with a
+recorded reason; an unreadable reason counts), or is linked to any identity,
+including one adopted from another server's database. The checks and the link
+are made under the account's password lock; deactivation now writes the empty
+password and its reason in one transaction under that lock. An account with an
+empty password gets the sentinel and origin `sso` in one write, with a
+warning; other accounts keep their password and origin. A reason-less
+deactivation from before reasons were recorded, or from a migrated database,
+looks like an account created without a password, so the docs say to list
+only accounts created for these people. Unlisted addresses and later sign-ins
+work as before. Upstream has no such option. Files:
+`src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
+`src/service/users/{mod.rs,sso.rs}`, `src/service/oauth/sessions.rs`,
+`src/api/client/session/sso.rs`, `docs/authentication/providers.md`; tests in
 `src/main/tests/sso_assigned_account.rs` and `src/core/config/tests.rs`.
 
 ### Knock state is checked before it is stored
@@ -1377,8 +1384,8 @@ mindroom_ephemeral_events_enabled = true
 ### Accounts assigned to SSO sign-ins
 ```toml
 [[global.identity_provider]]
-# Empty by default; list only verified addresses your organization assigns,
-# and remove entries once their people have signed in.
+# Empty by default; list only addresses your organization assigns, for
+# accounts created for those people, and remove entries once they signed in.
 assigned_accounts = { "alice@example.com" = "@alice:example.com" }
 ```
 

@@ -651,7 +651,7 @@ async fn complete_sso_session(
 
 		let (user_id, assigned) = match (session.user_id, old_user_id) {
 			| (Some(user_id), ..) | (None, Some(user_id)) => (user_id, None),
-			| (None, None) => match assigned_account(provider, &userinfo) {
+			| (None, None) => match assigned_account(services, provider, &userinfo) {
 				| Some(user_id) => {
 					let guard = services
 						.users
@@ -693,7 +693,15 @@ async fn complete_sso_session(
 		.await?;
 
 	// The link is stored, so release the account before the steps below lock it.
-	drop(assigned);
+	if let Some(guard) = assigned {
+		drop(guard);
+		info!(
+			provider = provider.id(),
+			sub = %userinfo.sub,
+			%user_id,
+			"Linked the assigned account."
+		);
+	}
 
 	if services
 		.users
@@ -945,13 +953,24 @@ async fn set_avatar(
 }
 
 /// The account `assigned_accounts` gives the identity's email address, if any.
-fn assigned_account(provider: &Provider, userinfo: &UserInfo) -> Option<OwnedUserId> {
-	let email = userinfo.email.as_deref()?.to_lowercase();
+///
+/// The map is read from the live configuration, so a reload applies to the next
+/// sign-in. Addresses match ignoring ASCII case only.
+fn assigned_account(
+	services: &Services,
+	provider: &Provider,
+	userinfo: &UserInfo,
+) -> Option<OwnedUserId> {
+	let email = userinfo.email.as_deref()?;
 
-	provider
+	services
+		.oauth
+		.providers
+		.find_config(provider.id())
+		.ok()?
 		.assigned_accounts
 		.iter()
-		.find(|(address, _)| address.to_lowercase() == email)
+		.find(|(address, _)| address.eq_ignore_ascii_case(email))
 		.map(|(_, user_id)| user_id.clone())
 }
 

@@ -2,7 +2,8 @@ use futures::StreamExt;
 use ruma::{OwnedUserId, UserId};
 use tuwunel_core::{
 	Err, Result, utils,
-	utils::{MutexMapGuard, ReadyExt, result::NotFound},
+	utils::{MutexMapGuard, result::NotFound},
+	warn,
 };
 use tuwunel_database::Deserialized;
 
@@ -47,7 +48,7 @@ pub enum DeactivationReason {
 }
 
 impl DeactivationReason {
-	const fn as_str(self) -> &'static str {
+	pub(super) const fn as_str(self) -> &'static str {
 		match self {
 			| Self::SelfService => "self",
 			| Self::Admin => "admin",
@@ -155,21 +156,29 @@ impl Service {
 		user_id: &UserId,
 	) -> Result<MutexMapGuard<OwnedUserId, ()>> {
 		let guard = self.changing_password.lock(user_id).await;
-		let sessions = self
-			.services
-			.oauth
-			.sessions
-			.get_sess_id_by_user(user_id);
 		let refusals = [
 			(user_id == self.services.globals.server_user, "is the server user"),
 			(!self.exists(user_id).await, "does not exist"),
-			// Unlike a deactivation, creation without a password records no reason.
+			// Unlike a deactivation, creation without a password records no reason;
+			// an unreadable reason counts.
 			(
 				self.is_deactivated(user_id).await.unwrap_or(true)
-					&& self.deactivation_reason(user_id).await.is_some(),
+					&& !self
+						.db
+						.userid_deactivation_reason
+						.get(user_id)
+						.await
+						.is_not_found(),
 				"is deactivated",
 			),
-			(sessions.ready_any(|id| !id.is_missing()).await, "is linked to another identity"),
+			(
+				self.services
+					.oauth
+					.sessions
+					.is_linked(user_id)
+					.await,
+				"is linked to another identity",
+			),
 		];
 
 		if let Some((_, reason)) = refusals.into_iter().find(|(refused, _)| *refused) {
@@ -178,7 +187,10 @@ impl Service {
 			))));
 		}
 
-		if !self.has_password(user_id).await? {
+		// Only an empty password is converted, so another sign-in system's
+		// sentinel keeps its origin.
+		if self.password_hash(user_id).await?.is_empty() {
+			warn!(%user_id, "Making the assigned account, without a password, an SSO account.");
 			let mut txn = self.services.db.txn();
 			txn.insert_raw(&self.db.userid_origin, user_id, "sso");
 			txn.insert_raw(&self.db.userid_password, user_id, PASSWORD_SENTINEL);

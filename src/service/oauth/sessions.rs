@@ -18,6 +18,7 @@ use tuwunel_core::{
 		MutexMap,
 		stream::{IterStream, ReadyExt, TryExpect},
 	},
+	warn,
 };
 use tuwunel_database::{Cbor, Database, Deserialized, Ignore, Map};
 use url::Url;
@@ -364,6 +365,31 @@ pub fn get_sess_id_by_user(&self, user_id: &UserId) -> impl Stream<Item = Result
 		.map_ok(Vec::into_iter)
 		.map_ok(IterStream::try_stream)
 		.try_flatten_stream()
+}
+
+/// Whether any identity is linked to `user_id`.
+///
+/// The sessions themselves are read too, since an adopted link has no entry in
+/// the user's index. Anything unreadable counts as a link.
+#[implement(Sessions)]
+pub async fn is_linked(&self, user_id: &UserId) -> bool {
+	let linked = |session: Result<(Ignore, Cbor<Session>)>| match session {
+		| Ok((_, Cbor(session))) => session.user_id.as_deref() == Some(user_id),
+		| Err(e) => {
+			warn!(%user_id, error = %e, "Unreadable identity link.");
+			true
+		},
+	};
+
+	self.get_sess_id_by_user(user_id)
+		.ready_any(|sess_id| !sess_id.is_missing())
+		.await
+		|| self
+			.db
+			.oauthid_session
+			.stream()
+			.ready_any(linked)
+			.await
 }
 
 /// Resolve the `sess_id` from an associated provider issuer and subject hash.

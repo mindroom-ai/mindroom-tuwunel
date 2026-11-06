@@ -279,9 +279,14 @@ impl Service {
 		// Set the password to "" to indicate a deactivated account. Hashes will never
 		// result in an empty string, so the user will not be able to log in again.
 		// Systems like changing the password without logging in should check if the
-		// account is deactivated.
-		self.set_password(user_id, None).await?;
-		self.set_deactivation_reason(user_id, reason);
+		// account is deactivated. The reason is written with it under the password
+		// lock, so no reader finds the empty password without it.
+		let password_guard = self.changing_password.lock(user_id).await;
+		let mut txn = self.services.db.txn();
+		txn.insert_raw(&self.db.userid_password, user_id, PASSWORD_DISABLED);
+		txn.insert_raw(&self.db.userid_deactivation_reason, user_id, reason.as_str());
+		txn.execute();
+		drop(password_guard);
 		drop(admin_lock);
 
 		// Revoke any SSO authorizations, outside the lock since each is a request
