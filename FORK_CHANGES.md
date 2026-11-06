@@ -1158,6 +1158,35 @@ gives `next_token` only when that notification exists. Upstream has the same
 bug. File: `src/api/client/push/notifications.rs`; test in
 `src/main/tests/notifications_next_token.rs`.
 
+### The user directory leaves out deactivated accounts
+
+On servers that list all local users (`show_all_local_users_in_user_directory
+= true`), `/user_directory/search` otherwise returns deactivated accounts with
+the active ones, and with the option off it still returns one that keeps a
+room membership. Synapse removes an account from its directory when it is
+deactivated; upstream Tuwunel (checked on `main`, `d5151f783`) has no such
+filter.
+
+Files: `src/api/client/user_directory.rs`; tests in
+`src/mindroom-tests/tests/user_directory_deactivated.rs` (option on) and
+`src/mindroom-tests/tests/user_directory_deactivated_rooms.rs` (option off),
+with helpers in `src/mindroom-tests/tests/support/directory.rs`.
+
+Behavior:
+- A local account is left out of every search, whatever
+  `show_all_local_users_in_user_directory` and
+  `show_appservice_users_in_user_directory` say, when its stored password is
+  empty and it has a recorded deactivation reason. Every deactivation path
+  goes through `deactivate_account`, which records the reason, and every
+  reactivation replaces the empty password.
+- An empty password alone does not hide an account: remote users, appservice
+  senders, and users created without a password store one too, and keep
+  their earlier visibility.
+- Accounts deactivated before the fork recorded deactivation reasons
+  (2026-09, `5597e3eca`) have none and stay listed.
+- The appservice filtering and the public-room and shared-room rules are
+  unchanged.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
@@ -1448,8 +1477,10 @@ device-key immutability/cleanup/
 concurrency, real gateway stream/invite notifications and finished-stream
 unread counts, and audience-bound
 OpenID tokens with the option on and off (`openid_audience.rs`,
-`openid_audience_disabled.rs`), and OpenID userinfo room membership
-(`openid_room_membership.rs`). Stream classification
+`openid_audience_disabled.rs`), OpenID userinfo room membership
+(`openid_room_membership.rs`), and deactivated accounts left out of the user
+directory with `show_all_local_users_in_user_directory` on and off
+(`user_directory_deactivated.rs`, `user_directory_deactivated_rooms.rs`). Stream classification
 also has unit tests in `src/service/pusher/tests.rs`.
 
 The v1.9.3 rebase adds pins for its semantic overlaps:

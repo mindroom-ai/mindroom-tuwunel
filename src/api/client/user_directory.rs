@@ -30,6 +30,7 @@ const LIMIT_DEFAULT: usize = 10;
 ///   unless `show_all_local_users_in_user_directory` is enabled
 /// - Hides appservice senders and users in exclusive appservice user namespaces
 ///   unless `show_appservice_users_in_user_directory` is enabled
+/// - Hides deactivated local accounts, whatever the other options say
 pub(crate) async fn search_users_route(
 	State(services): State<crate::State>,
 	body: Ruma<Request>,
@@ -91,6 +92,10 @@ async fn should_show_user(
 		return false;
 	}
 
+	if is_deactivated(services, target_user).await {
+		return false;
+	}
+
 	if config.show_all_local_users_in_user_directory {
 		return true;
 	}
@@ -112,4 +117,19 @@ async fn should_show_user(
 		.user_sees_user(sender_user, target_user);
 
 	user_in_public_room.or(user_sees_user).await
+}
+
+/// Whether `user_id` is a local account that was deactivated.
+///
+/// Deactivation stores an empty password, but so does every account created
+/// without one: remote users, appservice senders and users. Only
+/// `deactivate_account` also records a deactivation reason, and reactivation
+/// replaces the empty password, so both together mark a deactivated account.
+async fn is_deactivated(services: &Services, user_id: &UserId) -> bool {
+	matches!(services.users.is_deactivated(user_id).await, Ok(true))
+		&& services
+			.users
+			.deactivation_reason(user_id)
+			.await
+			.is_some()
 }
