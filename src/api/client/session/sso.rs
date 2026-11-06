@@ -689,12 +689,15 @@ async fn complete_sso_session(
 		.commit_identity_session(&unique_id, complete_identity)
 		.await?;
 
-	// The identity is linked now, so release the account before the steps below
-	// take its password lock.
-	let claimed = claim.is_some();
+	// The identity is linked now. Settling the claim removes the account's
+	// unclaimed mark and releases it before the steps below take its password
+	// lock, and provisioning starts at once, before anything else can cut this
+	// sign-in short, as a task that outlives the request. Only this sign-in
+	// claims the account, so it is provisioned once.
 	if let Some(claim) = claim {
-		drop(claim);
+		services.users.settle_claim(claim);
 		info!(%user_id, provider = provider.id(), "Claimed an unlinked account.");
+		spawn_provisioning(state, provider, &session, &userinfo, &user_id);
 	}
 
 	if services
@@ -736,22 +739,26 @@ async fn complete_sso_session(
 
 	services.users.locked_check(&user_id).await?;
 
-	// Only this sign-in claims the account, so it is provisioned once. The work
-	// outlives the request: a client that goes away mid-callback cannot cut it
-	// short, however many rooms the account is in.
-	if claimed {
-		let (provider, session, userinfo, user_id) =
-			(provider.clone(), session.clone(), userinfo.clone(), user_id.clone());
-
-		state
-			.tasks
-			.spawn(CLAIM_PROVISION_ACTION, user_id.to_string(), async move {
-				provision_claimed(&state, &provider, &session, &userinfo, &user_id).await;
-				Ok(JsonValue::Null)
-			});
-	}
-
 	Ok((user_id, session))
+}
+
+/// Start provisioning a claimed account in a task of its own, which a client
+/// going away cannot cancel, however many rooms the account is in.
+fn spawn_provisioning(
+	state: crate::State,
+	provider: &Provider,
+	session: &Session,
+	userinfo: &UserInfo,
+	user_id: &UserId,
+) {
+	let (provider, session, userinfo, user_id) =
+		(provider.clone(), session.clone(), userinfo.clone(), user_id.to_owned());
+
+	state
+		.tasks
+		.spawn(CLAIM_PROVISION_ACTION, user_id.to_string(), async move {
+			provision_claimed(&state, &provider, &session, &userinfo, &user_id).await
+		});
 }
 
 /// Find the session an earlier release keyed on the presented GitHub `login`.
@@ -915,20 +922,31 @@ async fn register_user(
 
 /// Give a claimed account what SSO registration gives a new one.
 ///
-/// The account joins the configured `auto_join_rooms` first. The identity's
-/// name and avatar then replace only what the account's own registration
-/// defaulted to, so a profile someone set for it stays; each change updates
-/// every room the account is in. The admin room hears of the claim as it hears
-/// of a registration. The first user's admin grant is not given, since the
-/// account existed before.
+/// Nothing is done unless the account is still active and not locked. The
+/// account then joins the configured `auto_join_rooms`. The identity's name and
+/// avatar replace only what the account's own registration defaulted to, so a
+/// profile someone set for it stays; each change updates every room the
+/// account is in. The admin room hears of the claim as it hears of a
+/// registration. The first user's admin grant is not given, since the account
+/// existed before. The task fails, naming the steps, when a room or profile
+/// change fails.
 async fn provision_claimed(
 	services: &Services,
 	provider: &Provider,
 	session: &Session,
 	userinfo: &UserInfo,
 	user_id: &UserId,
-) {
-	services.users.auto_join_rooms(user_id).await;
+) -> Result<JsonValue> {
+	if !services.users.is_active_local(user_id).await || services.users.is_locked(user_id).await {
+		return Err!("{user_id} is deactivated or locked, so it is not provisioned.");
+	}
+
+	let mut failed = Vec::new();
+
+	let missed = services.users.auto_join_rooms(user_id).await;
+	if missed > 0 {
+		failed.push(format!("{missed} of the auto-join rooms"));
+	}
 
 	let suffix = services
 		.config
@@ -950,13 +968,12 @@ async fn provision_claimed(
 
 	if let Some(name) = userinfo.name.as_deref()
 		&& default_displayname
-	{
-		services
+		&& let Err(e) = services
 			.profile
 			.set_displayname(user_id, Some(&with_suffix(name)), None)
 			.await
-			.log_err()
-			.ok();
+	{
+		failed.push(format!("the display name: {e}"));
 	}
 
 	if let Some(avatar_url) = userinfo
@@ -968,10 +985,10 @@ async fn provision_claimed(
 			.avatar_url(user_id)
 			.await
 			.is_missing()
+		&& let Err(e) =
+			set_avatar(services, provider, session, userinfo, user_id, avatar_url).await
 	{
-		set_avatar(services, provider, session, userinfo, user_id, avatar_url)
-			.await
-			.ok();
+		failed.push(format!("the avatar: {e}"));
 	}
 
 	let idp_name = provider
@@ -985,6 +1002,12 @@ async fn provision_claimed(
 	);
 
 	services.admin.notify(&notice).await;
+
+	if !failed.is_empty() {
+		return Err!("Provisioning {user_id} missed {}", failed.join("; "));
+	}
+
+	Ok(JsonValue::Null)
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(user_id, avatar_url))]

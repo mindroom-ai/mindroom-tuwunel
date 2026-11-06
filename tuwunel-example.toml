@@ -4265,9 +4265,10 @@
 # an appservice reserves exclusively is never taken.
 #
 # An account qualifies only while it is not the server user, its origin
-# is password or SSO, it holds no password, it is neither deactivated nor
-# locked, and it has no device, no linked identity of any provider and no
-# pending admin-approved association. Other existing accounts are skipped
+# is password or SSO, it holds no password and never held one, it is
+# neither deactivated nor locked, and it has no device, no bound email
+# address or other third-party identifier, no linked identity of any
+# provider and no pending admin-approved association. Other existing accounts are skipped
 # as before. A claimed account becomes an SSO account linked to the
 # identity, as if SSO had registered it: it joins `auto_join_rooms` and
 # takes the identity's name and avatar where it still has its

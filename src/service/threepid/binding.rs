@@ -9,7 +9,11 @@ use ruma::{
 	MilliSecondsSinceUnixEpoch, OwnedUserId, UserId,
 	thirdparty::{Medium, ThirdPartyIdentifier, ThirdPartyIdentifierInit},
 };
-use tuwunel_core::{Result, implement, result::NotFound, utils::stream::TryIgnore};
+use tuwunel_core::{
+	Result, implement,
+	result::NotFound,
+	utils::stream::{ReadyExt, TryIgnore},
+};
 use tuwunel_database::{Cbor, Deserialized, Ignore, Interfix};
 
 use super::Binding;
@@ -75,6 +79,17 @@ pub fn get_bindings<'a>(
 			}
 			.into()
 		})
+}
+
+/// Whether any third-party identifier is bound to the user, counting a binding
+/// that cannot be read.
+#[implement(super::Service)]
+pub async fn has_bindings(&self, user_id: &UserId) -> bool {
+	self.db
+		.userid_email
+		.keys_prefix_raw(&(user_id, Interfix))
+		.ready_any(|_| true)
+		.await
 }
 
 /// Removes a canonical email binding from both index directions.

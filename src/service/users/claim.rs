@@ -20,10 +20,11 @@ use super::{PASSWORD_DISABLED, PASSWORD_SENTINEL};
 /// Holds the password lock of an account a sign-in has claimed.
 ///
 /// Password changes, deactivation and other claims of the account wait until
-/// this is dropped, so the caller links the identity before anything else can
-/// find the account unlinked.
+/// this is settled or dropped, so the caller links the identity before anything
+/// else can find the account unlinked.
 #[must_use]
 pub struct Claim {
+	user_id: OwnedUserId,
 	_password_guard: MutexMapGuard<OwnedUserId, ()>,
 }
 
@@ -44,7 +45,7 @@ pub fn mark_unclaimed(&self, user_id: &UserId) { self.db.userid_unclaimed.insert
 
 /// Whether an account carries the unclaimed mark.
 ///
-/// A claim and a deactivation remove it.
+/// A settled claim, a password and a deactivation remove it.
 #[implement(super::Service)]
 pub async fn is_unclaimed(&self, user_id: &UserId) -> bool {
 	self.db
@@ -57,11 +58,12 @@ pub async fn is_unclaimed(&self, user_id: &UserId) -> bool {
 /// Turn an account nobody can sign in to into an SSO account, or change
 /// nothing and return `None`.
 ///
-/// The account gets the password sentinel and the SSO origin and loses its
-/// unclaimed mark in one write, as SSO registration gives a new account. The
-/// caller has already refused names that are forbidden or that an appservice
-/// reserves exclusively, and links the identity while it holds the returned
-/// claim.
+/// The account gets the password sentinel and the SSO origin in one write, as
+/// SSO registration gives a new account. It keeps its unclaimed mark, which
+/// still admits such an account, until `settle_claim` once the identity is
+/// linked, so a sign-in cut short in between leaves it claimable. The caller
+/// has already refused names that are forbidden or that an appservice
+/// reserves exclusively.
 #[implement(super::Service)]
 pub async fn claim_unlinked(&self, user_id: &UserId) -> Option<Claim> {
 	let password_guard = self.changing_password.lock(user_id).await;
@@ -74,10 +76,20 @@ pub async fn claim_unlinked(&self, user_id: &UserId) -> Option<Claim> {
 
 	txn.insert_raw(&self.db.userid_origin, user_id, "sso");
 	txn.insert_raw(&self.db.userid_password, user_id, PASSWORD_SENTINEL);
-	txn.del_raw(&self.db.userid_unclaimed, user_id);
 	txn.execute();
 
-	Some(Claim { _password_guard: password_guard })
+	Some(Claim {
+		user_id: user_id.to_owned(),
+		_password_guard: password_guard,
+	})
+}
+
+/// Complete a claim once the identity is linked to the account: the account
+/// loses its unclaimed mark, and its password lock is released.
+#[implement(super::Service)]
+pub fn settle_claim(&self, claim: Claim) {
+	self.db.userid_unclaimed.remove(&claim.user_id);
+	drop(claim);
 }
 
 /// Whether nobody can sign in to an existing local account.
@@ -86,8 +98,10 @@ pub async fn claim_unlinked(&self, user_id: &UserId) -> Option<Claim> {
 /// Its origin must be password or SSO (others sign in through LDAP, JWT or a
 /// delegated authentication service), it must hold no password, and an empty
 /// one must come with no recorded deactivation. It must not be locked, and must
-/// have no device, whose token or keys someone holds, no identity linked and no
-/// admin-approved association pending. Anything unreadable counts against it.
+/// have no device, whose token or keys someone holds, no bound third-party
+/// identifier, through which its owner could reset a password, no identity
+/// linked and no admin-approved association pending. Anything unreadable
+/// counts against it.
 #[implement(super::Service)]
 async fn is_claimable(&self, user_id: &UserId) -> bool {
 	if !self.services.globals.user_is_local(user_id)
@@ -118,6 +132,7 @@ async fn is_claimable(&self, user_id: &UserId) -> bool {
 		&& passwordless
 		&& !self.is_locked(user_id).await
 		&& !self.has_devices(user_id).await
+		&& !self.services.threepid.has_bindings(user_id).await
 		&& !self
 			.services
 			.oauth

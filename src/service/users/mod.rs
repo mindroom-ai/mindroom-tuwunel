@@ -284,12 +284,14 @@ impl Service {
 		// result in an empty string, so the user will not be able to log in again.
 		// Systems like changing the password without logging in should check if the
 		// account is deactivated. The reason and the end of any claim on the account
-		// are written under the same password lock, so an identity provider sign-in
-		// never finds the empty password without them.
+		// are written with it in one transaction under the password lock, so an
+		// identity provider sign-in never finds the empty password without them.
 		let password_guard = self.changing_password.lock(user_id).await;
-		self.set_password_locked(user_id, None).await?;
-		self.set_deactivation_reason(user_id, reason);
-		self.db.userid_unclaimed.remove(user_id);
+		let mut txn = self.services.db.txn();
+		txn.del_raw(&self.db.userid_unclaimed, user_id);
+		txn.insert_raw(&self.db.userid_password, user_id, PASSWORD_DISABLED);
+		txn.insert_raw(&self.db.userid_deactivation_reason, user_id, reason.as_str());
+		txn.execute();
 		drop(password_guard);
 		drop(admin_lock);
 
@@ -847,6 +849,10 @@ async fn set_password_locked(&self, user_id: &UserId, password: Option<&str>) ->
 			self.db.userid_password.insert(user_id, hash);
 			self.db.userid_deactivation_reason.remove(user_id);
 			self.db.userid_origin.insert(user_id, "password");
+
+			// A password makes the account its holder's, so no sign-in may claim it,
+			// even if the password is later replaced by the sentinel.
+			self.db.userid_unclaimed.remove(user_id);
 		},
 	}
 

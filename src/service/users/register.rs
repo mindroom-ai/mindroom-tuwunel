@@ -134,19 +134,22 @@ pub async fn full_register(
 }
 
 /// Join a local user who has just signed up to the configured
-/// `auto_join_rooms`.
+/// `auto_join_rooms`, and return how many of them it did not join.
 ///
 /// Registration calls this, and so does an SSO sign-in that claims an account
 /// created ahead of it. A room that cannot be resolved or joined is logged and
 /// skipped, so it never fails the sign-up.
 #[implement(super::Service)]
-pub async fn auto_join_rooms(&self, user_id: &UserId) {
+pub async fn auto_join_rooms(&self, user_id: &UserId) -> usize {
+	let mut missed = 0_usize;
+
 	for room in &self.services.server.config.auto_join_rooms {
 		let Ok(room_id) = self.services.alias.maybe_resolve(room).await else {
 			error!(
 				"Failed to resolve room alias to room ID when attempting to auto join {room}, \
 				 skipping"
 			);
+			missed = missed.saturating_add(1);
 			continue;
 		};
 
@@ -157,6 +160,7 @@ pub async fn auto_join_rooms(&self, user_id: &UserId) {
 			.await
 		{
 			warn!("Skipping room {room} to automatically join as we have never joined before.");
+			missed = missed.saturating_add(1);
 			continue;
 		}
 
@@ -177,10 +181,13 @@ pub async fn auto_join_rooms(&self, user_id: &UserId) {
 			| Err(e) => {
 				// don't return this error so we don't fail registrations
 				error!("Failed to automatically join room {room} for user {user_id}: {e}");
+				missed = missed.saturating_add(1);
 			},
 			| _ => {
 				info!("Automatically joined room {room} for user {user_id}");
 			},
 		}
 	}
+
+	missed
 }

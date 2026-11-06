@@ -309,25 +309,34 @@ while nobody can sign in to it:
   exclusively by an appservice;
 - its origin is `password` or `sso`; accounts provisioned by LDAP, JWT or a
   delegated authentication service sign in there;
-- it holds no password, and it is neither deactivated (deactivation also
-  removes the mark) nor locked;
+- it holds no password, and it is neither deactivated nor locked. Setting a
+  password or deactivating the account removes the mark for good;
 - it has no device, whose access token or keys someone already holds, so
   register the accounts with `"inhibit_login": true`;
+- no email address or other third-party identifier is bound to it, since its
+  owner could reset a password through it, so leave `threepids` out of an
+  admin API request that creates one;
 - no identity of any provider is linked to it, and no
   [admin-approved association](#admin-approved-association-for-untrusted-providers)
-  is pending for it.
+  is pending for it. To associate a marked account with an identity yourself,
+  first make it active with the admin API (`PUT` the user with
+  `{"deactivated": false}`), since an account created without a password
+  otherwise reads as deactivated at sign-in.
 
 Any other existing account is skipped exactly as without the option, and the
 next name or the identity's fallback username is used. A claimed account loses
 its mark and becomes an SSO account (origin `sso`, no password) linked to the
 identity, as if SSO had registered it, so the person's next sign-in reaches it
-directly and interactive authentication offers them SSO. Once the sign-in
-succeeds, the server also gives the account what SSO registration gives a new
+directly and interactive authentication offers them SSO. A sign-in cut short
+before the link is stored leaves the account claimable. As soon as the link is
+stored, the server also gives the account what SSO registration gives a new
 one, once and in the background, so a closed browser tab cannot cut it short:
-it joins the `auto_join_rooms`, then takes the identity's name and avatar
-unless the account already has its own (a display name other than the one its
-registration defaulted to, or any avatar), and the admin room is told. It is
-not granted admin as a first user would be. The server logs
+if the account is still active and not locked, it joins the `auto_join_rooms`,
+then takes the identity's name and avatar unless the account already has its
+own (a display name other than the one its registration defaulted to, or any
+avatar), and the admin room is told. The task (`sso_claim_provision`, listed
+by the admin API's scheduled tasks) fails, naming the steps, if a room or
+profile change fails. It is not granted admin as a first user would be. The server logs
 `Claimed an unlinked account.` with the user ID and the provider ID.
 
 **An unclaimed account stays claimable for as long as the option is on.**
