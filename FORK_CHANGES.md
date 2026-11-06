@@ -291,6 +291,24 @@ same bug. Files:
 `src/api/server/send.rs`, `src/api/client/read_marker/mod.rs`; test in
 `src/main/tests/federation_receipt_edu.rs`.
 
+### A receipt recounts only the unread events after its event
+
+An older receipt used to clear every unread count in its context. Both
+`/receipt` and `/read_markers` now recount notified events after the event they
+acknowledge, restricted to the room and receipt context. Counts only decrease;
+when both read-marker fields advance, their furthest accepted event wins.
+Own sends keep #139's context selection and still read the present.
+
+The recount uses the existing room timeline range and visits at most 4,097
+PDUs, including sibling threads and events without notification actions. An
+overflow keeps the previous counts. It scans without the insertion lock, then
+checks notification/highlight counts and read stamps under that lock before
+applying a result. A concurrent insertion or read keeps that context's counts
+unchanged. Notification actions and both count increments share the lock.
+No column or index is added. Inbox read flags and per-thread suppressed pushes
+are a separate draft change. Tests cover old receipts, both marker fields,
+cross-room traffic, overflow, and a concurrent send behind 100,000 sibling rows.
+
 ### A withdrawn knock does not move a former member's departure
 
 Under `shared` history visibility a former member reads events up to their

@@ -89,7 +89,7 @@ pub(crate) async fn room_event_pdu_id(
 	Ok(pdu_id)
 }
 
-/// Clears the receipt's notification counts and refreshes the push badge.
+/// Recounts the receipt's notification counts and refreshes the push badge.
 ///
 /// The refresh follows every advance because the gateway can hold a stale
 /// badge while the stored count is already zero; only a delivery reconciles
