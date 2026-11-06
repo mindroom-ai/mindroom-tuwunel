@@ -86,12 +86,12 @@ async fn password_change_before_deactivation_leaves_disabled() -> Result {
 
 #[tokio::test]
 async fn assignment_never_reactivates_a_deactivation_queued_first() -> Result {
-	assignment_against_deactivation(false).await
+	Box::pin(assignment_against_deactivation(false)).await
 }
 
 #[tokio::test]
 async fn deactivation_queued_after_an_assignment_still_deactivates() -> Result {
-	assignment_against_deactivation(true).await
+	Box::pin(assignment_against_deactivation(true)).await
 }
 
 /// With the password lock held, a deactivation and an assignment queue on it,
