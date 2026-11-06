@@ -1458,6 +1458,10 @@ old forged titles, and later demotions do not invalidate previously authorized
 titles. Bundled title edits need the same power at the edit event. Missing
 authorization state fails closed.
 
+Replacement candidates are searched newest first. An edit rejected by sender,
+type, redaction, history visibility, erasure, or title-author permission does
+not hide an earlier eligible edit.
+
 Fields are omitted when no eligible event exists. Reads skip redacted,
 purged, erased-for-recipient, ignored-user, and blocked-server events. Root,
 child, and edit history visibility is enforced for the requesting user,
@@ -1466,14 +1470,28 @@ previews of its live children, like its standard thread summary. Encrypted rooms
 neither field, including for earlier plaintext history. No plaintext metadata
 is derived from encrypted events, and clients retain their decryption fallback.
 
-The typed relation index separates title markers from other direct replies.
-Each category sorts by the server's event position, matching thread activity,
-so finding a title never walks every conversational reply. Two bounded reverse
-seeks per root stop at the first eligible event. Each seek examines at most
-`thread_latest_reply_search_limit` rows (default 1024), including dangling or
-filtered rows. An exhausted seek omits its field; clients can load that thread.
-There is no shared requester cache. Existing databases rebuild the typed index
-once at startup, while new events maintain it on ingestion. Redactions and
-purges need no thread scans because serving reloads candidate events.
+Each root uses the same native relation data as `latest_event`, walking
+newest first and inspecting at most **50 raw relation rows**, including missing,
+redacted, hidden, ignored, and unrelated rows. The walk stops once both fields
+are found. A missing field is omitted when its candidate falls outside that
+shared bound; clients can open the thread for complete history. Each selected
+preview searches at most 50 native replacement rows, rejecting invalid or
+invisible newer edits before choosing an earlier valid one. Reference bundles
+retain their existing limit. No configuration option changes these fixed
+preview bounds.
 
-Regression coverage: `src/mindroom-tests/tests/thread_previews.rs`.
+There is no preview index, cache, migration, purge hook, or upgrade rebuild.
+Existing native relations continue to be maintained by local and federated
+appends, so rollback and re-upgrade cannot leave a separate preview index
+stale. Live replies to backfilled roots now enter the native relation store too.
+Older backfilled relations absent from that store remain unavailable to this
+bounded walk; their fields are omitted. No room-history scan is added to repair
+them. Retired preview rows and markers from earlier development builds are
+unused and need no recovery procedure.
+
+A page of 100 roots visits at most 5,050 candidate relation rows for previews
+including the endpoint's existing one-root lookahead,
+regardless of the room's total thread count. Regression coverage includes a
+505-thread room, paged through `/threads`, plus independent edit fallback,
+backfilled-root, missing-derived-index, and 50-row exhaustion cases in
+`src/mindroom-tests/tests/thread_previews.rs`.

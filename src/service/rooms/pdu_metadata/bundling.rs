@@ -2,13 +2,23 @@ use std::collections::BTreeSet;
 
 use futures::{Stream, StreamExt, TryFutureExt, pin_mut};
 use ruma::{
-	EventId, OwnedEventId, OwnedUserId, UserId, api::Direction, events::room::encrypted::Relation,
+	EventId, OwnedEventId, OwnedUserId, UserId,
+	api::Direction,
+	events::{
+		StateEventType, TimelineEventType,
+		room::{
+			encrypted::Relation,
+			power_levels::{RoomPowerLevels, RoomPowerLevelsEventContent},
+		},
+	},
+	int,
 };
+use serde_json::{Value, value::to_raw_value};
 use tuwunel_core::{
-	PduId,
+	PduId, Result,
 	arrayvec::ArrayVec,
 	implement,
-	matrix::{Event, Pdu, PduCount, RawPduId},
+	matrix::{Event, Pdu, PduCount, RawPduId, room_version},
 	result::LogErr,
 	utils::{
 		BoolExt,
@@ -332,7 +342,7 @@ async fn bundle_thread_latest_edit(&self, sender_user: &UserId, pdu: &mut Pdu) {
 /// `origin_server_ts`, which the typed index sorts on.
 #[implement(Service)]
 #[tracing::instrument(skip_all, level = "trace")]
-pub(super) async fn newest_replacement(&self, parent: &Pdu) -> Option<Pdu> {
+async fn newest_replacement(&self, parent: &Pdu) -> Option<Pdu> {
 	if parent.is_redacted() {
 		return None;
 	}
@@ -345,7 +355,7 @@ pub(super) async fn newest_replacement(&self, parent: &Pdu) -> Option<Pdu> {
 		.await
 		.ok()?;
 
-	let replacements = self.replacement_children(parent, parent_id);
+	let replacements = self.replacement_children(parent, parent_id, usize::MAX);
 
 	pin_mut!(replacements);
 	replacements.next().await
@@ -369,7 +379,7 @@ pub async fn replacement_ids(&self, parent: &EventId) -> Vec<OwnedEventId> {
 		return Vec::new();
 	};
 
-	self.replacement_children(&parent, parent_id.into())
+	self.replacement_children(&parent, parent_id.into(), usize::MAX)
 		.map(|child| child.event_id().to_owned())
 		.collect()
 		.await
@@ -383,6 +393,7 @@ fn replacement_children<'a>(
 	&'a self,
 	parent: &'a Pdu,
 	parent_id: PduId,
+	limit: usize,
 ) -> impl Stream<Item = Pdu> + Send + 'a {
 	let shortroomid = parent_id.shortroomid;
 	let prefix = prefix(shortroomid, parent_id.count, Tag::Replace);
@@ -397,6 +408,7 @@ fn replacement_children<'a>(
 		.rev_raw_keys_from(seek.as_slice())
 		.ignore_err()
 		.ready_take_while(move |key| key.starts_with(&prefix))
+		.take(limit)
 		.map(|key| u64_from_u8(&key[CHILD_COUNT_OFFSET..KEY_LEN]))
 		.map(PduCount::from_unsigned)
 		.map(move |count| (shortroomid, count))
@@ -544,6 +556,131 @@ async fn redacted_root(&self, ignored: &BTreeSet<OwnedUserId>, root: &Pdu) -> Op
 		.flatten()
 }
 
+const TITLE: &str = "io.mindroom.title";
+const REPLY: &str = "io.mindroom.latest_reply";
+const SEARCH_LIMIT: usize = 50;
+
+#[implement(Service)]
+async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result {
+	let services = &self.services;
+	let access = &services.state_accessor;
+	let config = &services.server.config;
+	let mut unsigned = root.get_unsigned_as_value();
+	let Some(thread) = unsigned
+		.pointer_mut("/m.relations/m.thread")
+		.and_then(Value::as_object_mut)
+	else {
+		return Ok(());
+	};
+	thread.remove(TITLE);
+	thread.remove(REPLY);
+	if !access.is_encrypted_room(root.room_id()).await
+		&& access.user_can_see_event(user, root).await
+		&& let Ok(root_id) = services
+			.timeline
+			.get_pdu_id(root.event_id())
+			.await
+	{
+		let ignored = services
+			.users
+			.ignored_users(user)
+			.await
+			.unwrap_or_default();
+		let root_pid: PduId = root_id.into();
+		let replies = services
+			.threads
+			.thread_replies(root_id, SEARCH_LIMIT)
+			.ignore_err();
+		pin_mut!(replies);
+		while let Some((count, mut child)) = replies.next().await {
+			if child.room_id() != root.room_id()
+				|| child.state_key().is_some()
+				|| *child.kind() == TimelineEventType::RoomEncrypted
+			{
+				continue;
+			}
+			let title = child.get_content::<Value>()?["io.mindroom.thread_summary"].is_object();
+			let field = if title { TITLE } else { REPLY };
+			if thread.contains_key(field)
+				|| ignored.ignored_users.contains_key(child.sender())
+				|| config.is_forbidden_remote_server_name(child.sender().server_name())
+				|| !self.preview_visible(user, &child, title).await
+			{
+				continue;
+			}
+			let mut child_unsigned = child.get_unsigned_as_value();
+			if let Some(object) = child_unsigned.as_object_mut() {
+				object.remove("m.relations");
+				child.unsigned = Some(to_raw_value(&child_unsigned)?.into());
+			}
+			if config.bundle_edit_relations {
+				let replacement = {
+					let id = PduId { shortroomid: root_pid.shortroomid, count };
+					let edits = self
+						.replacement_children(&child, id, SEARCH_LIMIT)
+						.filter_map(async |edit| {
+							self.preview_visible(user, &edit, title)
+								.await
+								.then_some(edit)
+						});
+					pin_mut!(edits);
+					edits.next().await
+				};
+				if let Some(mut edit) = replacement {
+					edit.remove_transaction_id_unless_sender(Some(user))?;
+					child.set_replacement_bundle(&edit.into_format())?;
+				}
+			}
+			if config.bundle_reference_relations {
+				let references = self.references(&child).await;
+				if !references.is_empty() {
+					child.set_reference_bundle(&references)?;
+				}
+			}
+			let event: ruma::serde::Raw<ruma::events::AnySyncMessageLikeEvent> =
+				child.into_format();
+			thread.insert(field.to_owned(), serde_json::to_value(event)?);
+			if thread.contains_key(TITLE) && thread.contains_key(REPLY) {
+				break;
+			}
+		}
+	}
+	root.unsigned = Some(to_raw_value(&unsigned)?.into());
+	Ok(())
+}
+
+#[implement(Service)]
+async fn preview_visible(&self, user: &UserId, event: &Pdu, title: bool) -> bool {
+	let access = &self.services.state_accessor;
+	access.user_can_see_event(user, event).await
+		&& !access.erased_for(user, event).await
+		&& (!title || self.title_allowed(event).await.unwrap_or(false))
+}
+
+/// Authorization uses state before each title/edit, so later grants cannot legitimize forgeries.
+#[implement(Service)]
+async fn title_allowed(&self, title: &Pdu) -> Result<bool> {
+	let access = &self.services.state_accessor;
+	let state = self
+		.services
+		.state
+		.pdu_shortstatehash(title.event_id())
+		.await?;
+	let levels = access
+		.state_get_content::<RoomPowerLevelsEventContent>(
+			state,
+			&StateEventType::RoomPowerLevels,
+			"",
+		)
+		.await?;
+	let create = access.get_create(title.room_id()).await?;
+	let rules = room_version::rules(&create.room_version()?)?;
+	let creators = create.creators(&rules.authorization)?;
+	Ok(RoomPowerLevels::new(levels.into(), &rules.authorization, creators)
+		.for_user(title.sender())
+		>= int!(50))
+}
+
 #[cfg(test)]
 mod tests {
 	use serde_json::json;
@@ -578,7 +715,7 @@ mod tests {
 
 		assert!(latest.is_none(), "load failure returned a latest event");
 
-		let unsigned: serde_json::Value = serde_json::from_str(
+		let unsigned: Value = serde_json::from_str(
 			pdu.unsigned
 				.as_ref()
 				.expect("sibling unsigned data should remain")

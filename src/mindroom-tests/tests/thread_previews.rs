@@ -4,7 +4,7 @@ mod support;
 #[cfg(test)]
 mod tests {
 
-	use std::sync::Arc;
+	use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 	use axum::{Extension, Router, body::Body};
 	use serde_json::{Value, json};
@@ -12,7 +12,8 @@ mod tests {
 	use tuwunel_core::{
 		Result,
 		http::{Request, StatusCode, header},
-		ruma::user_id,
+		matrix::{PduCount, PduId, RawPduId},
+		ruma::{EventId, user_id},
 	};
 	use tuwunel_service::Services;
 
@@ -23,10 +24,7 @@ mod tests {
 
 	#[test]
 	fn thread_previews() -> Result {
-		Harness::new("mindroom_thread_previews", [
-			"thread_latest_reply_search_limit=4".to_owned()
-		])?
-		.with_services(run)
+		Harness::new("mindroom_thread_previews", [])?.with_services(run)
 	}
 
 	struct ThreadCase {
@@ -75,6 +73,8 @@ mod tests {
 		bounded_seeks(&router, &base).await;
 		history_visibility(&router, &base, &case).await;
 		authorship(&router, &base).await;
+		backfilled_root(&services, &router, &base).await?;
+		large_room(&services, &router, &base).await;
 		marker_and_encryption(&router, &base, &case.root).await;
 		Ok(())
 	}
@@ -246,14 +246,14 @@ mod tests {
 			"redacted edits must not be bundled"
 		);
 
-		// A rebuild supplies the same previews for already-stored threads.
+		// Older binaries never wrote preview rows. Reads must use native relations,
+		// even when the typed relation index has no preview data after rollback.
 		services.db["relatesto_typed"].clear().await;
 		let unindexed = event(router, base, MEMBER, root).await;
-		assert!(
-			unindexed["unsigned"]["m.relations"]["m.thread"]
-				.get("io.mindroom.title")
-				.is_none(),
-			"titles must be absent before their index is rebuilt"
+		assert_eq!(
+			unindexed["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["event_id"],
+			first_title,
+			"previews must not depend on derived index rows after rollback"
 		);
 		services
 			.pdu_metadata
@@ -263,7 +263,7 @@ mod tests {
 		assert_eq!(
 			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["event_id"],
 			first_title,
-			"index rebuild must recover existing titles"
+			"native edit-index rebuild must not change thread titles"
 		);
 
 		Ok(())
@@ -323,10 +323,9 @@ mod tests {
 			json!({"msgtype":"m.text","body":"bounded lookup"}),
 		)
 		.await;
-		let reply =
-			send(router, base, OWNER, "bounded-reply", thread(&root, "m.text", "answer")).await;
+		send(router, base, OWNER, "bounded-reply", thread(&root, "m.text", "answer")).await;
 		send(router, base, OWNER, "bounded-title", title(&root, "trusted")).await;
-		for index in 0..4 {
+		for index in 0..50 {
 			send(
 				router,
 				base,
@@ -342,9 +341,9 @@ mod tests {
 			summary.get("io.mindroom.title").is_none(),
 			"exhausted seek must stop before the older authorized title"
 		);
-		assert_eq!(
-			summary["io.mindroom.latest_reply"]["event_id"], reply,
-			"title rows must not consume the reply seek budget"
+		assert!(
+			summary.get("io.mindroom.latest_reply").is_none(),
+			"a reply outside the shared fifty-row bound is omitted"
 		);
 	}
 
@@ -377,6 +376,7 @@ mod tests {
 			thread(&edit_root, "m.text", "visible original"),
 		)
 		.await;
+		let visible_edit = send(router, base, OWNER, "visible-edit", json!({"msgtype":"m.text","body":"* visible revision","m.new_content":{"msgtype":"m.text","body":"visible revision"},"m.relates_to":{"rel_type":"m.replace","event_id":edit_reply}})).await;
 		request(router, "POST", &format!("{base}/leave"), MEMBER, json!({})).await;
 		send(router, base, OWNER, "hidden-title", title(root, "hidden topic")).await;
 		send(router,base,OWNER,"hidden-edit",json!({"msgtype":"m.text","body":"* hidden","m.new_content":{"msgtype":"m.text","body":"hidden"},"m.relates_to":{"rel_type":"m.replace","event_id":edit_reply}})).await;
@@ -388,11 +388,9 @@ mod tests {
 			preview["event_id"], edit_reply,
 			"a visible parent remains eligible when its edit is hidden"
 		);
-		assert!(
-			preview["unsigned"]["m.relations"]
-				.get("m.replace")
-				.is_none(),
-			"hidden edit must not be bundled: {preview}"
+		assert_eq!(
+			preview["unsigned"]["m.relations"]["m.replace"]["event_id"], visible_edit,
+			"hidden latest edit must retain earlier visible edit"
 		);
 		let visible_reply =
 			send(router, base, MEMBER, "visible-reply", thread(root, "m.text", "visible reply"))
@@ -442,6 +440,7 @@ mod tests {
 		);
 		let approved_title =
 			send(router, base, MEMBER, "approved-title", title(root, "approved topic")).await;
+		let approved_edit = send(router, base, MEMBER, "approved-title-edit", json!({"msgtype":"m.notice","body":"* approved revision","m.new_content":{"msgtype":"m.notice","body":"approved revision","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":approved_title}})).await;
 		request(
 			router,
 			"PUT",
@@ -458,13 +457,152 @@ mod tests {
 		);
 		send(router, base, MEMBER, "demoted-title-edit", json!({"msgtype":"m.notice","body":"* unauthorized edit","m.new_content":{"msgtype":"m.notice","body":"unauthorized edit","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":approved_title}})).await;
 		let served = event(router, base, OWNER, root).await;
-		assert!(
+		assert_eq!(
 			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["unsigned"]
-				["m.relations"]
-				.get("m.replace")
-				.is_none(),
-			"a demoted sender cannot edit a trusted title"
+				["m.relations"]["m.replace"]["event_id"],
+			approved_edit,
+			"rejected post-demotion edit must retain earlier authorized edit"
 		);
+	}
+
+	async fn backfilled_root(services: &Services, router: &Router, base: &str) -> Result {
+		let root = send(
+			router,
+			base,
+			OWNER,
+			"backfilled-root",
+			json!({"msgtype":"m.text","body":"historical root"}),
+		)
+		.await;
+		relocate_to_backfill(services, &root, -1).await?;
+		let reply = send(
+			router,
+			base,
+			OWNER,
+			"backfilled-root-reply",
+			thread(&root, "m.text", "live answer"),
+		)
+		.await;
+		let topic =
+			send(router, base, OWNER, "backfilled-root-title", title(&root, "historical topic"))
+				.await;
+		for rebuild in [false, true] {
+			if rebuild {
+				services
+					.pdu_metadata
+					.rebuild_typed_relations()
+					.await?;
+			}
+			let served = event(router, base, MEMBER, &root).await;
+			let summary = &served["unsigned"]["m.relations"]["m.thread"];
+			assert_eq!(summary["count"], 2, "backfilled root retains the standard count");
+			assert_eq!(
+				summary["latest_event"]["event_id"], topic,
+				"backfilled root retains the standard latest event"
+			);
+			assert_eq!(
+				summary["io.mindroom.title"]["event_id"], topic,
+				"backfilled root needs a title, rebuild={rebuild}"
+			);
+			assert_eq!(
+				summary["io.mindroom.latest_reply"]["event_id"], reply,
+				"backfilled root needs a reply, rebuild={rebuild}"
+			);
+		}
+		Ok(())
+	}
+
+	async fn large_room(services: &Services, router: &Router, base: &str) {
+		let mut expected = BTreeMap::new();
+		for index in 0..505 {
+			let root = send(
+				router,
+				base,
+				OWNER,
+				&format!("scale-root-{index}"),
+				json!({"msgtype":"m.text","body":"question"}),
+			)
+			.await;
+			let reply = send(
+				router,
+				base,
+				OWNER,
+				&format!("scale-reply-{index}"),
+				thread(&root, "m.text", "answer"),
+			)
+			.await;
+			let topic =
+				send(router, base, OWNER, &format!("scale-title-{index}"), title(&root, "topic"))
+					.await;
+			expected.insert(root, (reply, topic));
+		}
+		// Model writes received on an older binary: native relations exist,
+		// while derived preview rows are absent at re-upgrade.
+		services.db["relatesto_typed"].clear().await;
+		let endpoint = format!("{}/threads?limit=100", base.replace("/v3/", "/v1/"));
+		let mut path = endpoint.clone();
+		let start = Instant::now();
+		let mut pages = 0_usize;
+		for _ in 0..6 {
+			let response = request(router, "GET", &path, MEMBER, Value::Null).await;
+			pages = pages.saturating_add(1);
+			for root in response["chunk"].as_array().expect("thread list") {
+				let id = root["event_id"].as_str().expect("thread root ID");
+				if let Some((reply, topic)) = expected.remove(id) {
+					let summary = &root["unsigned"]["m.relations"]["m.thread"];
+					assert_eq!(
+						summary["latest_event"]["event_id"], topic,
+						"standard latest event on {id}"
+					);
+					assert_eq!(summary["count"], 2, "standard count on {id}");
+					assert_eq!(
+						summary["io.mindroom.title"]["event_id"], topic,
+						"title without derived rows on {id}"
+					);
+					assert_eq!(
+						summary["io.mindroom.latest_reply"]["event_id"], reply,
+						"reply without derived rows on {id}"
+					);
+				}
+			}
+			if expected.is_empty() {
+				break;
+			}
+			let next = response["next_batch"]
+				.as_str()
+				.expect("more threads remain");
+			path = format!("{endpoint}&from={}", enc(next));
+		}
+		assert!(expected.is_empty(), "every one of 505 threads must carry previews");
+		eprintln!(
+			"PREVIEW_SCALE roots=505 pages={pages} elapsed_ms={} candidate_row_limit=50",
+			start.elapsed().as_millis()
+		);
+	}
+
+	/// Preserve the event and its authorization state at the storage position
+	/// used by real backfill, without needing an external federation fixture.
+	async fn relocate_to_backfill(
+		services: &Services,
+		event_id: &str,
+		count: i64,
+	) -> Result<RawPduId> {
+		let event_id: &EventId = event_id.try_into()?;
+		let old_id = services.timeline.get_pdu_id(event_id).await?;
+		let old: PduId = old_id.into();
+		let back_id: RawPduId = PduId {
+			shortroomid: old.shortroomid,
+			count: PduCount::Backfilled(count),
+		}
+		.into();
+		let stored = services.db["pduid_pdu"]
+			.get(old_id.as_bytes())
+			.await?
+			.to_vec();
+		services.db["pduid_pdu"].insert(back_id.as_bytes(), &stored);
+		services.db["eventid_pduid"].insert(event_id.as_bytes(), back_id.as_bytes());
+		services.db["pduid_pdu"].remove(old_id.as_bytes());
+		Ok(back_id)
 	}
 
 	async fn marker_and_encryption(router: &Router, base: &str, root: &str) {

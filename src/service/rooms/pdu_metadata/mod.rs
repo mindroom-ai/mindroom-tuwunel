@@ -12,7 +12,6 @@ mod bundling;
 mod purge;
 mod references;
 mod relations;
-mod thread_previews;
 pub use relations::RelationQuery;
 pub(crate) mod typed_relations;
 

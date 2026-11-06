@@ -254,7 +254,6 @@ async fn fresh(services: &Services) -> Result {
 	db["global"].insert("remove_remote_media_userid", []);
 	db["global"].insert("rebuild_roomid_tscount_pducount", []);
 	db["global"].insert("rebuild_relatesto_typed", []);
-	db["global"].insert("mindroom_thread_preview_index", []);
 	db["global"].insert("migrate_profile_keys_to_useridprofilekey", []);
 	db["global"].insert("rebuild_thread_activity", []);
 	db["global"].insert("rebuild_thread_summaries", []);
@@ -353,16 +352,13 @@ async fn migrate(services: &Services, foreign_lineage: bool) -> Result {
 		rebuild_roomid_tscount_pducount(services).await?;
 	}
 
-	if pending(services, "rebuild_relatesto_typed").await?
-		|| pending(services, "mindroom_thread_preview_index").await?
-	{
+	if pending(services, "rebuild_relatesto_typed").await? {
 		services
 			.pdu_metadata
 			.rebuild_typed_relations()
 			.await?;
 
 		db["global"].insert("rebuild_relatesto_typed", []);
-		db["global"].insert("mindroom_thread_preview_index", []);
 	}
 
 	if pending(services, "migrate_profile_keys_to_useridprofilekey").await? {
