@@ -1,24 +1,17 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use futures::{Stream, StreamExt, TryFutureExt, pin_mut};
 use ruma::{
 	EventId, OwnedEventId, OwnedUserId, UserId,
 	api::Direction,
-	events::{
-		StateEventType, TimelineEventType,
-		room::{
-			encrypted::Relation,
-			power_levels::{RoomPowerLevels, RoomPowerLevelsEventContent},
-		},
-	},
-	int,
+	events::{TimelineEventType, room::encrypted::Relation},
 };
 use serde_json::{Value, value::to_raw_value};
 use tuwunel_core::{
 	PduId, Result,
 	arrayvec::ArrayVec,
 	implement,
-	matrix::{Event, Pdu, PduCount, RawPduId, room_version},
+	matrix::{Event, Pdu, PduCount, RawPduId},
 	result::LogErr,
 	utils::{
 		BoolExt,
@@ -590,21 +583,40 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 		let replies = services
 			.threads
 			.thread_replies(root_id, SEARCH_LIMIT)
-			.ignore_err();
-		pin_mut!(replies);
-		while let Some((count, mut child)) = replies.next().await {
-			if child.room_id() != root.room_id()
-				|| child.state_key().is_some()
-				|| *child.kind() == TimelineEventType::RoomEncrypted
+			.ignore_err()
+			.ready_filter(|(_, pdu)| {
+				pdu.room_id() == root.room_id()
+					&& pdu.state_key().is_none()
+					&& *pdu.kind() != TimelineEventType::RoomEncrypted
+			})
+			.map(|(count, pdu)| {
+				let title = pdu
+					.get_content::<Value>()
+					.is_ok_and(|content| content["io.mindroom.thread_summary"].is_object());
+				(count, title, pdu)
+			})
+			.collect::<Vec<_>>()
+			.await;
+		let mut repliers = BTreeMap::new();
+		// Newest-first rows leave the earliest reply per sender as proof.
+		for (count, title, pdu) in &replies {
+			if !*title {
+				repliers.insert(pdu.sender().to_owned(), *count);
+			}
+		}
+		for (count, title, mut child) in replies {
+			if title
+				&& repliers
+					.get(child.sender())
+					.is_none_or(|reply| *reply >= count)
 			{
 				continue;
 			}
-			let title = child.get_content::<Value>()?["io.mindroom.thread_summary"].is_object();
 			let field = if title { TITLE } else { REPLY };
 			if thread.contains_key(field)
 				|| ignored.ignored_users.contains_key(child.sender())
 				|| config.is_forbidden_remote_server_name(child.sender().server_name())
-				|| !self.preview_visible(user, &child, title).await
+				|| !self.preview_visible(user, &child).await
 			{
 				continue;
 			}
@@ -619,7 +631,7 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 					let edits = self
 						.replacement_children(&child, id, SEARCH_LIMIT)
 						.filter_map(async |edit| {
-							self.preview_visible(user, &edit, title)
+							self.preview_visible(user, &edit)
 								.await
 								.then_some(edit)
 						});
@@ -631,12 +643,7 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 					child.set_replacement_bundle(&edit.into_format())?;
 				}
 			}
-			if config.bundle_reference_relations {
-				let references = self.references(&child).await;
-				if !references.is_empty() {
-					child.set_reference_bundle(&references)?;
-				}
-			}
+
 			let event: ruma::serde::Raw<ruma::events::AnySyncMessageLikeEvent> =
 				child.into_format();
 			thread.insert(field.to_owned(), serde_json::to_value(event)?);
@@ -650,35 +657,9 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 }
 
 #[implement(Service)]
-async fn preview_visible(&self, user: &UserId, event: &Pdu, title: bool) -> bool {
+async fn preview_visible(&self, user: &UserId, event: &Pdu) -> bool {
 	let access = &self.services.state_accessor;
-	access.user_can_see_event(user, event).await
-		&& !access.erased_for(user, event).await
-		&& (!title || self.title_allowed(event).await.unwrap_or(false))
-}
-
-/// Authorization uses state before each title/edit, so later grants cannot legitimize forgeries.
-#[implement(Service)]
-async fn title_allowed(&self, title: &Pdu) -> Result<bool> {
-	let access = &self.services.state_accessor;
-	let state = self
-		.services
-		.state
-		.pdu_shortstatehash(title.event_id())
-		.await?;
-	let levels = access
-		.state_get_content::<RoomPowerLevelsEventContent>(
-			state,
-			&StateEventType::RoomPowerLevels,
-			"",
-		)
-		.await?;
-	let create = access.get_create(title.room_id()).await?;
-	let rules = room_version::rules(&create.room_version()?)?;
-	let creators = create.creators(&rules.authorization)?;
-	Ok(RoomPowerLevels::new(levels.into(), &rules.authorization, creators)
-		.for_user(title.sender())
-		>= int!(50))
+	access.user_can_see_event(user, event).await && !access.erased_for(user, event).await
 }
 
 #[cfg(test)]

@@ -72,7 +72,7 @@ mod tests {
 		ignored_users(&router, &base).await;
 		bounded_seeks(&router, &base).await;
 		history_visibility(&router, &base, &case).await;
-		authorship(&router, &base).await;
+		authorship(&router).await;
 		backfilled_root(&services, &router, &base).await?;
 		large_room(&services, &router, &base).await;
 		marker_and_encryption(&router, &base, &case.root).await;
@@ -105,7 +105,7 @@ mod tests {
 			"notice replies remain conversational"
 		);
 
-		let edit = send(router, base, OWNER, "edit", json!({"msgtype":"m.notice","body":"* final answer","m.new_content":{"msgtype":"m.notice","body":"final answer"},"m.relates_to":{"rel_type":"m.replace","event_id":reply}})).await;
+		let edit = send(router, base, OWNER, "edit", json!({"msgtype":"m.notice","body":"* final answer","m.new_content":{"msgtype":"m.notice","body":"final answer","io.mindroom.thread_summary":{"title":"must not promote this reply"}},"m.relates_to":{"rel_type":"m.replace","event_id":reply}})).await;
 		let newest_title =
 			send(router, base, OWNER, "new-title", title(&root, "new topic")).await;
 		// A marked ordinary member's event remains a standard thread event,
@@ -123,6 +123,12 @@ mod tests {
 			"metadata sends still count as participation"
 		);
 		assert_preview(summary, &newest_title, &reply, &edit);
+		assert!(
+			summary["io.mindroom.latest_reply"]["unsigned"]["m.relations"]["m.replace"]
+				["content"]["m.new_content"]["io.mindroom.thread_summary"]
+				.is_object(),
+			"a reply edit retains its marker as payload without becoming a title"
+		);
 		assert!(
 			summary["io.mindroom.latest_reply"]["unsigned"]
 				.get("transaction_id")
@@ -335,6 +341,7 @@ mod tests {
 			)
 			.await;
 		}
+		let start = Instant::now();
 		let served = event(router, base, OWNER, &root).await;
 		let summary = &served["unsigned"]["m.relations"]["m.thread"];
 		assert!(
@@ -345,6 +352,7 @@ mod tests {
 			summary.get("io.mindroom.latest_reply").is_none(),
 			"a reply outside the shared fifty-row bound is omitted"
 		);
+		eprintln!("PREVIEW_FLOOD rows=50 elapsed_ms={}", start.elapsed().as_millis());
 	}
 
 	async fn history_visibility(router: &Router, base: &str, case: &ThreadCase) {
@@ -377,9 +385,11 @@ mod tests {
 		)
 		.await;
 		let visible_edit = send(router, base, OWNER, "visible-edit", json!({"msgtype":"m.text","body":"* visible revision","m.new_content":{"msgtype":"m.text","body":"visible revision"},"m.relates_to":{"rel_type":"m.replace","event_id":edit_reply}})).await;
+		let visible_title_edit = send(router, base, OWNER, "visible-title-edit", json!({"msgtype":"m.notice","body":"* visible topic","m.new_content":{"msgtype":"m.notice","body":"visible topic","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":first_title}})).await;
 		request(router, "POST", &format!("{base}/leave"), MEMBER, json!({})).await;
 		send(router, base, OWNER, "hidden-title", title(root, "hidden topic")).await;
 		send(router,base,OWNER,"hidden-edit",json!({"msgtype":"m.text","body":"* hidden","m.new_content":{"msgtype":"m.text","body":"hidden"},"m.relates_to":{"rel_type":"m.replace","event_id":edit_reply}})).await;
+		send(router, base, OWNER, "hidden-title-edit", json!({"msgtype":"m.notice","body":"* hidden topic","m.new_content":{"msgtype":"m.notice","body":"hidden topic","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":first_title}})).await;
 		request(router, "POST", &format!("{base}/join"), MEMBER, json!({})).await;
 		send(router, base, OWNER, "edit-title", title(&edit_root, "visible title")).await;
 		let served = event(router, base, MEMBER, &edit_root).await;
@@ -406,62 +416,80 @@ mod tests {
 			"hidden latest title must fall back"
 		);
 		assert_eq!(
+			summary["io.mindroom.title"]["unsigned"]["m.relations"]["m.replace"]["event_id"],
+			visible_title_edit,
+			"a hidden newest title edit must retain the earlier visible edit"
+		);
+		assert_eq!(
 			summary["io.mindroom.latest_reply"]["event_id"], visible_reply,
 			"a history gap must not hide subsequent replies"
 		);
 	}
 
-	async fn authorship(router: &Router, base: &str) {
-		let forgery_root = send(
+	async fn authorship(router: &Router) {
+		let room = request(
 			router,
-			base,
+			"POST",
+			"/_matrix/client/v3/createRoom",
 			OWNER,
-			"forgery-root",
-			json!({"msgtype":"m.text","body":"authorship"}),
+			json!({"preset":"private_chat","is_direct":true,"invite":["@member:localhost"]}),
 		)
 		.await;
-		let root = forgery_root.as_str();
-		send(router, base, MEMBER, "forgery", title(root, "unauthorized")).await;
-		// A later promotion cannot authorize a title sent at power zero.
-		request(
-			router,
-			"PUT",
-			&format!("{base}/state/m.room.power_levels"),
-			OWNER,
-			json!({"users":{"@member:localhost":50}}),
-		)
-		.await;
-		let served = event(router, base, OWNER, root).await;
-		assert!(
-			served["unsigned"]["m.relations"]["m.thread"]
-				.get("io.mindroom.title")
-				.is_none(),
-			"promotion must not authorize an older forgery: {served}"
+		let base = format!(
+			"/_matrix/client/v3/rooms/{}",
+			enc(room["room_id"].as_str().expect("DM room"))
 		);
-		let approved_title =
-			send(router, base, MEMBER, "approved-title", title(root, "approved topic")).await;
-		let approved_edit = send(router, base, MEMBER, "approved-title-edit", json!({"msgtype":"m.notice","body":"* approved revision","m.new_content":{"msgtype":"m.notice","body":"approved revision","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":approved_title}})).await;
-		request(
-			router,
-			"PUT",
-			&format!("{base}/state/m.room.power_levels"),
-			OWNER,
-			json!({"users":{"@member:localhost":0}}),
-		)
-		.await;
-		let served = event(router, base, OWNER, root).await;
+		let base = base.as_str();
+		request(router, "POST", &format!("{base}/join"), MEMBER, json!({})).await;
+		let root =
+			send(router, base, OWNER, "auth-root", json!({"msgtype":"m.text","body":"question"}))
+				.await;
+		send(router, base, OWNER, "auth-owner-reply", thread(&root, "m.text", "answer")).await;
+		let trusted =
+			send(router, base, OWNER, "auth-owner-title", title(&root, "trusted topic")).await;
+		for index in 0..3 {
+			send(
+				router,
+				base,
+				MEMBER,
+				&format!("auth-forgery-{index}"),
+				title(&root, "forged topic"),
+			)
+			.await;
+		}
+		let served = event(router, base, OWNER, &root).await;
 		assert_eq!(
 			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["event_id"],
-			approved_title,
-			"later demotion does not rewrite event-time authorization"
+			trusted,
+			"a title-only sender cannot hide a real title within the bound"
 		);
-		send(router, base, MEMBER, "demoted-title-edit", json!({"msgtype":"m.notice","body":"* unauthorized edit","m.new_content":{"msgtype":"m.notice","body":"unauthorized edit","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":approved_title}})).await;
-		let served = event(router, base, OWNER, root).await;
+		let reply =
+			send(router, base, MEMBER, "auth-member-reply", thread(&root, "m.text", "DM answer"))
+				.await;
+		let served = event(router, base, OWNER, &root).await;
 		assert_eq!(
-			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["unsigned"]
-				["m.relations"]["m.replace"]["event_id"],
-			approved_edit,
-			"rejected post-demotion edit must retain earlier authorized edit"
+			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["event_id"],
+			trusted,
+			"a later reply cannot authorize earlier forged titles"
+		);
+		// The responding member stays at the DM preset's default power level zero.
+		let approved =
+			send(router, base, MEMBER, "auth-member-title", title(&root, "DM topic")).await;
+		let edit = send(router, base, MEMBER, "auth-member-title-edit", json!({"msgtype":"m.notice","body":"* revised DM topic","m.new_content":{"msgtype":"m.notice","body":"revised DM topic","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":approved}})).await;
+		let served = event(router, base, OWNER, &root).await;
+		let summary = &served["unsigned"]["m.relations"]["m.thread"];
+		assert_eq!(
+			summary["io.mindroom.title"]["event_id"], approved,
+			"a responding power-zero DM member can title the thread"
+		);
+		assert_eq!(
+			summary["io.mindroom.latest_reply"]["event_id"], reply,
+			"the participant's actual reply is preserved"
+		);
+		assert_eq!(
+			summary["io.mindroom.title"]["unsigned"]["m.relations"]["m.replace"]["event_id"],
+			edit,
+			"a power-zero title author can edit their title"
 		);
 	}
 
@@ -625,25 +653,38 @@ mod tests {
 			json!({"msgtype":"m.text","body":"title only"}),
 		)
 		.await;
-		let only_title =
-			send(router, base, OWNER, "only-title", title(&title_root, "only topic")).await;
+		send(router, base, OWNER, "only-title", title(&title_root, "only topic")).await;
 		let served = event(router, base, OWNER, &title_root).await;
 		let summary = &served["unsigned"]["m.relations"]["m.thread"];
-		assert!(summary["io.mindroom.title"].is_object(), "title-only threads carry a title");
+		assert!(
+			summary.get("io.mindroom.title").is_none(),
+			"a title without an earlier conversational reply is omitted"
+		);
 		assert!(
 			summary.get("io.mindroom.latest_reply").is_none(),
 			"title-only threads omit the conversational preview"
 		);
+		send(
+			router,
+			base,
+			OWNER,
+			"title-root-reply",
+			thread(&title_root, "m.text", "qualifying reply"),
+		)
+		.await;
+		let qualified_title =
+			send(router, base, OWNER, "qualified-title", title(&title_root, "qualified topic"))
+				.await;
 		// Redacting a root retains its live children's standard thread summary.
 		redact(router, base, &title_root, "redact-root").await;
 		let served = event(router, base, OWNER, &title_root).await;
 		let summary = &served["unsigned"]["m.relations"]["m.thread"];
 		assert_eq!(
-			summary["latest_event"]["event_id"], only_title,
+			summary["latest_event"]["event_id"], qualified_title,
 			"root redaction must preserve the standard latest event"
 		);
 		assert_eq!(
-			summary["io.mindroom.title"]["event_id"], only_title,
+			summary["io.mindroom.title"]["event_id"], qualified_title,
 			"a redacted root must retain its live title"
 		);
 
