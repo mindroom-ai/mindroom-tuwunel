@@ -176,7 +176,9 @@ async fn rebuild_drops_a_backfilled_roots_unloadable_latest() -> Result {
 
 	room.store(PduCount::Backfilled(-1), &root, text())?;
 	room.append(1, &gone, thread(&root)).await?;
+	let gone_id = room.stored(&gone).await?.0;
 	fixture.services.db["eventid_pduid"].remove(gone.as_bytes());
+	fixture.services.db["pduid_pdu"].remove(gone_id.as_bytes());
 
 	let threads = &fixture.services.threads;
 
@@ -390,8 +392,9 @@ async fn rebuild_leaves_out_threads_with_no_replies() -> Result {
 		.rebuild_thread_activity()
 		.await?;
 
-	// The backfilled root's reply is not in the relation index; its summary lists it.
-	assert_eq!(room.listed().await?, [&*kept, &*old]);
+	// MindRoom fork: a live reply to a backfilled root is in the relation index
+	// (#143), so the backfilled root is listed by that reply.
+	assert_eq!(room.listed().await?, [&*old, &*kept]);
 
 	Ok(())
 }
