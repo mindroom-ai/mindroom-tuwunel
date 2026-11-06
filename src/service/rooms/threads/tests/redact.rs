@@ -155,7 +155,9 @@ async fn rebuild_drops_a_backfilled_roots_unloadable_latest() -> Result {
 
 	room.store(PduCount::Backfilled(-1), &root, text())?;
 	room.append(1, &gone, thread(&root)).await?;
+	let gone_id = room.stored(&gone).await?.0;
 	fixture.services.db["eventid_pduid"].remove(gone.as_bytes());
+	fixture.services.db["pduid_pdu"].remove(gone_id.as_bytes());
 
 	let threads = &fixture.services.threads;
 
