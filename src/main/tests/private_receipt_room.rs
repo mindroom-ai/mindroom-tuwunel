@@ -62,6 +62,9 @@ async fn foreign_room_receipts(services: &Services, base: &str) -> Result {
 	let foreign = client.create_room(&json!({})).await?;
 	let local_event = message(&client, &room).await?;
 	let foreign_event = message(&client, &foreign).await?;
+	// An own send moves only its thread's marker, not the unthreaded one.
+	assert_receipt_status(&client, &room, &local_event, 200).await?;
+	assert_receipt_status(&client, &foreign, &foreign_event, 200).await?;
 	let before = private_count(services, &room, &user).await?;
 
 	assert!(private_count(services, &foreign, &user).await? > before);

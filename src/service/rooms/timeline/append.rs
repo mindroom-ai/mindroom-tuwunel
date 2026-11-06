@@ -135,16 +135,21 @@ where
 		.await
 		.map_err(|_| err!(Database("Room does not exist")))?;
 
+	let prev_state = match pdu.state_key() {
+		| Some(state_key) => self.prev_state(pdu, state_key).await,
+		| None => None,
+	};
+
 	// Make unsigned fields correct. This is not properly documented in the spec,
 	// but state events need to have previous content in the unsigned field, so
 	// clients can easily interpret things like membership changes
-	if let Some(state_key) = pdu.state_key() {
+	if pdu.state_key().is_some() {
 		if let CanonicalJsonValue::Object(unsigned) = pdu_json
 			.entry("unsigned".into())
 			.or_insert_with(|| CanonicalJsonValue::Object(BTreeMap::default()))
 		{
-			if let Some(prev_state) = self.prev_state(pdu, state_key).await {
-				unsigned.extend(prev_state_unsigned(&prev_state)?);
+			if let Some(prev_state) = &prev_state {
+				unsigned.extend(prev_state_unsigned(prev_state)?);
 			}
 		} else {
 			error!("Invalid unsigned type in pdu.");
@@ -161,33 +166,31 @@ where
 		.set_forward_extremities(pdu.room_id(), leafs, state_lock)
 		.await;
 
+	let read = self.own_read(pdu, prev_state.as_ref()).await;
+
 	let insert_lock = self.mutex_insert.lock(pdu.room_id()).await;
 	let next_count = self.services.globals.next_count();
 
 	// Mark as read first so the sending client doesn't get a notification even if
-	// appending fails. Route through the dispatcher so per-thread counts are
-	// also cleared; the sender's own send subsumes any thread receipt.
-	self.services
-		.read_receipt
-		.private_read_set(PrivateRead {
-			room_id: pdu.room_id(),
-			user_id: pdu.sender(),
-			count: *next_count,
-			ts: pdu.origin_server_ts(),
-			thread: &ReceiptThread::Unthreaded,
-			announce: false,
-		})
-		.await;
+	// appending fails.
+	if let Some(thread) = &read {
+		self.services
+			.read_receipt
+			.private_read_set(PrivateRead {
+				room_id: pdu.room_id(),
+				user_id: pdu.sender(),
+				count: *next_count,
+				ts: pdu.origin_server_ts(),
+				thread,
+				announce: false,
+			})
+			.await;
 
-	self.services
-		.pusher
-		.reset_notification_counts_for_thread(
-			pdu.sender(),
-			pdu.room_id(),
-			None,
-			&ReceiptThread::Unthreaded,
-		)
-		.await;
+		self.services
+			.pusher
+			.reset_notification_counts_for_thread(pdu.sender(), pdu.room_id(), None, thread)
+			.await;
+	}
 
 	let count = PduCount::Normal(*next_count);
 	let pdu_id: RawPduId = PduId { shortroomid, count }.into();
@@ -227,6 +230,44 @@ where
 		.ok();
 
 	Ok(pdu_id)
+}
+
+/// The context a local sender's own event marks read for them, if any.
+///
+/// An event in a thread reads that thread, and any other event the main
+/// timeline, like a receipt in its context (MSC3771); other threads stay
+/// unread. A state event, such as a topic, a thread tag or a profile change,
+/// reads nothing: Synapse marks nothing read on a send and counts from the
+/// user's latest membership, so only the sender's own join reads the whole
+/// room. A remote sender holds no counts here.
+#[implement(super::Service)]
+async fn own_read(&self, pdu: &PduEvent, prev_state: Option<&PduEvent>) -> Option<ReceiptThread> {
+	if !self.services.globals.user_is_local(pdu.sender()) {
+		return None;
+	}
+
+	if pdu.state_key().is_some() {
+		return is_own_join(pdu, prev_state).then_some(ReceiptThread::Unthreaded);
+	}
+
+	let thread = self.services.threads.get_thread_id(pdu).await;
+
+	Some(thread.map_or(ReceiptThread::Main, ReceiptThread::Thread))
+}
+
+/// Whether `pdu` joins its sender to the room, rather than changing the
+/// profile of a member who had already joined.
+fn is_own_join(pdu: &PduEvent, prev_state: Option<&PduEvent>) -> bool {
+	let membership = |pdu: &PduEvent| {
+		pdu.get_content::<RoomMemberEventContent>()
+			.map(|content| content.membership)
+			.ok()
+	};
+
+	*pdu.kind() == TimelineEventType::RoomMember
+		&& pdu.state_key() == Some(pdu.sender().as_str())
+		&& membership(pdu) == Some(MembershipState::Join)
+		&& prev_state.and_then(membership) != Some(MembershipState::Join)
 }
 
 #[implement(super::Service)]
