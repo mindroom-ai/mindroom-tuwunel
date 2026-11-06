@@ -501,6 +501,7 @@ mod tests {
 			scope: BTreeSet::new(),
 			userid_claims: BTreeSet::new(),
 			trusted: false,
+			assigned_accounts: BTreeMap::new(),
 			unique_id_fallbacks: true,
 			registration: true,
 			base_path: None,
@@ -690,6 +691,33 @@ mod tests {
 		assert_eq!(userinfo.name.as_deref(), Some("Alice Example"));
 		assert_eq!(userinfo.given_name.as_deref(), Some("Alice"));
 		assert_eq!(userinfo.family_name.as_deref(), Some("Example"));
+		assert_eq!(userinfo.email_verified, None);
+	}
+
+	#[test]
+	fn decode_userinfo_from_id_token_keeps_email_verified() {
+		for (claim, expected) in [
+			(json!("false"), Some(false)),
+			(json!("true"), Some(true)),
+			(json!(false), Some(false)),
+			(json!(true), Some(true)),
+			(json!("TRUE"), Some(true)),
+			(json!("False"), Some(false)),
+			(json!("maybe"), Some(false)),
+			(json!(0), Some(false)),
+			(json!(null), None),
+		] {
+			let session = apple_session_with_claims(&json!({
+				"sub": "apple-user-123",
+				"email": "alice@example.com",
+				"email_verified": claim,
+			}));
+
+			let userinfo =
+				decode_userinfo_from_id_token(&session).expect("decode Apple id_token claims");
+
+			assert_eq!(userinfo.email_verified, expected, "{claim}");
+		}
 	}
 
 	#[test]

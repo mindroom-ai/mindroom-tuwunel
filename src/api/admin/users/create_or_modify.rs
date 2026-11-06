@@ -163,10 +163,11 @@ async fn write_credentials(
 ) -> Result {
 	let user_id = &body.user_id;
 
+	// An account created since the route's check is refused, not overwritten.
 	if created {
 		return services
 			.users
-			.create(user_id, body.password.as_deref(), None)
+			.create_new(user_id, body.password.as_deref(), None)
 			.await;
 	}
 

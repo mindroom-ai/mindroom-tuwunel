@@ -133,9 +133,10 @@ async fn create_account(services: crate::State, user_id: &UserId, created: bool)
 		return Ok(());
 	}
 
+	// An account created since the route's check is refused, not overwritten.
 	services
 		.users
-		.create(user_id, Some(PASSWORD_SENTINEL), Some("oidc"))
+		.create_new(user_id, Some(PASSWORD_SENTINEL), Some("oidc"))
 		.await
 }
 
