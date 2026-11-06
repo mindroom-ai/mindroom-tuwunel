@@ -270,3 +270,25 @@ async fn rejected_password_change_releases_lock() -> Result {
 
 	Ok(())
 }
+
+#[tokio::test]
+async fn create_new_refuses_an_account_that_exists() -> Result {
+	let Some(fixture) = fixture(Figment::new()).await? else {
+		return Ok(());
+	};
+
+	let users = &fixture.services.users;
+	let user_id = user_id!("@created-first:localhost");
+
+	users.create(user_id, None, None).await?;
+
+	let refused = users
+		.create_new(user_id, Some(NEW_PASSWORD), Some("sso"))
+		.await;
+
+	assert!(refused.is_err(), "create_new kept the account that exists");
+	assert_eq!(users.password_hash(user_id).await?, "");
+	assert_eq!(users.origin(user_id).await?, "password");
+
+	Ok(())
+}

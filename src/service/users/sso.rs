@@ -152,6 +152,7 @@ impl Service {
 		let password = self.password_hash(user_id).await;
 		let empty = password.as_deref().is_ok_and(str::is_empty);
 		let refusals = [
+			(!self.services.globals.user_is_local(user_id), "is not local"),
 			(user_id == self.services.globals.server_user, "is the server user"),
 			(password.as_ref().is_err_and(Error::is_missing), "does not exist"),
 			(password.is_err(), "cannot be read"),
