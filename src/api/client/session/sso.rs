@@ -1032,6 +1032,17 @@ fn assigned_account(
 		.map(|(_, user_id)| user_id.clone())
 }
 
+/// Whether any provider's `assigned_accounts` lists the account, which is then
+/// only for its listed address and never given to a sign-in by name.
+fn listed(services: &Services, user_id: &UserId) -> bool {
+	services
+		.config
+		.identity_provider
+		.values()
+		.flat_map(|provider| provider.assigned_accounts.values())
+		.any(|listed| listed.as_str() == user_id.as_str())
+}
+
 /// Returns the user ID, and, for an account taken by name, whether it existed
 /// then: the sign-in holds such an account until its link is stored. None when
 /// the provider is trusted (it may take linked accounts) or an admin associated
@@ -1101,14 +1112,19 @@ async fn decide_user_id(
 			.filter(|_| allowed("email")),
 	];
 
+	// A listed account is only for its listed address, never for a name.
 	for choice in choices.into_iter().flatten() {
-		if let Some((user_id, existed)) = try_user_id(services, provider, &choice, false).await {
+		if let Some((user_id, existed)) = try_user_id(services, provider, &choice, false).await
+			&& !listed(services, &user_id)
+		{
 			return Ok((user_id, hold.then_some(existed)));
 		}
 	}
 
 	let localpart = fallback_localpart(unique_id);
-	if let Some((user_id, existed)) = try_user_id(services, provider, &localpart, true).await {
+	if let Some((user_id, existed)) = try_user_id(services, provider, &localpart, true).await
+		&& !listed(services, &user_id)
+	{
 		return Ok((user_id, hold.then_some(existed)));
 	}
 

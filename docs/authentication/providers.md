@@ -305,9 +305,9 @@ unverified (any `email_verified` other than `true`) is refused. Many providers s
 such as Google, Keycloak, Okta, Auth0, GitLab and Authentik; others, such as
 Microsoft Entra ID and GitHub, do not, and its absence is not checked.
 
-Do not combine `assigned_accounts` with `trusted = true` on one provider: a
-trusted provider hands any existing account, a listed one included, to whoever
-its name claims match.
+A listed account is reserved for its listed address: no other sign-in gets it
+by name or as its fallback, at any provider. Do not combine
+`assigned_accounts` with `trusted = true` on one provider all the same.
 
 Each value must be a local user ID, and no address may be listed twice; the
 server refuses to start otherwise. Addresses are compared ignoring ASCII case

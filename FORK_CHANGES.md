@@ -692,7 +692,9 @@ fallback username), now holds that lock from after any registration until
 its link is stored and checks the account's link index again under it, so
 it cannot link an account an assignment linked meanwhile; such a sign-in
 is refused, as is one whose name, chosen as free, was created by someone
-else since. Trusted providers and admin associations are unchanged.
+else since. An account any provider's map lists is skipped when a sign-in
+chooses an account by name or fallback. Trusted providers and admin
+associations are otherwise unchanged.
 Registration (`full_register`), the admin API's user creation and MAS
 provisioning now refuse an account that exists by checking under the
 account's password lock (`create_new`), so an account created meanwhile,
