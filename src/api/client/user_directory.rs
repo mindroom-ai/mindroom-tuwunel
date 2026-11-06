@@ -119,17 +119,17 @@ async fn should_show_user(
 	user_in_public_room.or(user_sees_user).await
 }
 
-/// Whether `user_id` is a local account that was deactivated.
+/// Whether `user_id` is an account this server deactivated.
 ///
 /// Deactivation stores an empty password, but so does every account created
-/// without one: remote users, appservice senders and users. Only
-/// `deactivate_account` also records a deactivation reason, and reactivation
-/// replaces the empty password, so both together mark a deactivated account.
+/// without one: remote users, appservice senders and users. Only a
+/// deactivation also records a reason (or, in a migrated database, a mark),
+/// and reactivation replaces the empty password, so both together mark a
+/// deactivated account. Only local accounts can carry a reason or a mark.
 async fn is_deactivated(services: &Services, user_id: &UserId) -> bool {
 	matches!(services.users.is_deactivated(user_id).await, Ok(true))
 		&& services
 			.users
-			.deactivation_reason(user_id)
+			.deactivation_recorded(user_id)
 			.await
-			.is_some()
 }
