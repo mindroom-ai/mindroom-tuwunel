@@ -842,6 +842,21 @@ a `from` of 0 hit a debug assertion. Otherwise nothing changes without
 `src/main/tests/relations_recurse_order.rs` and
 `src/service/rooms/pdu_metadata/tests.rs`.
 
+### `/relations` leaves out redacted events
+
+Redaction strips an event's `m.relates_to`, so a redacted event relates to
+nothing. A `/relations` call filtered by relation type already left it out,
+but the unfiltered and recursive calls still listed it, with empty content and
+`redacted_because`, and clients put it back into the thread it had left.
+Synapse deletes a redacted event's relation, so neither call lists it and a
+recursive walk does not reach the events relating to it. Both calls now leave
+redacted events out, and a recursive walk neither serves nor walks a redacted
+event, so a reaction to a deleted thread reply is not among the thread's
+relations; the relations of the redacted event itself are still listed.
+Upstream has the same bug. Files: `src/api/client/relations.rs`,
+`src/service/rooms/pdu_metadata/relations.rs`; test in
+`src/main/tests/relations_redacted.rs`.
+
 ### A device's tokens rotate under its device lock
 
 Refresh-token rotation read the token a device points at, removed it, and wrote
@@ -1045,6 +1060,35 @@ Behavior:
   parameter and sends at once; no MatrixRTC SDK delays a message), other
   state types, the delegated restart without an access token, and the
   endpoints that list scheduled and finished events.
+
+### `/messages` ends at the room's creation event
+
+A backward `/messages` page that reached the room's creation event still gave
+an `end` token, so a client asked again and only an empty page without `end`
+ended the history. The spec omits `end` when no further events exist. Synapse
+also gives `end` with the page holding the creation event, and omits it on
+the empty page after. A backward page now gives no `end` only when its edge
+reaches the oldest stored position and that position holds the creation
+event. This also handles filters that hide creation and full pages ending
+exactly there. Backfill assigns decreasing positions in insertion order, so
+a creation event stored before other historical events keeps `end` while
+those older positions remain. Rooms whose earlier history is not stored yet
+also keep `end`, so the next request can backfill. Regression tests re-key
+creation and messages to negative positions in both orders. Upstream has the
+same bug. File:
+`src/api/client/message.rs`; test in
+`src/main/tests/messages_pagination_bounds.rs`.
+
+### The last `/notifications` page has no `next_token`
+
+Every non-empty `/notifications` page carried a `next_token`, also the page
+that reached the oldest notification, so clients asked for one more, empty
+page, and an inbox kept offering older notifications until then. The spec
+gives `next_token` only while more results exist. Synapse also gives it on
+every non-empty page. A page now reads one notification past its limit and
+gives `next_token` only when that notification exists. Upstream has the same
+bug. File: `src/api/client/push/notifications.rs`; test in
+`src/main/tests/notifications_next_token.rs`.
 
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
