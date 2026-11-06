@@ -1052,11 +1052,15 @@ A backward `/messages` page that reached the room's creation event still gave
 an `end` token, so a client asked again and only an empty page without `end`
 ended the history. The spec omits `end` when no further events exist. Synapse
 also gives `end` with the page holding the creation event, and omits it on
-the empty page after. A backward page that reaches the creation event now
-gives no `end`, also when a filter leaves the creation event out or the page
-is full because it ends exactly there. A page that ends at the oldest local
-event of a room whose earlier history is not stored yet keeps its `end`, so
-the next request can backfill. Upstream has the same bug. File:
+the empty page after. A backward page now gives no `end` only when its edge
+reaches the oldest stored position and that position holds the creation
+event. This also handles filters that hide creation and full pages ending
+exactly there. Backfill assigns decreasing positions in insertion order, so
+a creation event stored before other historical events keeps `end` while
+those older positions remain. Rooms whose earlier history is not stored yet
+also keep `end`, so the next request can backfill. Regression tests re-key
+creation and messages to negative positions in both orders. Upstream has the
+same bug. File:
 `src/api/client/message.rs`; test in
 `src/main/tests/messages_pagination_bounds.rs`.
 

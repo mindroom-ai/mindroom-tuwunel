@@ -77,7 +77,36 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	global_bounds(services, base).await?;
 	filtered_bounds(services, base).await?;
 	backfilled_bounds(services, base).await?;
+	backfilled_creation_before_older_event(services, base).await?;
 	room_start(services, base).await
+}
+
+/// Backfill inserts decreasing positions in response order, so creation can
+/// be stored before an event that later receives an older pagination count.
+async fn backfilled_creation_before_older_event(services: &Services, base: &str) -> Result {
+	let (client, room) = fixture(services, base).await?;
+	let message = send(&client, &room, MESSAGE, "backfilled-before-create").await?;
+	let create = services.timeline.first_pdu_in_room(&room).await?;
+	move_to_backfilled_position(services, &room, &create.event_id, -30).await?;
+	move_to_backfilled_position(services, &room, &message.0, -50).await?;
+	services.clear_cache().await;
+
+	let first = page(&client, &room, &[("dir", "b"), ("from", "0"), ("limit", "1")]).await?;
+	assert_page(&first, &[create.event_id.as_str()], Some("-30"));
+	let older = page(&client, &room, &[("dir", "b"), ("from", "-30"), ("limit", "1")]).await?;
+	assert_page(&older, &[message.0.as_str()], Some("-50"));
+
+	// When creation really is the oldest stored event, negative backfill
+	// positions must end history too, including a filter that hides creation.
+	move_to_backfilled_position(services, &room, &create.event_id, -70).await?;
+	services.clear_cache().await;
+	let complete = page(&client, &room, &[("dir", "b"), ("from", "0"), ("limit", "2")]).await?;
+	assert_page(&complete, &[message.0.as_str(), create.event_id.as_str()], None);
+	let filtered =
+		page(&client, &room, &[("dir", "b"), ("from", "0"), ("filter", MESSAGE_FILTER)]).await?;
+	assert_page(&filtered, &[message.0.as_str()], None);
+
+	Ok(())
 }
 
 async fn fixture<'a>(services: &'a Services, base: &'a str) -> Result<(Client<'a>, OwnedRoomId)> {

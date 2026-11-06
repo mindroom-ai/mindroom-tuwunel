@@ -196,7 +196,7 @@ pub(crate) async fn get_messages(
 	};
 
 	let events: Vec<_> = it
-		.inspect(|(count, pdu)| scanned = Some((*count, is_room_create(pdu))))
+		.inspect(|(count, _)| scanned = Some(*count))
 		.ready_take_while(|(count, _)| !reached_to(*count))
 		.ready_filter_map(|item| event_filter(item, filter))
 		.wide_filter_map(|item| related_by_filter(services, shortroomid, filter, item))
@@ -240,21 +240,28 @@ pub(crate) async fn get_messages(
 
 	// `inspect` records the rejected boundary item, distinguishing a `to` stop
 	// from stream exhaustion.
-	let stopped_at_to = scanned.is_some_and(|(count, _)| reached_to(count));
+	let stopped_at_to = scanned.is_some_and(reached_to);
 	let exhausted = matches!(dir, Direction::Backward) && events.len() < limit && !stopped_at_to;
 	let edge = match exhausted {
 		| true => scanned,
-		| false => events
-			.last()
-			.map(|(count, pdu)| (*count, is_room_create(pdu))),
+		| false => events.last().map(at!(0)),
 	};
 
-	// Nothing precedes the room's creation event, so a backward page that
-	// reaches it ends the history and gives no `end` (the spec omits it when no
-	// further events exist).
-	let next_token = edge
-		.filter(|&(_, create)| !(create && matches!(dir, Direction::Backward)))
-		.map(at!(0));
+	// Backfill assigns decreasing positions in insertion order. Creation can
+	// precede another historical insertion, so only the storage boundary can
+	// prove the page reached the beginning of a complete room.
+	let reached_start = if matches!(dir, Direction::Backward)
+		&& let Some(count) = edge
+	{
+		services
+			.timeline
+			.first_item_in_room(room_id)
+			.await
+			.is_ok_and(|(oldest, pdu)| count == oldest && is_room_create(&pdu))
+	} else {
+		false
+	};
+	let next_token = edge.filter(|_| !reached_start);
 
 	let chunk = events
 		.into_iter()
