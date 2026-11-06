@@ -1176,14 +1176,18 @@ Behavior:
 - A local account is left out of every search, whatever
   `show_all_local_users_in_user_directory` and
   `show_appservice_users_in_user_directory` say, when its stored password is
-  empty and it has a recorded deactivation reason. Every deactivation path
-  goes through `deactivate_account`, which records the reason, and every
-  reactivation replaces the empty password.
+  empty and it has a recorded deactivation reason. Every deactivation this
+  server performs goes through `deactivate_account`, which records the
+  reason, and every reactivation replaces the empty password.
 - An empty password alone does not hide an account: remote users, appservice
   senders, and users created without a password store one too, and keep
   their earlier visibility.
-- Accounts deactivated before the fork recorded deactivation reasons
-  (2026-09, `5597e3eca`) have none and stay listed.
+- Accounts deactivated without a recorded reason stay listed: those
+  deactivated before the fork started recording reasons (release
+  `v1.5.0-mindroom.16`, 2026-03-04), and deactivations imported from another
+  server's database (`adopt_deactivations`, and Conduit databases). Running
+  `!admin users deactivate --no-leave-rooms <user>` again on such an account
+  records a reason and hides it; SSO self-reactivation stays refused.
 - The appservice filtering and the public-room and shared-room rules are
   unchanged.
 
