@@ -587,16 +587,18 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			.await
 			.unwrap_or_default();
 		let shortroomid = PduId::from(root_id).shortroomid;
-		let replies = services
-			.threads
-			.thread_replies(root_id, PREVIEW_ROWS)
-			.ignore_err()
-			.ready_filter(|(_, pdu)| {
-				pdu.room_id() == root.room_id()
-					&& pdu.state_key().is_none()
-					&& *pdu.kind() != TimelineEventType::RoomEncrypted
-			});
-		pin_mut!(replies);
+		// Boxed: the walk stays open across the per-candidate reads below.
+		let mut replies = Box::pin(
+			services
+				.threads
+				.thread_replies(root_id, PREVIEW_ROWS)
+				.ignore_err()
+				.ready_filter(|(_, pdu)| {
+					pdu.room_id() == root.room_id()
+						&& pdu.state_key().is_none()
+						&& *pdu.kind() != TimelineEventType::RoomEncrypted
+				}),
+		);
 		while let Some((count, mut child)) = replies.next().await {
 			let title = child.get_content::<Value>().is_ok_and(|content| {
 				content["msgtype"] == "m.notice"
