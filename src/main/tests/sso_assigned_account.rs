@@ -84,11 +84,11 @@ const ASSIGNED: &str = r#"{
 	"vera@example.com" = "@vera:localhost"
 }"#;
 
-/// The second chained provider's map: one address for an account of its own,
-/// one for the account the first provider carries.
+/// The second chained provider's map. The test lists an address for the
+/// account the first provider carries only once that account exists: a listed
+/// account is never given by name.
 const CHAIN_ASSIGNED: &str = r#"{
-	"hank@example.com" = "@hank:localhost",
-	"chainfirst@example.com" = "@chainfirst:localhost"
+	"hank@example.com" = "@hank:localhost"
 }"#;
 
 /// Environment of a child process that runs one phase of
@@ -558,6 +558,20 @@ async fn chained(services: &Services, base: &str, client: &Client) -> Result {
 
 	// A listed address naming the carried account is refused when the provider
 	// says it is unverified.
+	let mut config = (*services.server.config.clone()).clone();
+	config
+		.identity_provider
+		.values_mut()
+		.filter(|provider| provider.id() == CHAIN[1])
+		.for_each(|provider| {
+			provider
+				.assigned_accounts
+				.insert("chainfirst@example.com".to_owned(), carried.clone());
+		});
+
+	reload(&services.config, &config)?;
+	services.server.config.update(config)?;
+
 	let response =
 		chain(client, base, ("chain-first", "chainfirst"), ("unverified-chain", "chainfirst"))
 			.await?;
