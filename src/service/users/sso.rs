@@ -208,7 +208,7 @@ impl Service {
 	/// Whether a deactivation is recorded for the account, here or in the
 	/// column a migrated database left behind. Creation without a password
 	/// records neither; anything unreadable counts.
-	async fn deactivation_recorded(&self, user_id: &UserId) -> bool {
+	pub async fn deactivation_recorded(&self, user_id: &UserId) -> bool {
 		let migrated = match self.services.db.open_cf("userid_deactivated") {
 			| Ok(Some(marks)) => !marks.get(user_id).await.is_missing(),
 			| Ok(None) => false,
