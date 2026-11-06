@@ -452,7 +452,10 @@ async fn handle_join(&self, room_id: &RoomId, user_id: &UserId, count: PduCount)
 			.await?;
 	}
 
-	self.mark_as_joined(user_id, room_id, count);
+	// A join-to-join profile update must not move the current join's sync position.
+	if !self.is_joined(user_id, room_id).await {
+		self.mark_as_joined(user_id, room_id, count);
+	}
 
 	Ok(())
 }
