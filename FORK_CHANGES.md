@@ -737,6 +737,21 @@ a `from` of 0 hit a debug assertion. Otherwise nothing changes without
 `src/main/tests/relations_recurse_order.rs` and
 `src/service/rooms/pdu_metadata/tests.rs`.
 
+### `/relations` leaves out redacted events
+
+Redaction strips an event's `m.relates_to`, so a redacted event relates to
+nothing. A `/relations` call filtered by relation type already left it out,
+but the unfiltered and recursive calls still listed it, with empty content and
+`redacted_because`, and clients put it back into the thread it had left.
+Synapse deletes a redacted event's relation, so neither call lists it and a
+recursive walk does not reach the events relating to it. Both calls now leave
+redacted events out, and a recursive walk neither serves nor walks a redacted
+event, so a reaction to a deleted thread reply is not among the thread's
+relations; the relations of the redacted event itself are still listed.
+Upstream has the same bug. Files: `src/api/client/relations.rs`,
+`src/service/rooms/pdu_metadata/relations.rs`; test in
+`src/main/tests/relations_redacted.rs`.
+
 ### A refresh token does not authenticate requests
 
 Refresh tokens are stored in the same token map as access tokens, so request
