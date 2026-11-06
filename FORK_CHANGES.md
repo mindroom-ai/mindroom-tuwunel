@@ -1069,8 +1069,7 @@ was merged upstream, so it is no longer a fork delta.
 
 ### 4) `pusher: notify once when streams finish`
 Files:
-- `src/service/pusher/mod.rs`, `src/service/pusher/send.rs`,
-  `src/service/pusher/append.rs`
+- `src/service/pusher/mod.rs`, `src/service/pusher/send.rs`
 - `src/service/pusher/tests.rs`
 - `src/mindroom-tests/tests/stream_reply_push.rs`
 
@@ -1078,10 +1077,10 @@ Behavior:
 - Recognizes MindRoom streamed events by the `io.mindroom.stream_status`
   content key (an event-level protocol signal: senders opt their own streamed
   events in; no account privilege involved).
-- Suppresses push notifications for stream updates in non-terminal states, so
-  a streaming agent reply does not notify once per chunk. Unknown stream
-  statuses fail closed (suppressed) so a new producer state cannot
-  reintroduce push spam.
+- Suppresses push notifications and unread counts for stream updates in
+  non-terminal states, so a streaming agent reply does not notify once per
+  chunk. Unknown stream statuses fail closed (suppressed) so a new producer
+  state cannot reintroduce push spam.
 - When the stream reaches a terminal status (`completed`, `cancelled`,
   `interrupted`, `error`) via an `m.replace` edit, evaluates the surviving
   message as the final content it represents: for `m.room.message` the
@@ -1089,17 +1088,21 @@ Behavior:
   `m.relates_to`. Ordinary room/DM/mention/mute push rules then decide the
   single notification instead of the generic edit-suppression rule swallowing
   the terminal update.
-- A terminal edit adds no unread count (notification or highlight) when the
-  recipient has read the event it replaces: the read watermark for the count
-  it would add to (its thread, or the room for a main-timeline reply) covers
-  it, or the user's own send in that thread came after it (a follow-up, or
-  the reaction that stops the stream; the unthreaded private read marker
-  records it, since the own send's reset deletes thread watermarks). A
-  `"main"` receipt or an own send elsewhere in the room covers no thread.
-  Clients send no receipt for an edit of a reply they already read, so a
-  user who watched a reply finish would otherwise keep a count, and an
-  app-icon badge, with nothing left to read. The push itself is still
-  delivered.
+- A finished stream counts like a new message: a reply read half-way has not
+  been read. For every recipient whose push rules notify on the final
+  content, the terminal edit adds the unread count those rules give
+  (notification, and highlight when they highlight) to the reply's thread, or
+  to the room for a main-timeline reply, and delivers the one push. Whether
+  the recipient read the reply while it streamed is not checked, so a receipt
+  or the recipient's own send before the stream finished changes nothing. The
+  recipient's next receipt clears the count through upstream's normal reset;
+  MindRoom's clients send one when the user is looking at the reply as it
+  finishes. Upstream resets only on a receipt that advances in the count's own
+  context: for a thread reply, a receipt in that thread or an unthreaded one
+  (a `"main"` receipt never clears it); for a main-timeline reply, a `"main"`
+  or unthreaded receipt. Clients therefore name the terminal edit or a later
+  event: another receipt on an event the user already acknowledged, such as
+  the reply's first event read mid-stream, clears nothing.
 - The `push_everything` debug mode honors the same suppression.
 - Keeps upstream's recipient-based membership-notification target flag. The
   real gateway fixture checks an invite addressed to someone other than its
@@ -1170,7 +1173,8 @@ departure, edit-purge/bundling composition, the orphaned long-text sidecar
 sweep command and its retry after a storage failure
 (`orphaned_sidecar_sweep.rs`, `orphaned_sidecar_delete_retry.rs`),
 device-key immutability/cleanup/
-concurrency, real gateway stream/invite notifications, and audience-bound
+concurrency, real gateway stream/invite notifications and finished-stream
+unread counts, and audience-bound
 OpenID tokens with the option on and off (`openid_audience.rs`,
 `openid_audience_disabled.rs`), and OpenID userinfo room membership
 (`openid_room_membership.rs`). Stream classification
@@ -1250,9 +1254,14 @@ native_client_ids = ["chat.mindroom.app"]
 - A client that lost its crypto store but kept its access token receives 403
   `M_FORBIDDEN` on `/keys/upload` until it logs in again (device identity keys
   are immutable per device id).
-- Non-terminal `io.mindroom.stream_status` events do not push; terminal events
-  use ordinary recipient push rules. The classifier does not deduplicate
-  multiple distinct terminal events for the same stream.
+- Non-terminal `io.mindroom.stream_status` events neither push nor count as
+  unread; terminal events use ordinary recipient push rules and count like a
+  new message, even for a recipient who read the reply while it streamed. The
+  classifier does not deduplicate multiple distinct terminal events for the
+  same stream. Deploy it together with clients that send a receipt on the
+  terminal edit when the user watches it finish: an older client acknowledges
+  the reply's first event again, which does not advance, so a reply the user
+  watched keeps its count until the next event in its thread.
 - OpenID audience binding is off unless `mindroom_openid_audience = true`.
   With it on, tokens requested without `io.mindroom.audience` stay unbound and keep verifying at userinfo calls without the query audience, so Element Call, LiveKit, the hosted provisioning service, and stock relying parties work unchanged.
   A relying party that sends `io.mindroom.audience` to userinfo accepts only tokens bound to that audience, so its clients must request bound tokens.
