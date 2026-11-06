@@ -258,7 +258,26 @@ pub async fn get_messages(
 	// from stream exhaustion.
 	let stopped_at_to = scanned.is_some_and(reached_to);
 	let exhausted = matches!(dir, Direction::Backward) && events.len() < limit && !stopped_at_to;
-	let next_token = if exhausted { scanned } else { events.last().map(at!(0)) };
+	let edge = match exhausted {
+		| true => scanned,
+		| false => events.last().map(at!(0)),
+	};
+
+	// Backfill assigns decreasing positions in insertion order. Creation can
+	// precede another historical insertion, so only the storage boundary can
+	// prove the page reached the beginning of a complete room.
+	let reached_start = if matches!(dir, Direction::Backward)
+		&& let Some(count) = edge
+	{
+		services
+			.timeline
+			.first_item_in_room(room_id)
+			.await
+			.is_ok_and(|(oldest, pdu)| count == oldest && is_room_create(&pdu))
+	} else {
+		false
+	};
+	let next_token = edge.filter(|_| !reached_start);
 
 	let chunk = events
 		.into_iter()
@@ -432,6 +451,12 @@ where
 pub(crate) fn event_filter(item: PdusIterItem, filter: &RoomEventFilter) -> Option<PdusIterItem> {
 	let (_, pdu) = &item;
 	filter.matches(pdu).then_some(item)
+}
+
+/// Whether `pdu` is the room's creation event, the first event of its history.
+#[inline]
+fn is_room_create(pdu: &PduEvent) -> bool {
+	*pdu.kind() == RoomCreate && pdu.state_key() == Some("")
 }
 
 /// MSC4115: stamp `unsigned.membership` on a served PDU with the requesting
