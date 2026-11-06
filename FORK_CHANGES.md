@@ -91,6 +91,25 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Profile updates preserve the current join's sync position
+
+A join-to-join member event, including a display name or avatar change, used
+to overwrite both membership indexes with the profile event's position.
+Legacy sync then treated the account as newly joined and marked every
+affected room's timeline `limited` on every device. Membership updates now
+record a join position only when the account was not already joined. A
+leave followed by a join still records a fresh position and retains the
+existing sync reset behavior.
+
+Sliding sync uses the same position for membership activity and the e2ee
+extension's newly joined member burst; profile updates no longer trigger
+that burst. The profile visibility readers only test whether the join row
+exists. Room timeline and profile watchers still wake sync for profile
+events. Upstream has the same bug. Files:
+`src/service/rooms/state_cache/update.rs`; HTTP regression in
+`src/main/tests/sync_profile_membership.rs` covers two rooms, two devices,
+display name and avatar changes, sliding sync, and a real rejoin.
+
 ### Stored signing keys of a remote server stay small
 
 Every signing-key document fetched for a server, from the server itself or
