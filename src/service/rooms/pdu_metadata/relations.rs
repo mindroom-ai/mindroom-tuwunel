@@ -6,6 +6,7 @@ use ruma::{
 	api::Direction,
 	events::{reaction::ReactionEventContent, relation::RelationType},
 };
+use serde::{Deserialize, de::IgnoredAny};
 use tuwunel_core::{
 	Result,
 	arrayvec::ArrayVec,
@@ -296,9 +297,9 @@ pub(super) async fn walk_relations<'a>(
 ///
 /// A level that would take the walk past `walk.events` events or `walk.rows`
 /// relation rows is dropped with the levels below it; `None` means the
-/// target's own relations do not fit. A row whose event was deleted or is in
-/// another room, or was kept already, counts as a row read, but is neither
-/// kept nor walked again.
+/// target's own relations do not fit. A row whose event was deleted, redacted
+/// or is in another room, or was kept already, counts as a row read, but is
+/// neither kept nor walked again.
 #[implement(Service)]
 async fn relation_tree(
 	&self,
@@ -333,7 +334,9 @@ async fn relation_tree(
 					.get(&self.db.pduid_pdu)
 					.zip(rows.iter().stream())
 					.filter_map(|(stored, &count)| {
-						ready((stored.is_ok() && kept.insert(count)).then_some(count))
+						let servable = stored.is_ok_and(|pdu| !stored_redacted(&pdu));
+
+						ready((servable && kept.insert(count)).then_some(count))
 					})
 					.take(
 						walk.events
@@ -357,6 +360,28 @@ async fn relation_tree(
 	}
 
 	Some((walk.depth, events))
+}
+
+/// Whether a stored event was redacted.
+///
+/// Redaction strips the event's `m.relates_to`, so it is no longer a relation
+/// of its target and nothing relates to the target through it.
+fn stored_redacted(pdu: &[u8]) -> bool {
+	#[derive(Deserialize)]
+	struct Stored {
+		unsigned: Option<Unsigned>,
+	}
+
+	#[derive(Deserialize)]
+	struct Unsigned {
+		redacted_because: Option<IgnoredAny>,
+	}
+
+	serde_json::from_slice::<Stored>(pdu).is_ok_and(|stored| {
+		stored
+			.unsigned
+			.is_some_and(|unsigned| unsigned.redacted_because.is_some())
+	})
 }
 
 /// Walks the positions of at most `limit` events related to a target.

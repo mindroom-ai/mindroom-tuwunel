@@ -222,6 +222,8 @@ async fn paginate_relations_with_filter(
 			},
 			| to => Some(count) != to,
 		})
+		// Redaction strips an event's `m.relates_to`, so it relates to nothing.
+		.ready_filter(|(_, pdu)| !pdu.is_redacted())
 		.ready_filter(|(_, pdu)| {
 			filter_event_type
 				.as_ref()
