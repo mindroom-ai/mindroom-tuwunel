@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub(crate) mod directory;
 pub(crate) mod openid;
 
 use std::sync::Arc;
