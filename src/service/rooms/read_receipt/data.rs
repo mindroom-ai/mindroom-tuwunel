@@ -225,6 +225,12 @@ impl Data {
 	/// `announce` is set, keeping it a single point query. Announced state is
 	/// mirrored separately so notification-only writes cannot alter a sync
 	/// snapshot without changing its version.
+	///
+	/// The server marks a sender's own event read without announcing it, so
+	/// an announced write still publishes a position the active marker
+	/// already holds, unless the mirror already announced it. Such a write
+	/// leaves the active marker alone and reports no advance, so the caller
+	/// resets no counts for events after it.
 	#[inline]
 	pub(super) async fn private_read_set(
 		&self,
@@ -239,43 +245,56 @@ impl Data {
 	) -> bool {
 		let thread_kind = thread.as_str().unwrap_or_default();
 
-		if self
+		let advanced = !self
 			.private_read_position(room_id, user_id, thread_kind)
 			.await
-			.is_ok_and(|(stored, _)| count <= stored)
-		{
-			return false;
-		}
+			.is_ok_and(|(stored, _)| count <= stored);
 
-		let reset_sync = if announce && !thread_kind.is_empty() {
-			let versions = try_join(
-				self.last_privateread_update_fallible(user_id, room_id),
-				self.private_read_sync_update_fallible(user_id, room_id),
+		let (stale_mirror, published) = if announce {
+			let (versions, published) = join(
+				try_join(
+					self.last_privateread_update_fallible(user_id, room_id),
+					self.private_read_sync_update_fallible(user_id, room_id),
+				),
+				self.private_read_published(room_id, user_id, thread_kind),
 			)
 			.await;
 
 			match versions {
-				| Ok((gate, snapshot)) => gate != snapshot,
+				| Ok((gate, snapshot)) => (gate != snapshot, published),
 				| Err(error) => {
 					error!(?error, "Failed to inspect the private read sync snapshot.");
 					return false;
 				},
 			}
 		} else {
-			false
+			(false, None)
 		};
 
-		let mut txn = self
-			.sweep_thread_private_reads(
-				&self.roomuserid_privateread,
-				room_id,
-				user_id,
-				thread_kind,
-				self.services.db.txn(),
-			)
-			.await;
+		// A stale mirror holds nothing announced to compare against.
+		let publish = announce
+			&& (advanced || stale_mirror || published.is_none_or(|published| count > published));
 
-		if announce && (thread_kind.is_empty() || reset_sync) {
+		if !advanced && !publish {
+			return false;
+		}
+
+		let mut txn = self.services.db.txn();
+
+		if advanced {
+			txn = self
+				.sweep_thread_private_reads(
+					&self.roomuserid_privateread,
+					room_id,
+					user_id,
+					thread_kind,
+					txn,
+				)
+				.await;
+		}
+
+		// The mirror follows the active rows: an unthreaded advance swept them.
+		if publish && ((advanced && thread_kind.is_empty()) || stale_mirror) {
 			txn = match self
 				.sweep_private_read_sync(room_id, user_id, txn)
 				.await
@@ -289,7 +308,7 @@ impl Data {
 		}
 
 		// The permit retires the sequence number on drop, so it outlives execute().
-		let next_count = announce.then(|| self.services.globals.next_count());
+		let next_count = publish.then(|| self.services.globals.next_count());
 		let ts = u64::from(ts.get());
 
 		if let Some(next_count) = next_count.as_deref() {
@@ -303,9 +322,11 @@ impl Data {
 		}
 
 		// Additive value tail: ts (millis); old bare-count rows read back None.
-		match thread_kind.is_empty() {
-			| true => txn.put(&self.roomuserid_privateread, (room_id, user_id), (count, ts)),
-			| false => txn.put(
+		match (advanced, thread_kind.is_empty()) {
+			| (false, _) => {},
+			| (true, true) =>
+				txn.put(&self.roomuserid_privateread, (room_id, user_id), (count, ts)),
+			| (true, false) => txn.put(
 				&self.roomuserid_privateread,
 				(room_id, user_id, thread_kind),
 				(count, ts),
@@ -314,7 +335,7 @@ impl Data {
 
 		txn.execute();
 
-		true
+		advanced
 	}
 
 	/// Private read position for an exact `(room, user, thread)` context.
@@ -338,6 +359,26 @@ impl Data {
 				.await
 				.deserialized(),
 		}
+	}
+
+	/// Announced private read position for an exact `(room, user, thread)`
+	/// context.
+	///
+	/// A missing or unreadable mirror row reads as none, so the next announced
+	/// write publishes and replaces it.
+	#[inline]
+	async fn private_read_published(
+		&self,
+		room_id: &RoomId,
+		user_id: &UserId,
+		thread_kind: &str,
+	) -> Option<u64> {
+		self.roomuserid_privatereadsync
+			.qry(&(room_id, user_id, thread_kind))
+			.await
+			.deserialized::<(u64, Option<u64>)>()
+			.ok()
+			.map(|(count, _)| count)
 	}
 
 	/// Latest unthreaded (legacy 2-tuple) private read: `(pdu count, receipt ts
