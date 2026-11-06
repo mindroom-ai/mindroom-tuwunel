@@ -347,6 +347,23 @@ every thread into the room counts, so it is unchanged. Upstream has the same
 bug (`ced2a51bc`). Files: `src/api/client/sync/v3.rs`; test in
 `src/mindroom-tests/tests/sync_thread_counts.rs`.
 
+### A user's own event reads only its own thread
+
+The server marks each event read for its sender. It did that as an unthreaded
+read, inherited from Conduit: any message zeroed the sender's counts for the
+whole room, the main timeline and every thread, and moved their private read
+marker past all of them. Threads the user never opened then disappeared from
+badges, push counts and the user's other devices, while their client still
+showed them unread. MSC3771 reads each thread on its own, so the own event now
+counts like a receipt in the context it belongs to: an event in a thread
+(a reply, or a reaction, edit or redaction of a thread event) resets that
+thread's counts and private read marker, and any other event the main
+timeline's. Other threads keep their counts. Synapse resets nothing on a send
+(its counts follow receipts only, and it never counts the sender's own event).
+Upstream has the same code on `main`. Files:
+`src/service/rooms/timeline/append.rs`; test in
+`src/mindroom-tests/tests/sync_thread_counts.rs`.
+
 ### send_join response events are checked before they are stored
 
 Joining a room over federation stored every event of the `send_join` response

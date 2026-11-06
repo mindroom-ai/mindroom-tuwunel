@@ -161,12 +161,20 @@ where
 		.set_forward_extremities(pdu.room_id(), leafs, state_lock)
 		.await;
 
+	// The sender has read their own event in the thread it belongs to, or in
+	// the main timeline outside threads (MSC3771); other threads stay unread.
+	let thread = self
+		.services
+		.threads
+		.get_thread_id(pdu)
+		.await
+		.map_or(ReceiptThread::Main, ReceiptThread::Thread);
+
 	let insert_lock = self.mutex_insert.lock(pdu.room_id()).await;
 	let next_count = self.services.globals.next_count();
 
 	// Mark as read first so the sending client doesn't get a notification even if
-	// appending fails. Route through the dispatcher so per-thread counts are
-	// also cleared; the sender's own send subsumes any thread receipt.
+	// appending fails.
 	self.services
 		.read_receipt
 		.private_read_set(PrivateRead {
@@ -174,19 +182,14 @@ where
 			user_id: pdu.sender(),
 			count: *next_count,
 			ts: pdu.origin_server_ts(),
-			thread: &ReceiptThread::Unthreaded,
+			thread: &thread,
 			announce: false,
 		})
 		.await;
 
 	self.services
 		.pusher
-		.reset_notification_counts_for_thread(
-			pdu.sender(),
-			pdu.room_id(),
-			None,
-			&ReceiptThread::Unthreaded,
-		)
+		.reset_notification_counts_for_thread(pdu.sender(), pdu.room_id(), None, &thread)
 		.await;
 
 	let count = PduCount::Normal(*next_count);

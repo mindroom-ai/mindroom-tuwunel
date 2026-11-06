@@ -10,8 +10,9 @@ use tower::ServiceExt;
 use tuwunel_core::{
 	Result,
 	http::{Method, Request, StatusCode, header},
-	ruma::{OwnedEventId, OwnedRoomId, RoomId, user_id},
+	ruma::{OwnedEventId, OwnedRoomId, RoomId, UserId, user_id},
 };
+use tuwunel_service::Services;
 
 use self::support::Harness;
 
@@ -32,6 +33,7 @@ const THREADED_LAZY_MEMBERS: &str = concat!(
 /// the reader's receipt in one thread, and under a filter that lazy loads
 /// members. A thread read down to zero is left out, an unthreaded receipt
 /// reads them all, and a room with nothing new still stays out of the response.
+/// The reader's own send reads only the thread it is in, or the main timeline.
 #[test]
 fn sync_lists_every_thread_count() -> Result {
 	let harness = Harness::new("mindroom_sync_thread_counts", [])?;
@@ -145,8 +147,112 @@ fn sync_lists_every_thread_count() -> Result {
 			"unthreaded receipt: {all}"
 		);
 
+		check_own_send(&services, &router).await;
+
 		Ok(())
 	})
+}
+
+/// MSC3771: the reader's own event marks as read only the thread it is in, or
+/// the main timeline for an event outside threads, like a receipt there. A
+/// reply in one thread leaves the main timeline and the other thread unread, a
+/// main-timeline message leaves both threads unread, and a reaction to a thread
+/// reply reads that thread. The push badge follows the same counts, and the
+/// reader's private read markers stay in each event's own thread.
+async fn check_own_send(services: &Services, router: &Router) {
+	let reader = user_id!("@reader:localhost");
+	let room = create_room(router, READER_TOKEN).await;
+	let path = format!("/rooms/{room}/join");
+	request(router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
+
+	let x = send(router, &room, HELPER_TOKEN, "own-x", text("Question X")).await;
+	let y = send(router, &room, HELPER_TOKEN, "own-y", text("Question Y")).await;
+	let x_reply = send(router, &room, HELPER_TOKEN, "own-x-reply", thread_reply(&x, &[])).await;
+	send(router, &room, HELPER_TOKEN, "own-y-reply", thread_reply(&y, &[])).await;
+	send(router, &room, HELPER_TOKEN, "own-main", text("Main timeline")).await;
+
+	let before = sync(router, THREADED, None).await;
+	assert_eq!(room_counts(&before, &room), (Some(3), Some(0)), "before: {before}");
+	assert_eq!(counts(&before, &room, &x), Some((1, 0)), "before: {before}");
+	assert_eq!(counts(&before, &room, &y), Some((1, 0)), "before: {before}");
+
+	let in_y_event = send(router, &room, READER_TOKEN, "own-in-y", thread_reply(&y, &[])).await;
+	let in_y = sync(router, THREADED, Some(&before)).await;
+	assert_eq!(room_counts(&in_y, &room), (Some(3), Some(0)), "reply in Y: {in_y}");
+	assert_eq!(counts(&in_y, &room, &x), Some((1, 0)), "reply in Y: {in_y}");
+	assert_eq!(client_counts(&in_y, &room, &y), Some((0, 0)), "reply in Y: {in_y}");
+	assert_eq!(badge(services, reader).await, 4, "reply in Y");
+
+	let in_main_event =
+		send(router, &room, READER_TOKEN, "own-in-main", text("My question")).await;
+	let in_main = sync(router, THREADED, Some(&in_y)).await;
+	assert_eq!(room_counts(&in_main, &room), (Some(0), Some(0)), "main message: {in_main}");
+	assert_eq!(counts(&in_main, &room, &x), Some((1, 0)), "main message: {in_main}");
+	assert_eq!(badge(services, reader).await, 1, "main message");
+
+	let reaction = json!({
+		"m.relates_to": {"rel_type": "m.annotation", "event_id": x_reply, "key": "👍"},
+	});
+	let path = format!("/rooms/{room}/send/m.reaction/own-reaction");
+	let reaction = request(router, Method::PUT, &path, READER_TOKEN, reaction).await;
+	let reacted = sync(router, THREADED, Some(&in_main)).await;
+	assert_eq!(client_counts(&reacted, &room, &x), Some((0, 0)), "reaction in X: {reacted}");
+	assert_eq!(badge(services, reader).await, 0, "reaction in X");
+
+	let reaction = reaction["event_id"]
+		.as_str()
+		.expect("reaction event id");
+	let mut expected = vec![
+		(in_y_event.to_string(), Some(y.to_string())),
+		(in_main_event.to_string(), Some("main".to_owned())),
+		(reaction.to_owned(), Some(x.to_string())),
+	];
+	expected.sort();
+	assert_eq!(private_markers(services, &room, reader).await, expected);
+}
+
+/// The `(event, thread_id)` of each private read marker the user holds in the
+/// room, as their devices receive them; an unthreaded one has no `thread_id`.
+async fn private_markers(
+	services: &Services,
+	room: &RoomId,
+	user: &UserId,
+) -> Vec<(String, Option<String>)> {
+	let events = services
+		.read_receipt
+		.private_read_get(room, user)
+		.await
+		.expect("private read markers");
+
+	let mut markers: Vec<_> = events
+		.iter()
+		.flat_map(|event| {
+			let event: Value = serde_json::from_str(event.json().get()).expect("receipt JSON");
+			let content = event["content"]
+				.as_object()
+				.expect("receipt content")
+				.clone();
+
+			content.into_iter().map(|(id, receipts)| {
+				let thread = receipts["m.read.private"][user.as_str()]["thread_id"]
+					.as_str()
+					.map(ToOwned::to_owned);
+
+				(id, thread)
+			})
+		})
+		.collect();
+
+	markers.sort();
+	markers
+}
+
+/// The account-wide unread count a push carries as `counts.unread`.
+async fn badge(services: &Services, user: &UserId) -> u64 {
+	services
+		.pusher
+		.global_notification_count(user)
+		.await
 }
 
 fn joined<'a>(sync: &'a Value, room: &RoomId) -> &'a Value {
