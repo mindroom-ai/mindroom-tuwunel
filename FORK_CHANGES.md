@@ -1530,19 +1530,17 @@ changes these fixed preview bounds.
 
 There is no preview index, cache, migration, purge hook, or upgrade rebuild.
 Existing native relations continue to be maintained by local and federated
-appends, so rollback and re-upgrade cannot leave a separate preview index
-stale. Live replies to backfilled roots now enter the native relation store
+appends. Live replies to backfilled roots now enter the native relation store
 too. Older backfilled relations absent from that store remain unavailable to
 this bounded walk; their fields are omitted. No room-history scan is added to
-repair them. Retired preview rows and markers from earlier development builds
-are unused and need no recovery procedure.
+repair them.
 
 A page of 100 roots visits at most 5,050 candidate relation rows for previews,
 including the endpoint's existing one-root lookahead, regardless of the room's
 total thread count. Regression coverage includes a 500+ thread room, checking
 505 seeded threads through `/threads`, plus edit fallback, backfilled-root,
-missing-derived-index, and 50-row exhaustion cases in `src/mindroom-
-tests/tests/thread_previews.rs`.
+missing-derived-index, and 50-row exhaustion cases in
+`src/mindroom-tests/tests/thread_previews.rs`.
 
 Clients must read a title only from `io.mindroom.title`. A marker inside an
 edited `io.mindroom.latest_reply` remains reply payload and never supplies the
