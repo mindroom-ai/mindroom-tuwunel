@@ -1,9 +1,17 @@
 use futures::StreamExt;
-use ruma::UserId;
-use tuwunel_core::{Result, utils};
-use tuwunel_database::Deserialized;
+use ruma::{OwnedUserId, UserId};
+use tuwunel_core::{
+	Err, Error, Result, utils,
+	utils::{MutexMapGuard, result::NotFound},
+	warn,
+};
+use tuwunel_database::{Deserialized, Txn};
 
 use super::{PASSWORD_SENTINEL, Service};
+
+/// An account a first sign-in links: its password lock, held until the link
+/// is stored, and whether the account has an empty password to convert.
+pub type SsoAssignment = (MutexMapGuard<OwnedUserId, ()>, bool);
 
 /// Why deactivations carry a reason. Fork-only: neither Synapse nor upstream
 /// Tuwunel has this concept.
@@ -44,7 +52,7 @@ pub enum DeactivationReason {
 }
 
 impl DeactivationReason {
-	const fn as_str(self) -> &'static str {
+	pub(super) const fn as_str(self) -> &'static str {
 		match self {
 			| Self::SelfService => "self",
 			| Self::Admin => "admin",
@@ -96,14 +104,6 @@ impl Service {
 			.ok()
 	}
 
-	/// Stores why an account was deactivated.
-	#[inline]
-	pub fn set_deactivation_reason(&self, user_id: &UserId, reason: DeactivationReason) {
-		self.db
-			.userid_deactivation_reason
-			.insert(user_id, reason.as_str());
-	}
-
 	/// Compatibility repair for legacy SSO users whose origin was accidentally
 	/// rewritten to `password` during account creation.
 	pub async fn maybe_repair_legacy_sso_origin(&self, user_id: &UserId) -> bool {
@@ -142,6 +142,86 @@ impl Service {
 
 		self.set_origin(user_id, "sso");
 		true
+	}
+
+	/// Check the account `assigned_accounts` gives a signing-in identity that
+	/// has none yet. The assignment holds the account's password lock until the
+	/// link is stored, and says whether the account has an empty password.
+	pub async fn assign_sso_account(&self, user_id: &UserId) -> Result<SsoAssignment> {
+		let guard = self.changing_password.lock(user_id).await;
+		let password = self.password_hash(user_id).await;
+		let empty = password.as_deref().is_ok_and(str::is_empty);
+		let refusals = [
+			(!self.services.globals.user_is_local(user_id), "is not local"),
+			(user_id == self.services.globals.server_user, "is the server user"),
+			(password.as_ref().is_err_and(Error::is_missing), "does not exist"),
+			(password.is_err(), "cannot be read"),
+			(empty && self.deactivation_recorded(user_id).await, "is deactivated"),
+			(
+				self.services
+					.oauth
+					.sessions
+					.is_linked(user_id)
+					.await,
+				"is linked to another identity",
+			),
+		];
+
+		if let Some((_, reason)) = refusals.into_iter().find(|(refused, _)| *refused) {
+			return Err!(Request(Forbidden(warn!(
+				"This sign-in is assigned to {user_id}, which {reason}."
+			))));
+		}
+
+		Ok((guard, empty))
+	}
+
+	/// Hold an account a first sign-in takes by name, new or existing, until its
+	/// link is stored. It is refused if another identity, such as an
+	/// assignment's, is linked to it by the account's index, which every
+	/// sign-in's link writes; reading only that, an unreadable session of some
+	/// other account does not refuse every first sign-in.
+	pub async fn hold_unlinked_account(&self, user_id: &UserId) -> Result<SsoAssignment> {
+		let guard = self.changing_password.lock(user_id).await;
+
+		if self
+			.services
+			.oauth
+			.sessions
+			.has_indexed_link(user_id)
+			.await
+		{
+			return Err!(Request(UserInUse(warn!("{user_id} is linked to another identity."))));
+		}
+
+		Ok((guard, false))
+	}
+
+	/// Make an assigned account without a password one SSO signs in to, in the
+	/// batch that stores its link, so no reader finds one without the other.
+	pub fn convert_assigned_account(&self, txn: &mut Txn, user_id: &UserId) {
+		warn!(%user_id, "Making the assigned account, without a password, an SSO account.");
+		txn.insert_raw(&self.db.userid_origin, user_id, "sso");
+		txn.insert_raw(&self.db.userid_password, user_id, PASSWORD_SENTINEL);
+	}
+
+	/// Whether a deactivation is recorded for the account, here or in the
+	/// column a migrated database left behind. Creation without a password
+	/// records neither; anything unreadable counts.
+	async fn deactivation_recorded(&self, user_id: &UserId) -> bool {
+		let migrated = match self.services.db.open_cf("userid_deactivated") {
+			| Ok(Some(marks)) => !marks.get(user_id).await.is_missing(),
+			| Ok(None) => false,
+			| Err(_) => true,
+		};
+
+		migrated
+			|| !self
+				.db
+				.userid_deactivation_reason
+				.get(user_id)
+				.await
+				.is_missing()
 	}
 
 	#[cfg(test)]

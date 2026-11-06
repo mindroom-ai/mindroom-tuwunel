@@ -5129,6 +5129,23 @@ pub struct IdentityProvider {
 	#[serde(default)]
 	pub trusted: bool,
 
+	/// Assigns existing local accounts by the address the provider sends in the
+	/// `email` claim, matched ignoring ASCII case:
+	/// `{ "alice@example.com" = "@alice:example.com" }`. A listed address's first
+	/// sign-in gets that account, or is refused if the account is missing, the
+	/// server user, deactivated, or linked to another identity, or if the provider
+	/// says the address is unverified; one with an empty password becomes an SSO
+	/// account. Whoever controls a listed address gets the account: use this with
+	/// an app restricted to your own organization, not a multi-tenant one, and not
+	/// with a provider whose users can set or edit their address unverified. List
+	/// only accounts created for these people: one deactivated before deactivation
+	/// reasons were recorded has none and would be reactivated. Remove entries
+	/// once their people have signed in. A reload applies to the next sign-in.
+	///
+	/// default: {}
+	#[serde(default)]
+	pub assigned_accounts: BTreeMap<String, OwnedUserId>,
+
 	/// Setting this option to false will inhibit unique ID's from being
 	/// generated as a last-resort when determining a UserId from a provider's
 	/// claims. In the case of untrusted providers, when all provided claims

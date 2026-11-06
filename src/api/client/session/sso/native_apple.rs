@@ -21,7 +21,7 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	oauth::{Provider, SESSION_ID_LENGTH, Session, UserInfo},
+	oauth::{Provider, SESSION_ID_LENGTH, Session, UserInfo, user_info},
 };
 
 use super::{super::TOKEN_LENGTH, complete_sso_session};
@@ -76,6 +76,9 @@ struct AppleIdTokenClaims {
 	exp: u64,
 	sub: String,
 	email: Option<String>,
+	/// A boolean, or `"true"`/`"false"` as Apple sends it.
+	#[serde(default)]
+	email_verified: Option<JsonValue>,
 	name: Option<String>,
 	given_name: Option<String>,
 	family_name: Option<String>,
@@ -144,15 +147,25 @@ fn apple_userinfo_from_validated_claims(
 	Ok(apple_userinfo_from_claim_values(
 		claims.sub,
 		claims.email,
+		email_verified(claims.email_verified.as_ref()),
 		claims.name,
 		claims.given_name,
 		claims.family_name,
 	))
 }
 
+/// Whether Apple verified the address, read like any provider's claim; absent
+/// or null is unknown.
+fn email_verified(value: Option<&JsonValue>) -> Option<bool> {
+	value
+		.filter(|value| !value.is_null())
+		.map(user_info::email_verified)
+}
+
 fn apple_userinfo_from_claim_values(
 	sub: String,
 	email: Option<String>,
+	email_verified: Option<bool>,
 	name: Option<String>,
 	given_name: Option<String>,
 	family_name: Option<String>,
@@ -173,6 +186,7 @@ fn apple_userinfo_from_claim_values(
 		given_name,
 		family_name,
 		email,
+		email_verified,
 		avatar_url: None,
 		picture: None,
 	}
@@ -210,6 +224,7 @@ pub(super) fn decode_userinfo_from_id_token(session: &Session) -> Result<UserInf
 	Ok(apple_userinfo_from_claim_values(
 		sub.to_owned(),
 		email,
+		email_verified(payload.get("email_verified")),
 		payload
 			.get("name")
 			.and_then(JsonValue::as_str)
@@ -489,6 +504,7 @@ mod tests {
 			scope: BTreeSet::new(),
 			userid_claims: BTreeSet::new(),
 			trusted: false,
+			assigned_accounts: BTreeMap::new(),
 			unique_id_fallbacks: true,
 			registration: true,
 			base_path: None,
@@ -517,6 +533,7 @@ mod tests {
 			exp: 4_102_444_800,
 			sub: "apple-user-123".to_owned(),
 			email: Some("alice@example.com".to_owned()),
+			email_verified: None,
 			name: None,
 			given_name: None,
 			family_name: None,
@@ -677,6 +694,33 @@ mod tests {
 		assert_eq!(userinfo.name.as_deref(), Some("Alice Example"));
 		assert_eq!(userinfo.given_name.as_deref(), Some("Alice"));
 		assert_eq!(userinfo.family_name.as_deref(), Some("Example"));
+		assert_eq!(userinfo.email_verified, None);
+	}
+
+	#[test]
+	fn decode_userinfo_from_id_token_keeps_email_verified() {
+		for (claim, expected) in [
+			(json!("false"), Some(false)),
+			(json!("true"), Some(true)),
+			(json!(false), Some(false)),
+			(json!(true), Some(true)),
+			(json!("TRUE"), Some(true)),
+			(json!("False"), Some(false)),
+			(json!("maybe"), Some(false)),
+			(json!(0), Some(false)),
+			(json!(null), None),
+		] {
+			let session = apple_session_with_claims(&json!({
+				"sub": "apple-user-123",
+				"email": "alice@example.com",
+				"email_verified": claim,
+			}));
+
+			let userinfo =
+				decode_userinfo_from_id_token(&session).expect("decode Apple id_token claims");
+
+			assert_eq!(userinfo.email_verified, expected, "{claim}");
+		}
 	}
 
 	#[test]

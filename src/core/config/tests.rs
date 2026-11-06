@@ -517,6 +517,45 @@ ip_source = "cf_connecting_ip"
 }
 
 #[test]
+fn check_refuses_assigned_accounts_of_other_servers_or_twice() {
+	let config = |lines: &str| {
+		config_from_toml(&format!(
+			r#"[global]
+server_name = "example.com"
+
+[[global.identity_provider]]
+brand = "keycloak"
+client_id = "keycloak"
+client_secret = "oauth-secret"
+{lines}
+"#
+		))
+		.expect("assigned accounts config should parse")
+	};
+
+	let refused = |lines: &str, message: &str| {
+		let (result, _) = check_with_captured_logs(&config(lines));
+		let error = result.expect_err("the assigned accounts should fail config check");
+
+		assert!(error.to_string().contains(message), "{error}");
+	};
+
+	let local = r#"assigned_accounts = { "a@example.com" = "@a:example.com" }"#;
+	let (result, _) = check_with_captured_logs(&config(local));
+
+	result.expect("a local assigned account should pass config check");
+
+	refused(
+		r#"assigned_accounts = { "a@example.com" = "@a:elsewhere.example" }"#,
+		"is not a local user ID",
+	);
+	refused(
+		r#"assigned_accounts = { "a@example.com" = "@a:example.com", "A@example.com" = "@b:example.com" }"#,
+		"lists an address twice",
+	);
+}
+
+#[test]
 fn check_warns_when_mas_provisioning_provider_is_untrusted() {
 	let untrusted_provisioning = r#"[global]
 mas_secret = "provisioning-secret"
