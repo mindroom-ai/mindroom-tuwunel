@@ -403,7 +403,7 @@ mod tests {
 			"hidden latest edit must retain earlier visible edit"
 		);
 		let visible_reply =
-			send(router, base, MEMBER, "visible-reply", thread(root, "m.text", "visible reply"))
+			send(router, base, OWNER, "visible-reply", thread(root, "m.text", "visible reply"))
 				.await;
 		let served = event(router, base, MEMBER, root).await;
 		let summary = &served["unsigned"]["m.relations"]["m.thread"];
@@ -447,13 +447,14 @@ mod tests {
 		send(router, base, OWNER, "auth-owner-reply", thread(&root, "m.text", "answer")).await;
 		let trusted =
 			send(router, base, OWNER, "auth-owner-title", title(&root, "trusted topic")).await;
+		let mut early = String::new();
 		for index in 0..3 {
-			send(
+			early = send(
 				router,
 				base,
 				MEMBER,
-				&format!("auth-forgery-{index}"),
-				title(&root, "forged topic"),
+				&format!("auth-early-title-{index}"),
+				title(&root, "early topic"),
 			)
 			.await;
 		}
@@ -461,16 +462,35 @@ mod tests {
 		assert_eq!(
 			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["event_id"],
 			trusted,
-			"a title-only sender cannot hide a real title within the bound"
+			"a sender without a reply or the root cannot hide a real title within the bound"
 		);
 		let reply =
 			send(router, base, MEMBER, "auth-member-reply", thread(&root, "m.text", "DM answer"))
 				.await;
 		let served = event(router, base, OWNER, &root).await;
 		assert_eq!(
+			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["event_id"], early,
+			"a reply qualifies its sender's earlier titles, such as a tool call's"
+		);
+		// The root's sender may title its thread without replying, like a
+		// welcome message or an automation prompt.
+		let welcome = send(
+			router,
+			base,
+			MEMBER,
+			"auth-welcome",
+			json!({"msgtype":"m.text","body":"welcome"}),
+		)
+		.await;
+		let welcome_title =
+			send(router, base, MEMBER, "auth-welcome-title", title(&welcome, "Welcome")).await;
+		send(router, base, OWNER, "auth-welcome-forgery", title(&welcome, "forged welcome"))
+			.await;
+		let served = event(router, base, OWNER, &welcome).await;
+		assert_eq!(
 			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.title"]["event_id"],
-			trusted,
-			"a later reply cannot authorize earlier forged titles"
+			welcome_title,
+			"the root's sender may title its thread; a sender who did not reply may not"
 		);
 		// The responding member stays at the DM preset's default power level zero.
 		let approved =
@@ -653,12 +673,13 @@ mod tests {
 			json!({"msgtype":"m.text","body":"title only"}),
 		)
 		.await;
-		send(router, base, OWNER, "only-title", title(&title_root, "only topic")).await;
+		let only_title =
+			send(router, base, OWNER, "only-title", title(&title_root, "only topic")).await;
 		let served = event(router, base, OWNER, &title_root).await;
 		let summary = &served["unsigned"]["m.relations"]["m.thread"];
-		assert!(
-			summary.get("io.mindroom.title").is_none(),
-			"a title without an earlier conversational reply is omitted"
+		assert_eq!(
+			summary["io.mindroom.title"]["event_id"], only_title,
+			"the root's sender may title a thread without a reply"
 		);
 		assert!(
 			summary.get("io.mindroom.latest_reply").is_none(),

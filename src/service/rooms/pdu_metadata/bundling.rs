@@ -1,10 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use futures::{Stream, StreamExt, TryFutureExt, pin_mut};
 use ruma::{
 	EventId, OwnedEventId, OwnedUserId, UserId,
 	api::Direction,
-	events::{TimelineEventType, room::encrypted::Relation},
+	events::{AnySyncMessageLikeEvent, TimelineEventType, room::encrypted::Relation},
+	serde::Raw,
 };
 use serde_json::{Value, value::to_raw_value};
 use tuwunel_core::{
@@ -551,8 +552,15 @@ async fn redacted_root(&self, ignored: &BTreeSet<OwnedUserId>, root: &Pdu) -> Op
 
 const TITLE: &str = "io.mindroom.title";
 const REPLY: &str = "io.mindroom.latest_reply";
-const SEARCH_LIMIT: usize = 50;
 
+/// Thread relation rows, and edit rows per preview, read for the previews.
+const PREVIEW_ROWS: usize = 50;
+
+/// MindRoom previews beside the standard thread summary: the newest title (a
+/// thread event with an `io.mindroom.thread_summary` object, from the root's
+/// sender or a sender of a conversational reply in the window) and the newest
+/// conversational reply, each with its newest valid edit the requester may
+/// see. Unencrypted rooms only; a field outside the window is omitted.
 #[implement(Service)]
 async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result {
 	let services = &self.services;
@@ -579,10 +587,10 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			.ignored_users(user)
 			.await
 			.unwrap_or_default();
-		let root_pid: PduId = root_id.into();
+		let shortroomid = PduId::from(root_id).shortroomid;
 		let replies = services
 			.threads
-			.thread_replies(root_id, SEARCH_LIMIT)
+			.thread_replies(root_id, PREVIEW_ROWS)
 			.ignore_err()
 			.ready_filter(|(_, pdu)| {
 				pdu.room_id() == root.room_id()
@@ -597,23 +605,16 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			})
 			.collect::<Vec<_>>()
 			.await;
-		let mut repliers = BTreeMap::new();
-		// Newest-first rows leave the earliest reply per sender as proof.
-		for (count, title, pdu) in &replies {
-			if !*title {
-				repliers.insert(pdu.sender().to_owned(), *count);
-			}
-		}
+		let authors: BTreeSet<_> = replies
+			.iter()
+			.filter(|(_, title, _)| !title)
+			.map(|(_, _, pdu)| pdu.sender().to_owned())
+			.chain([root.sender().to_owned()])
+			.collect();
 		for (count, title, mut child) in replies {
-			if title
-				&& repliers
-					.get(child.sender())
-					.is_none_or(|reply| *reply >= count)
-			{
-				continue;
-			}
 			let field = if title { TITLE } else { REPLY };
 			if thread.contains_key(field)
+				|| (title && !authors.contains(child.sender()))
 				|| ignored.ignored_users.contains_key(child.sender())
 				|| config.is_forbidden_remote_server_name(child.sender().server_name())
 				|| !self.preview_visible(user, &child).await
@@ -626,10 +627,9 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 				child.unsigned = Some(to_raw_value(&child_unsigned)?.into());
 			}
 			if config.bundle_edit_relations {
-				let replacement = {
-					let id = PduId { shortroomid: root_pid.shortroomid, count };
+				let edit = {
 					let edits = self
-						.replacement_children(&child, id, SEARCH_LIMIT)
+						.replacement_children(&child, PduId { shortroomid, count }, PREVIEW_ROWS)
 						.filter_map(async |edit| {
 							self.preview_visible(user, &edit)
 								.await
@@ -638,14 +638,12 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 					pin_mut!(edits);
 					edits.next().await
 				};
-				if let Some(mut edit) = replacement {
+				if let Some(mut edit) = edit {
 					edit.remove_transaction_id_unless_sender(Some(user))?;
 					child.set_replacement_bundle(&edit.into_format())?;
 				}
 			}
-
-			let event: ruma::serde::Raw<ruma::events::AnySyncMessageLikeEvent> =
-				child.into_format();
+			let event: Raw<AnySyncMessageLikeEvent> = child.into_format();
 			thread.insert(field.to_owned(), serde_json::to_value(event)?);
 			if thread.contains_key(TITLE) && thread.contains_key(REPLY) {
 				break;
@@ -656,6 +654,8 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 	Ok(())
 }
 
+/// A preview child or edit is shown only when the requester may see it and
+/// its sender is not erased for them.
 #[implement(Service)]
 async fn preview_visible(&self, user: &UserId, event: &Pdu) -> bool {
 	let access = &self.services.state_accessor;

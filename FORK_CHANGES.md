@@ -1553,72 +1553,44 @@ native_client_ids = ["chat.mindroom.app"]
 
 ### Fresh-device thread titles and conversational previews
 
-The shared read-time thread bundler adds two optional fields alongside the
-standard `unsigned.m.relations.m.thread` fields:
+The shared read-time thread bundler adds two optional fields beside the
+standard `unsigned.m.relations.m.thread` fields, so a new device can list
+threads with their titles and real last replies without opening each one:
 
-- `io.mindroom.title`: the latest authorized title event in the thread.
-- `io.mindroom.latest_reply`: the latest direct thread event without a title marker.
+- `io.mindroom.title`: the newest title event in the thread.
+- `io.mindroom.latest_reply`: the newest direct thread event without a title
+  marker.
 
-Both values are full client message-like events, with `event_id`, `sender`,
-`type`, `origin_server_ts`, `content`, and applicable `unsigned` data. Like
-`latest_event`, the embedded event omits `room_id`. Reply edits use the
-existing `bundle_edit_relations` setting and native `m.replace` validation. No
-other aggregations are added to the embedded events. The standard
-`latest_event`, `count`, and `current_user_participated` behavior stays
-unchanged. The fields reach `/messages`, `/context`, `/event`, `/relations`,
-`/threads`, and v3 and sliding sync timelines through their shared bundler.
+Both are full client events without `room_id`, like `latest_event`. With
+`bundle_edit_relations` on, each carries its newest valid `m.replace` edit
+(same sender and type, not redacted) that the requester may see; a rejected
+newer edit falls back to an earlier valid one. `latest_event`, `count` and
+`current_user_participated` are unchanged. The fields reach `/messages`,
+`/context`, `/event`, `/relations`, `/threads` and the v3 and sliding sync
+timelines through the shared bundler. Encrypted rooms receive neither field.
 
-A title marker is an `io.mindroom.thread_summary` **object** in the content of
-an unencrypted, non-state, direct `m.thread` event. A plain `m.notice` remains
-a conversational reply. Marked events never become conversational previews,
-even when their author is unauthorized. A title's sender must also have an
-**earlier direct non-title reply by that sender in the same thread**, present
-and unredacted in the 50-row window. Earlier means server event order, not
-sender timestamps. A later reply cannot authorize an older forged title. This
-works for responding agents at power level 0 in user-created rooms and DMs;
-there is no power-level threshold or agent-name allowlist. It also permits any
-other member who has actually replied. A room member who has sent only title
-notices cannot take over a title. The prior-reply check uses only the bounded
-window, before history/erasure checks, with no power-level state reads.
+A title is a direct, non-state, unencrypted `m.thread` event whose content has
+an `io.mindroom.thread_summary` **object**. Its sender must be the root's
+sender or the sender of a direct non-title reply in the same window. That
+holds for responding agents at power level 0 (agents added after room
+creation, user-made rooms, DMs), for a router titling its own welcome
+message, and for automation prompts. A member who has not replied in the
+thread, and did not send its root, cannot set the title; their marked events
+are skipped and the walk keeps looking. Any participant can. Marked events
+are never conversational replies, and a marker inside an edit's
+`m.new_content` never makes a title: clients read the title only from
+`io.mindroom.title`.
 
-Replacement candidates are searched newest first. An edit rejected by sender,
-type, redaction, history visibility, or erasure does not hide an earlier
-eligible edit.
+Reads skip redacted, ignored-user, forbidden-server and erased events and
+enforce the requester's history visibility for the root, each candidate and
+each edit. A redacted root keeps previews of its live children.
 
-Fields are omitted when no eligible event exists. Reads skip redacted, purged,
-erased-for-recipient, ignored-user, and blocked-server events. Root, child,
-and edit history visibility is enforced for the requesting user, including
-current members who left and rejoined. A redacted root retains previews of its
-live children, like its standard thread summary. Encrypted rooms receive
-neither field, including for earlier plaintext history. No plaintext metadata
-is derived from encrypted events, and clients retain their decryption
-fallback.
-
-Each root uses the same native relation data as `latest_event`, walking newest
-first and reading at most **50 raw relation rows**, including missing,
-redacted, hidden, ignored, and unrelated rows. The window also supplies the
-prior-reply authorship proof. Candidate selection stops once both fields are
-found. A missing field is omitted when its candidate falls outside that shared
-bound; clients can open the thread for complete history. Each selected preview
-searches at most 50 native replacement rows, rejecting invalid or invisible
-newer edits before choosing an earlier valid one. No configuration option
-changes these fixed preview bounds.
-
-There is no preview index, cache, migration, purge hook, or upgrade rebuild.
-Existing native relations continue to be maintained by local and federated
-appends. Live replies to backfilled roots now enter the native relation store
-too. Older backfilled relations absent from that store remain unavailable to
-this bounded walk; their fields are omitted. No room-history scan is added to
-repair them.
-
-A page of 100 roots visits at most 5,050 candidate relation rows for previews,
-including the endpoint's existing one-root lookahead, regardless of the room's
-total thread count. Regression coverage includes a 500+ thread room, checking
-505 seeded threads through `/threads`, plus edit fallback, backfilled-root,
-missing-derived-index, and 50-row exhaustion cases in
-`src/mindroom-tests/tests/thread_previews.rs`.
-
-Clients must read a title only from `io.mindroom.title`. A marker inside an
-edited `io.mindroom.latest_reply` remains reply payload and never supplies the
-title. Exactly these two optional fields are added; their full client events
-and valid edits deliberately increase response size.
+Cost: each served root walks its native thread relations (the rows
+`latest_event` already uses) newest first, reading at most **50 relation
+rows** and at most 50 edit rows per selected preview, and stops once both
+fields are found. A field whose event is outside that window is omitted;
+clients fall back to opening the thread. There is no preview index,
+migration, purge hook or configuration option. Live relations to backfilled
+events now enter the native relation index (`add_relation`), so a backfilled
+root's live replies are found; such relations received before this change
+were never stored and stay absent.
