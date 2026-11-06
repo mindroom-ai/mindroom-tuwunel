@@ -91,6 +91,29 @@ Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
+### Profile updates preserve the current join's sync position
+
+A join-to-join member event, including a display name or avatar change, used
+to overwrite both membership indexes with the profile event's position.
+Legacy sync then treated the account as newly joined and marked every
+affected room's timeline `limited` on every device. Membership updates now
+record a join position only when the account was not already joined. A
+leave followed by a join still records a fresh position and retains the
+existing sync reset behavior.
+
+Sliding sync uses the same position for membership activity and the e2ee
+extension's newly joined member burst; profile updates no longer trigger
+that burst. The profile visibility readers only test whether the join row
+exists. Room timeline and profile watchers still wake sync for profile
+events. Upstream fixed this on 2026-11-03 in `b890115247` with a different
+design (`replaced_join`, read from the event's own previous state; forced state
+replays always rewrite the position). This fork does not have that commit yet:
+at the next upstream rebase, take upstream's version and drop this change, do
+not keep both. Files:
+`src/service/rooms/state_cache/update.rs`; HTTP regression in
+`src/main/tests/sync_profile_membership.rs` covers two rooms, two devices,
+display name and avatar changes, sliding sync, and a real rejoin.
+
 ### Stored signing keys of a remote server stay small
 
 Every signing-key document fetched for a server, from the server itself or
@@ -700,6 +723,51 @@ like a forbidden username, so the next claim or the identity's fallback
 username is used. Upstream has the same bug. File:
 `src/api/client/session/sso.rs`; test in
 `src/main/tests/sso_fallback_account.rs`.
+
+### SSO sign-in can be assigned an account created ahead of it
+
+An operator migrating from another chat system can create each person's
+account before their first sign-in, for example through an appservice's
+`/register`, and fill it with history. That sign-in then got a new account,
+because an existing account SSO did not create is skipped, and
+`trusted = true` hands out any account whose name the claims give. A
+provider's `assigned_accounts` maps email addresses, matched ignoring ASCII
+case, to local user IDs. The config check requires local IDs and distinct
+addresses; the map is read live, so a reload applies. An identity with no
+account yet whose `email` claim is listed gets that account and no other:
+the sign-in is refused, with a warning naming the reason, when the provider
+says the address is unverified (`email_verified` false, as a boolean or a
+string), or the account does not exist or cannot be read, is the server
+user, is deactivated (an empty password with a recorded reason, or a mark
+in the column a migrated database left; anything unreadable counts), or is
+linked to any identity, including one adopted from another server's
+database. A chained sign-in whose identity has no link yet is refused when
+its listed address names another account than the one it carries. The
+checks are made under the account's password lock, held until the link is
+stored, and an account with an empty password gets the sentinel and origin
+`sso` in the same write batch as the link, with a warning; other accounts
+keep their password and origin. Every first sign-in that takes an
+account by name, new or existing (a new registration, or an identity's
+fallback username), now holds that lock from after any registration until
+its link is stored and checks the account's link index again under it, so
+it cannot link an account an assignment linked meanwhile; such a sign-in
+is refused, as is one whose name, chosen as free, was created by someone
+else since. An account any provider's map lists is skipped when a sign-in
+chooses an account by name or fallback. Trusted providers and admin
+associations are otherwise unchanged.
+Registration (`full_register`), the admin API's user creation and MAS
+provisioning now refuse an account that exists by checking under the
+account's password lock (`create_new`), so an account created meanwhile,
+by an appservice or a first sign-in, is neither overwritten nor taken.
+Deactivation writes the empty password and its reason in one transaction
+under that lock. Unlisted addresses and later sign-ins work as before.
+Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,
+`tuwunel-example.toml`, `src/service/users/{mod.rs,register.rs,sso.rs,tests.rs}`,
+`src/api/client/admin/{users/create_or_modify.rs,mas/provision_user.rs}`,
+`src/service/oauth/{sessions.rs,user_info.rs}`,
+`src/api/client/session/sso.rs`, `docs/authentication/providers.md`; tests
+in `src/main/tests/sso_assigned_account.rs`, `src/service/users/tests.rs`
+and `src/core/config/tests.rs`.
 
 ### Knock state is checked before it is stored
 
@@ -1432,6 +1500,14 @@ mindroom_openid_audience = true
 [global]
 # On by default; false refuses sends and stops advertising the feature.
 mindroom_ephemeral_events_enabled = true
+```
+
+### Accounts assigned to SSO sign-ins
+```toml
+[[global.identity_provider]]
+# Empty by default; list only addresses your organization assigns, for
+# accounts created for those people, and remove entries once they signed in.
+assigned_accounts = { "alice@example.com" = "@alice:example.com" }
 ```
 
 ### Native Sign in with Apple

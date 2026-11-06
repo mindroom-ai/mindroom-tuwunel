@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 /// Selection of userinfo response claims.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -36,9 +37,34 @@ pub struct UserInfo {
 	/// Email address (`email` scope).
 	pub email: Option<String>,
 
+	/// Whether the provider verified `email` (read by `email_verified` below): any
+	/// value it sends other than `true` reads as unverified, and only an absent
+	/// or null claim as unknown.
+	#[serde(
+		default,
+		deserialize_with = "lenient_bool",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub email_verified: Option<bool>,
+
 	/// URL to pfp (github/gitlab)
 	pub avatar_url: Option<String>,
 
 	/// URL to pfp (google)
 	pub picture: Option<String>,
+}
+
+fn lenient_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+	Ok(Option::<Value>::deserialize(deserializer)?.map(|value| email_verified(&value)))
+}
+
+/// Whether an `email_verified` claim a provider sent says verified: `true`, or
+/// `"true"` in any case, as some providers send it. Any other value does not.
+#[must_use]
+pub fn email_verified(value: &Value) -> bool {
+	match value {
+		| Value::Bool(verified) => *verified,
+		| Value::String(verified) => verified.eq_ignore_ascii_case("true"),
+		| _ => false,
+	}
 }

@@ -18,8 +18,11 @@ use tuwunel_core::{
 		MutexMap,
 		stream::{IterStream, ReadyExt, TryExpect},
 	},
+	warn,
 };
-use tuwunel_database::{Cbor, Database, Deserialized, Ignore, Map};
+use tuwunel_database::{
+	Cbor, Database, Deserialized, Ignore, KeyVal, Map, Txn, deserialize_from_slice,
+};
 use url::Url;
 
 pub use self::adopt::Counts;
@@ -244,7 +247,7 @@ pub async fn put(&self, session: &Session) {
 		| None => None,
 	};
 
-	self.put_locked(session, unique_id.as_deref())
+	self.put_locked(session, unique_id.as_deref(), |_| ())
 		.await;
 }
 
@@ -260,9 +263,29 @@ pub async fn commit_identity_session<T, F, Fut>(
 	build: F,
 ) -> Result<(Session, T, Option<SessionId>)>
 where
-	T: Send,
+	T: Send + Sync,
 	F: FnOnce(Option<OwnedUserId>) -> Fut + Send,
 	Fut: Future<Output = Result<(Session, T)>> + Send,
+{
+	self.commit_identity_session_with(unique_id, build, |_, _| ())
+		.await
+}
+
+/// Like `commit_identity_session`, with `also` adding the caller's writes for
+/// the callback's value to the batch that commits the session.
+#[implement(Sessions)]
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn commit_identity_session_with<T, F, Fut, A>(
+	&self,
+	unique_id: &str,
+	build: F,
+	also: A,
+) -> Result<(Session, T, Option<SessionId>)>
+where
+	T: Send + Sync,
+	F: FnOnce(Option<OwnedUserId>) -> Fut + Send,
+	Fut: Future<Output = Result<(Session, T)>> + Send,
+	A: FnOnce(&T, &mut Txn) + Send,
 {
 	let write_guard = self.write_locks.lock(unique_id).await;
 	let existing = self
@@ -277,14 +300,20 @@ where
 	let old_user_id = existing.and_then(|session| session.user_id);
 	let (session, value) = build(old_user_id).await?;
 
-	self.put_locked(&session, Some(unique_id)).await;
+	self.put_locked(&session, Some(unique_id), |txn| also(&value, txn))
+		.await;
 	drop(write_guard);
 
 	Ok((session, value, old_sess_id))
 }
 
 #[implement(Sessions)]
-async fn put_locked(&self, session: &Session, unique_id: Option<&str>) {
+async fn put_locked(
+	&self,
+	session: &Session,
+	unique_id: Option<&str>,
+	also: impl FnOnce(&mut Txn) + Send,
+) {
 	let sess_id = session
 		.sess_id
 		.as_deref()
@@ -319,6 +348,7 @@ async fn put_locked(&self, session: &Session, unique_id: Option<&str>) {
 		txn.raw_put(&self.db.userid_oauthid, user_id, sess_ids);
 	}
 
+	also(&mut txn);
 	txn.execute();
 }
 
@@ -364,6 +394,52 @@ pub fn get_sess_id_by_user(&self, user_id: &UserId) -> impl Stream<Item = Result
 		.map_ok(Vec::into_iter)
 		.map_ok(IterStream::try_stream)
 		.try_flatten_stream()
+}
+
+/// Whether an identity is linked to `user_id` through the account's own
+/// index, which every sign-in's link writes; anything unreadable counts. It
+/// reads only that account's entries, unlike `is_linked`.
+#[implement(Sessions)]
+pub async fn has_indexed_link(&self, user_id: &UserId) -> bool {
+	self.get_sess_id_by_user(user_id)
+		.ready_any(|sess_id| !sess_id.is_missing())
+		.await
+}
+
+/// Whether any identity is linked to `user_id`.
+///
+/// The sessions themselves are read too, since an adopted link has no entry in
+/// the user's index.
+#[implement(Sessions)]
+pub async fn is_linked(&self, user_id: &UserId) -> bool {
+	self.has_indexed_link(user_id).await
+		|| self
+			.db
+			.oauthid_session
+			.raw_stream()
+			.ready_any(|row| row_links(row, user_id))
+			.await
+}
+
+/// Whether a stored session links `user_id`. A row that cannot be read may be
+/// anyone's link, so it counts, and the warning names the row, not this user.
+fn row_links(row: Result<KeyVal<'_>>, user_id: &UserId) -> bool {
+	let (key, val) = match row {
+		| Ok(row) => row,
+		| Err(e) => {
+			warn!(error = %e, "An unreadable session row blocks account assignments.");
+			return true;
+		},
+	};
+
+	match deserialize_from_slice::<Cbor<Session>>(val) {
+		| Ok(Cbor(session)) => session.user_id.as_deref() == Some(user_id),
+		| Err(e) => {
+			let key = String::from_utf8_lossy(key);
+			warn!(%key, error = %e, "An unreadable session blocks account assignments.");
+			true
+		},
+	}
 }
 
 /// Resolve the `sess_id` from an associated provider issuer and subject hash.

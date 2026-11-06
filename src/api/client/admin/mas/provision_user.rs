@@ -37,10 +37,11 @@ pub(crate) async fn provision_user_route(
 
 	let created = !services.users.exists(&user_id).await;
 
+	// An account created since the check above is refused, not overwritten.
 	if created {
 		services
 			.users
-			.create(&user_id, Some(PASSWORD_SENTINEL), Some("oidc"))
+			.create_new(&user_id, Some(PASSWORD_SENTINEL), Some("oidc"))
 			.await?;
 	}
 

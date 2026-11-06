@@ -44,7 +44,7 @@ pub use self::{
 	keys::{DeviceKeysUpdate, DeviceListChange, DeviceListRecord, parse_master_key},
 	register::Register,
 	server_user::SERVER_USER_KEY,
-	sso::DeactivationReason,
+	sso::{DeactivationReason, SsoAssignment},
 };
 
 pub const PASSWORD_SENTINEL: &str = "*";
@@ -207,6 +207,35 @@ impl Service {
 	) -> Result {
 		let _password_guard = self.changing_password.lock(user_id).await;
 
+		self.create_locked(user_id, password, origin)
+			.await
+	}
+
+	/// Create a new user account as `create` does, but refuse one that exists,
+	/// checked under the account's password lock, so an account created
+	/// meanwhile (by an appservice, say) is neither overwritten nor taken.
+	pub async fn create_new(
+		&self,
+		user_id: &UserId,
+		password: Option<&str>,
+		origin: Option<&str>,
+	) -> Result {
+		let _password_guard = self.changing_password.lock(user_id).await;
+
+		if self.exists(user_id).await {
+			return Err!(Request(UserInUse("User ID is not available.")));
+		}
+
+		self.create_locked(user_id, password, origin)
+			.await
+	}
+
+	async fn create_locked(
+		&self,
+		user_id: &UserId,
+		password: Option<&str>,
+		origin: Option<&str>,
+	) -> Result {
 		self.check_creation(user_id).await?;
 
 		let origin = origin.unwrap_or("password");
@@ -279,9 +308,14 @@ impl Service {
 		// Set the password to "" to indicate a deactivated account. Hashes will never
 		// result in an empty string, so the user will not be able to log in again.
 		// Systems like changing the password without logging in should check if the
-		// account is deactivated.
-		self.set_password(user_id, None).await?;
-		self.set_deactivation_reason(user_id, reason);
+		// account is deactivated. The reason is written with it under the password
+		// lock, so no reader finds the empty password without it.
+		let password_guard = self.changing_password.lock(user_id).await;
+		let mut txn = self.services.db.txn();
+		txn.insert_raw(&self.db.userid_password, user_id, PASSWORD_DISABLED);
+		txn.insert_raw(&self.db.userid_deactivation_reason, user_id, reason.as_str());
+		txn.execute();
+		drop(password_guard);
 		drop(admin_lock);
 
 		// Revoke any SSO authorizations, outside the lock since each is a request

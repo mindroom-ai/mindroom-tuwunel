@@ -5,6 +5,7 @@
 //! identity and network fields.
 
 use std::{
+	collections::BTreeSet,
 	env::consts::OS,
 	fs::read_to_string,
 	net::{IpAddr, SocketAddr},
@@ -697,6 +698,30 @@ fn check_identity_providers(config: &Config) -> Result {
 
 	for (i, provider) in &config.identity_provider {
 		check_identity_provider_secret(i, provider)?;
+
+		if let Some(user_id) = provider
+			.assigned_accounts
+			.values()
+			.find(|user_id| user_id.server_name() != config.server_name)
+		{
+			return Err!(Config(
+				"assigned_accounts",
+				"{user_id} on identity provider №{i} is not a local user ID."
+			));
+		}
+
+		let addresses: BTreeSet<_> = provider
+			.assigned_accounts
+			.keys()
+			.map(|address| address.to_ascii_lowercase())
+			.collect();
+
+		if addresses.len() != provider.assigned_accounts.len() {
+			return Err!(Config(
+				"assigned_accounts",
+				"Identity provider №{i} lists an address twice, in different case."
+			));
+		}
 	}
 
 	if !config.sso_custom_providers_page
