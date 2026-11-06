@@ -693,13 +693,15 @@ its link is stored and checks the account's link index again under it, so
 it cannot link an account an assignment linked meanwhile; such a sign-in
 is refused, as is one whose name, chosen as free, was created by someone
 else since. Trusted providers and admin associations are unchanged.
-Registration (`full_register`) now refuses an account that exists by
-checking under the account's password lock (`create_new`), so an account
-created meanwhile, by an appservice say, is neither overwritten nor taken.
+Registration (`full_register`), the admin API's user creation and MAS
+provisioning now refuse an account that exists by checking under the
+account's password lock (`create_new`), so an account created meanwhile,
+by an appservice or a first sign-in, is neither overwritten nor taken.
 Deactivation writes the empty password and its reason in one transaction
 under that lock. Unlisted addresses and later sign-ins work as before.
 Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,
 `tuwunel-example.toml`, `src/service/users/{mod.rs,register.rs,sso.rs,tests.rs}`,
+`src/api/client/admin/{users/create_or_modify.rs,mas/provision_user.rs}`,
 `src/service/oauth/{sessions.rs,user_info.rs}`,
 `src/api/client/session/sso.rs`, `docs/authentication/providers.md`; tests
 in `src/main/tests/sso_assigned_account.rs`, `src/service/users/tests.rs`
