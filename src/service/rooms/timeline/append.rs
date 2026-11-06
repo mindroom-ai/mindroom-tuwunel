@@ -183,7 +183,7 @@ where
 		.await
 		.map_err(|_| err!(Database("Room does not exist")))?;
 
-	let (pdu_json, replaced_join) = self.read_replaced(pdu, pdu_json).await?;
+	let (pdu_json, replaced_join, own_join) = self.read_replaced(pdu, pdu_json).await?;
 
 	// We must keep track of all events that have been referenced.
 	self.services
@@ -195,33 +195,31 @@ where
 		.set_forward_extremities(pdu.room_id(), leafs, state_lock)
 		.await;
 
+	let read = self.own_read(pdu, own_join).await;
+
 	let insert_lock = self.mutex_insert.lock(pdu.room_id()).await;
 	let next_count = self.services.globals.next_count();
 
 	// Mark as read first so the sending client doesn't get a notification even if
-	// appending fails. Route through the dispatcher so per-thread counts are
-	// also cleared; the sender's own send subsumes any thread receipt.
-	self.services
-		.read_receipt
-		.private_read_set(PrivateRead {
-			room_id: pdu.room_id(),
-			user_id: pdu.sender(),
-			count: *next_count,
-			ts: pdu.origin_server_ts(),
-			thread: &ReceiptThread::Unthreaded,
-			announce: false,
-		})
-		.await;
+	// appending fails.
+	if let Some(thread) = &read {
+		self.services
+			.read_receipt
+			.private_read_set(PrivateRead {
+				room_id: pdu.room_id(),
+				user_id: pdu.sender(),
+				count: *next_count,
+				ts: pdu.origin_server_ts(),
+				thread,
+				announce: false,
+			})
+			.await;
 
-	self.services
-		.pusher
-		.reset_notification_counts_for_thread(
-			pdu.sender(),
-			pdu.room_id(),
-			None,
-			&ReceiptThread::Unthreaded,
-		)
-		.await;
+		self.services
+			.pusher
+			.reset_notification_counts_for_thread(pdu.sender(), pdu.room_id(), None, thread)
+			.await;
+	}
 
 	let count = PduCount::Normal(*next_count);
 	let pdu_id: RawPduId = PduId { shortroomid, count }.into();
@@ -284,8 +282,9 @@ where
 	Ok(pdu_id)
 }
 
-/// Fill a state event's `unsigned` from the event it replaced, and find the
-/// position of the same user's join that a profile change replaces.
+/// Fill a state event's `unsigned` from the event it replaced, find the
+/// position of the same user's join that a profile change replaces, and tell
+/// whether the event joins its sender.
 ///
 /// The replaced event is read once from the event's own state snapshot and is
 /// dropped on return, so it holds no place across the append's later awaits.
@@ -294,7 +293,7 @@ async fn read_replaced(
 	&self,
 	pdu: &PduEvent,
 	pdu_json: CanonicalJsonObject,
-) -> Result<(CanonicalJsonObject, Option<PduCount>)> {
+) -> Result<(CanonicalJsonObject, Option<PduCount>, bool)> {
 	let state_key = pdu.state_key();
 	let prev_state = state_key
 		.map_async(|state_key| self.prev_state(pdu, state_key))
@@ -308,8 +307,47 @@ async fn read_replaced(
 	};
 
 	let replaced_join = self.replaced_join(pdu, prev_state.as_ref()).await;
+	let own_join = is_own_join(pdu, prev_state.as_ref());
 
-	Ok((pdu_json, replaced_join))
+	Ok((pdu_json, replaced_join, own_join))
+}
+
+/// The context a local sender's own event marks read for them, if any.
+///
+/// An event in a thread reads that thread, and any other event the main
+/// timeline, like a receipt in its context (MSC3771); other threads stay
+/// unread. A state event, such as a topic, a thread tag or a profile change,
+/// reads nothing: Synapse marks nothing read on a send and counts from the
+/// user's latest membership, so only the sender's own join (`own_join`) reads
+/// the whole room. A remote sender holds no counts here.
+#[implement(super::Service)]
+async fn own_read(&self, pdu: &PduEvent, own_join: bool) -> Option<ReceiptThread> {
+	if !self.services.globals.user_is_local(pdu.sender()) {
+		return None;
+	}
+
+	if pdu.state_key().is_some() {
+		return own_join.then_some(ReceiptThread::Unthreaded);
+	}
+
+	let thread = self.services.threads.get_thread_id(pdu).await;
+
+	Some(thread.map_or(ReceiptThread::Main, ReceiptThread::Thread))
+}
+
+/// Whether `pdu` joins its sender to the room, rather than changing the
+/// profile of a member who had already joined.
+fn is_own_join(pdu: &PduEvent, prev_state: Option<&PduEvent>) -> bool {
+	let membership = |pdu: &PduEvent| {
+		pdu.get_content::<RoomMemberEventContent>()
+			.map(|content| content.membership)
+			.ok()
+	};
+
+	*pdu.kind() == TimelineEventType::RoomMember
+		&& pdu.state_key() == Some(pdu.sender().as_str())
+		&& membership(pdu) == Some(MembershipState::Join)
+		&& prev_state.and_then(membership) != Some(MembershipState::Join)
 }
 
 #[implement(super::Service)]
