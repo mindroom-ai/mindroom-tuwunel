@@ -358,7 +358,8 @@ showed them unread. MSC3771 reads each thread on its own, so the own event now
 counts like a receipt in the context it belongs to: an event in a thread
 (a reply, or a reaction, edit or redaction of a thread event) resets that
 thread's counts and private read marker, and any other event the main
-timeline's. Other threads keep their counts. Synapse resets nothing on a send
+timeline's, state events and relations to a thread root included, as Synapse
+assigns threads to push actions. Other threads keep their counts. Synapse resets nothing on a send
 (its counts follow receipts only, and it never counts the sender's own event).
 Upstream has the same code on `main`. Files:
 `src/service/rooms/timeline/append.rs`; test in

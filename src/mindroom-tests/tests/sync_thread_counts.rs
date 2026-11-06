@@ -153,12 +153,12 @@ fn sync_lists_every_thread_count() -> Result {
 	})
 }
 
-/// MSC3771: the reader's own event marks as read only the thread it is in, or
-/// the main timeline for an event outside threads, like a receipt there. A
-/// reply in one thread leaves the main timeline and the other thread unread, a
-/// main-timeline message leaves both threads unread, and a reaction to a thread
-/// reply reads that thread. The push badge follows the same counts, and the
-/// reader's private read markers stay in each event's own thread.
+/// MSC3771: the reader's own event marks as read only the timeline it belongs
+/// to, like a receipt there. A reply in one thread leaves the main timeline and
+/// the other thread unread. A state event, a reaction to a thread root and a
+/// main-timeline message read only the main timeline, and a reaction to a
+/// thread reply reads only that thread. The push badge follows the same counts,
+/// and the reader's private read markers stay in each event's own timeline.
 async fn check_own_send(services: &Services, router: &Router) {
 	let reader = user_id!("@reader:localhost");
 	let room = create_room(router, READER_TOKEN).await;
@@ -183,32 +183,55 @@ async fn check_own_send(services: &Services, router: &Router) {
 	assert_eq!(client_counts(&in_y, &room, &y), Some((0, 0)), "reply in Y: {in_y}");
 	assert_eq!(badge(services, reader).await, 4, "reply in Y");
 
+	let path = format!("/rooms/{room}/state/m.room.topic");
+	request(router, Method::PUT, &path, READER_TOKEN, json!({"topic": "Questions"})).await;
+	let topic = sync(router, THREADED, Some(&in_y)).await;
+	assert_eq!(room_counts(&topic, &room), (Some(0), Some(0)), "state event: {topic}");
+	assert_eq!(counts(&topic, &room, &x), Some((1, 0)), "state event: {topic}");
+	assert_eq!(badge(services, reader).await, 1, "state event");
+
+	send(router, &room, HELPER_TOKEN, "own-main-2", text("Another one")).await;
+	react(router, &room, &x, "own-root-reaction").await;
+	let root = sync(router, THREADED, Some(&topic)).await;
+	assert_eq!(room_counts(&root, &room), (Some(0), Some(0)), "reaction to root: {root}");
+	assert_eq!(counts(&root, &room, &x), Some((1, 0)), "reaction to root: {root}");
+	assert_eq!(badge(services, reader).await, 1, "reaction to root");
+
+	send(router, &room, HELPER_TOKEN, "own-main-3", text("And another")).await;
 	let in_main_event =
 		send(router, &room, READER_TOKEN, "own-in-main", text("My question")).await;
-	let in_main = sync(router, THREADED, Some(&in_y)).await;
+	let in_main = sync(router, THREADED, Some(&root)).await;
 	assert_eq!(room_counts(&in_main, &room), (Some(0), Some(0)), "main message: {in_main}");
 	assert_eq!(counts(&in_main, &room, &x), Some((1, 0)), "main message: {in_main}");
 	assert_eq!(badge(services, reader).await, 1, "main message");
 
-	let reaction = json!({
-		"m.relates_to": {"rel_type": "m.annotation", "event_id": x_reply, "key": "👍"},
-	});
-	let path = format!("/rooms/{room}/send/m.reaction/own-reaction");
-	let reaction = request(router, Method::PUT, &path, READER_TOKEN, reaction).await;
+	let reaction = react(router, &room, &x_reply, "own-reply-reaction").await;
 	let reacted = sync(router, THREADED, Some(&in_main)).await;
 	assert_eq!(client_counts(&reacted, &room, &x), Some((0, 0)), "reaction in X: {reacted}");
 	assert_eq!(badge(services, reader).await, 0, "reaction in X");
 
-	let reaction = reaction["event_id"]
-		.as_str()
-		.expect("reaction event id");
 	let mut expected = vec![
 		(in_y_event.to_string(), Some(y.to_string())),
 		(in_main_event.to_string(), Some("main".to_owned())),
-		(reaction.to_owned(), Some(x.to_string())),
+		(reaction.to_string(), Some(x.to_string())),
 	];
 	expected.sort();
 	assert_eq!(private_markers(services, &room, reader).await, expected);
+}
+
+/// The reader reacts to `event`.
+async fn react(router: &Router, room: &RoomId, event: &OwnedEventId, txn: &str) -> OwnedEventId {
+	let path = format!("/rooms/{room}/send/m.reaction/{txn}");
+	let content = json!({
+		"m.relates_to": {"rel_type": "m.annotation", "event_id": event, "key": "👍"},
+	});
+	let response = request(router, Method::PUT, &path, READER_TOKEN, content).await;
+
+	response["event_id"]
+		.as_str()
+		.expect("reaction event id")
+		.try_into()
+		.expect("valid event id")
 }
 
 /// The `(event, thread_id)` of each private read marker the user holds in the
