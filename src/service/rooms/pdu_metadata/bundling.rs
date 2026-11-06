@@ -2,10 +2,14 @@ use std::collections::BTreeSet;
 
 use futures::{Stream, StreamExt, TryFutureExt, pin_mut};
 use ruma::{
-	EventId, OwnedEventId, OwnedUserId, UserId, api::Direction, events::room::encrypted::Relation,
+	EventId, OwnedEventId, OwnedUserId, UserId,
+	api::Direction,
+	events::{AnySyncMessageLikeEvent, TimelineEventType, room::encrypted::Relation},
+	serde::Raw,
 };
+use serde_json::{Value, value::to_raw_value};
 use tuwunel_core::{
-	PduId,
+	PduId, Result,
 	arrayvec::ArrayVec,
 	implement,
 	matrix::{Event, Pdu, PduCount, RawPduId},
@@ -90,6 +94,11 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 				}
 			}
 		}
+
+		self.bundle_thread_previews(sender_user, &mut pdu)
+			.await
+			.log_err()
+			.ok();
 	}
 
 	let replacement = self
@@ -340,7 +349,7 @@ async fn newest_replacement(&self, parent: &Pdu) -> Option<Pdu> {
 		.await
 		.ok()?;
 
-	let replacements = self.replacement_children(parent, parent_id);
+	let replacements = self.replacement_children(parent, parent_id, usize::MAX);
 
 	pin_mut!(replacements);
 	replacements.next().await
@@ -364,7 +373,7 @@ pub async fn replacement_ids(&self, parent: &EventId) -> Vec<OwnedEventId> {
 		return Vec::new();
 	};
 
-	self.replacement_children(&parent, parent_id.into())
+	self.replacement_children(&parent, parent_id.into(), usize::MAX)
 		.map(|child| child.event_id().to_owned())
 		.collect()
 		.await
@@ -378,6 +387,7 @@ fn replacement_children<'a>(
 	&'a self,
 	parent: &'a Pdu,
 	parent_id: PduId,
+	limit: usize,
 ) -> impl Stream<Item = Pdu> + Send + 'a {
 	let shortroomid = parent_id.shortroomid;
 	let prefix = prefix(shortroomid, parent_id.count, Tag::Replace);
@@ -392,6 +402,7 @@ fn replacement_children<'a>(
 		.rev_raw_keys_from(seek.as_slice())
 		.ignore_err()
 		.ready_take_while(move |key| key.starts_with(&prefix))
+		.take(limit)
 		.map(|key| u64_from_u8(&key[CHILD_COUNT_OFFSET..KEY_LEN]))
 		.map(PduCount::from_unsigned)
 		.map(move |count| (shortroomid, count))
@@ -539,6 +550,109 @@ async fn redacted_root(&self, ignored: &BTreeSet<OwnedUserId>, root: &Pdu) -> Op
 		.flatten()
 }
 
+const TITLE: &str = "io.mindroom.title";
+const REPLY: &str = "io.mindroom.latest_reply";
+
+/// Thread relation rows, and edit rows per preview, read for the previews.
+const PREVIEW_ROWS: usize = 50;
+
+/// MindRoom previews beside the standard thread summary: the newest title (an
+/// `m.notice` thread event with an `io.mindroom.thread_summary` object) and
+/// the newest other thread event, each with its newest valid edit the
+/// requester may see. Unencrypted rooms only; a field outside the window is
+/// omitted.
+#[implement(Service)]
+async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result {
+	let services = &self.services;
+	let access = &services.state_accessor;
+	let config = &services.server.config;
+	let mut unsigned = root.get_unsigned_as_value();
+	let Some(thread) = unsigned
+		.pointer_mut("/m.relations/m.thread")
+		.and_then(Value::as_object_mut)
+	else {
+		return Ok(());
+	};
+	thread.remove(TITLE);
+	thread.remove(REPLY);
+	if !access.is_encrypted_room(root.room_id()).await
+		&& let Ok(root_id) = services
+			.timeline
+			.get_pdu_id(root.event_id())
+			.await
+	{
+		let ignored = services
+			.users
+			.ignored_users(user)
+			.await
+			.unwrap_or_default();
+		let shortroomid = PduId::from(root_id).shortroomid;
+		// Boxed: the walk stays open across the per-candidate reads below.
+		let mut replies = Box::pin(
+			services
+				.threads
+				.thread_replies(root_id, PREVIEW_ROWS)
+				.ignore_err()
+				.ready_filter(|(_, pdu)| {
+					pdu.room_id() == root.room_id()
+						&& pdu.state_key().is_none()
+						&& *pdu.kind() != TimelineEventType::RoomEncrypted
+				}),
+		);
+		while let Some((count, mut child)) = replies.next().await {
+			let title = child.get_content::<Value>().is_ok_and(|content| {
+				content["msgtype"] == "m.notice"
+					&& content["io.mindroom.thread_summary"].is_object()
+			});
+			let field = if title { TITLE } else { REPLY };
+			if thread.contains_key(field)
+				|| ignored.ignored_users.contains_key(child.sender())
+				|| config.is_forbidden_remote_server_name(child.sender().server_name())
+				|| !self.preview_visible(user, &child).await
+			{
+				continue;
+			}
+			let mut child_unsigned = child.get_unsigned_as_value();
+			if let Some(object) = child_unsigned.as_object_mut() {
+				object.remove("m.relations");
+				child.unsigned = Some(to_raw_value(&child_unsigned)?.into());
+			}
+			if config.bundle_edit_relations {
+				let edit = {
+					let edits = self
+						.replacement_children(&child, PduId { shortroomid, count }, PREVIEW_ROWS)
+						.filter_map(async |edit| {
+							self.preview_visible(user, &edit)
+								.await
+								.then_some(edit)
+						});
+					pin_mut!(edits);
+					edits.next().await
+				};
+				if let Some(mut edit) = edit {
+					edit.remove_transaction_id_unless_sender(Some(user))?;
+					child.set_replacement_bundle(&edit.into_format())?;
+				}
+			}
+			let event: Raw<AnySyncMessageLikeEvent> = child.into_format();
+			thread.insert(field.to_owned(), serde_json::to_value(event)?);
+			if thread.contains_key(TITLE) && thread.contains_key(REPLY) {
+				break;
+			}
+		}
+	}
+	root.unsigned = Some(to_raw_value(&unsigned)?.into());
+	Ok(())
+}
+
+/// A preview child or edit is shown only when the requester may see it and
+/// its sender is not erased for them.
+#[implement(Service)]
+async fn preview_visible(&self, user: &UserId, event: &Pdu) -> bool {
+	let access = &self.services.state_accessor;
+	access.user_can_see_event(user, event).await && !access.erased_for(user, event).await
+}
+
 #[cfg(test)]
 mod tests {
 	use serde_json::json;
@@ -573,7 +687,7 @@ mod tests {
 
 		assert!(latest.is_none(), "load failure returned a latest event");
 
-		let unsigned: serde_json::Value = serde_json::from_str(
+		let unsigned: Value = serde_json::from_str(
 			pdu.unsigned
 				.as_ref()
 				.expect("sibling unsigned data should remain")

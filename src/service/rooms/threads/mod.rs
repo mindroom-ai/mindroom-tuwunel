@@ -605,7 +605,7 @@ async fn latest_thread_reply(
 }
 
 #[implement(Service)]
-fn thread_replies(
+pub(crate) fn thread_replies(
 	&self,
 	root_id: RawPduId,
 	limit: usize,
@@ -649,7 +649,7 @@ async fn rebuild_thread_summary(&self, root_id: RawPduId) -> Result<bool> {
 		})
 		.await?;
 
-	// A backfilled root keeps its count; its replies are not in the relation index.
+	// A backfilled root may have older replies absent from the relation index.
 	let count = matches!(root_id.pdu_count(), PduCount::Normal(_))
 		.and_then(|| UInt::try_from(count).ok())
 		.or_else(|| thread_count(&root));
