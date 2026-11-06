@@ -486,6 +486,26 @@ has the same bug, latent since `628597c31` and exposed when `767f53cf5` made 12
 the default room version. File: `src/service/rooms/timeline/create.rs`; test in
 `src/main/tests/create_room_same_millisecond.rs`.
 
+### A refused `createRoom` leaves no room
+
+`createRoom` stored the create event and the creator's join before it built
+the power levels event, so a request refused at that or any later event still
+left a room. In room version 12, the default, a `power_level_content_override`
+listing the creator in `users` failed the power levels authorization rule
+(`creator user IDs are not allowed in the users field`), and the creator kept
+a room holding only the create event and their join, which clients show as an
+empty room without power levels. The power levels content and `initial_state`
+are now built and checked before the create event. Power levels that list the
+creator or an additional creator in `users` are refused with
+`400 M_INVALID_ROOM_STATE`, the code the specification gives for initial state
+the request implies but the room cannot have; the specification says a room
+version 12 creator cannot be listed there, and Synapse refuses the request too.
+A request that still fails at a later event, such as an `initial_state` power
+levels event the rules refuse, deletes the room it began before answering, as
+a failed room upgrade does with its new room. Upstream has the same bug. File:
+`src/api/client/room/create.rs`; test in
+`src/main/tests/create_room_refusal.rs`.
+
 ### Deleting an alias by power level takes room membership
 
 `DELETE /directory/room/{alias}` let anyone holding the room's

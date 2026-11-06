@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, iter::once};
 
 use axum::extract::State;
 use futures::{FutureExt, StreamExt};
@@ -45,6 +45,7 @@ use tuwunel_core::{
 		pdu::{Content, PduBuilder},
 		room_version,
 	},
+	result::LogErr,
 	utils::{BoolExt, IterStream, ReadyExt, option::OptionExt, result::FlatOk},
 	warn,
 };
@@ -96,6 +97,14 @@ pub(crate) async fn create_room_route(
 		.await
 		.transpose()?;
 
+	// Check the rest of the request before the room exists, too.
+	let additional_creators = additional_creators(&body, &preset, &version_rules);
+	let power_levels =
+		power_levels_content(&services, &body, &preset, &version_rules, &additional_creators)
+			.await?;
+
+	let initial_state = initial_state_events(&services, &body)?;
+
 	// Increment and hold the counter; the room will sync atomically to clients
 	// which is preferable.
 	let next_count = services.globals.next_count();
@@ -105,60 +114,80 @@ pub(crate) async fn create_room_route(
 		| RoomIdFormatVersion::V1 =>
 			create_create_event_legacy(&services, &body, room_version, &version_rules).await?,
 		| RoomIdFormatVersion::V2 =>
-			create_create_event(&services, &body, &preset, room_version, &version_rules)
+			create_create_event(&services, &body, &additional_creators, room_version)
 				.await
 				.map_err(|e| {
 					err!(Request(InvalidParam("Error while creating m.room.create event: {e}")))
 				})?,
 	};
 
-	// 2. Let the room creator join
-	apply_creator_join_pdu(&services, &body, sender_user, &room_id, &state_lock)
+	let initial_events: Result = async {
+		// 2. Let the room creator join
+		apply_creator_join_pdu(&services, &body, sender_user, &room_id, &state_lock)
+			.boxed()
+			.await?;
+
+		// 3. Power levels
+		apply_power_levels_pdu(&services, &power_levels, sender_user, &room_id, &state_lock)
+			.boxed()
+			.await?;
+
+		// 4. Canonical room alias
+		if let Some(room_alias_id) = &alias {
+			apply_canonical_alias_pdu(
+				&services,
+				room_alias_id,
+				sender_user,
+				&room_id,
+				&state_lock,
+			)
+			.boxed()
+			.await?;
+		}
+
+		// 5. Events set by preset
+		let initial_state = apply_preset_state_pdus(
+			&services,
+			initial_state,
+			&preset,
+			sender_user,
+			&room_id,
+			&state_lock,
+		)
 		.boxed()
 		.await?;
 
-	// 3. Power levels
-	apply_power_levels_pdu(
-		&services,
-		&body,
-		&preset,
-		&version_rules,
-		sender_user,
-		&room_id,
-		&state_lock,
-	)
-	.boxed()
-	.await?;
+		// 6. Events listed in initial_state
+		apply_initial_state_pdus(
+			&services,
+			initial_state,
+			&preset,
+			sender_user,
+			&room_id,
+			&state_lock,
+		)
+		.boxed()
+		.await?;
 
-	// 4. Canonical room alias
-	if let Some(room_alias_id) = &alias {
-		apply_canonical_alias_pdu(&services, room_alias_id, sender_user, &room_id, &state_lock)
+		// 7. Events implied by name and topic
+		apply_name_and_topic_pdus(&services, &body, sender_user, &room_id, &state_lock)
 			.boxed()
-			.await?;
+			.await
 	}
+	.await;
 
-	// 5. Events set by preset
-	let initial_state =
-		apply_preset_state_pdus(&services, &body, &preset, sender_user, &room_id, &state_lock)
+	// A refused request leaves no room: delete the one it began.
+	if let Err(e) = initial_events {
+		services
+			.delete
+			.delete_room(&room_id, true, state_lock)
 			.boxed()
-			.await?;
+			.await
+			.log_err()
+			.ok();
 
-	// 6. Events listed in initial_state
-	apply_initial_state_pdus(
-		&services,
-		initial_state,
-		&preset,
-		sender_user,
-		&room_id,
-		&state_lock,
-	)
-	.boxed()
-	.await?;
-
-	// 7. Events implied by name and topic
-	apply_name_and_topic_pdus(&services, &body, sender_user, &room_id, &state_lock)
-		.boxed()
-		.await?;
+		return Err(e);
+	}
 
 	drop(next_count);
 	drop(state_lock);
@@ -217,15 +246,20 @@ async fn apply_creator_join_pdu(
 		.map(|_| ())
 }
 
-async fn apply_power_levels_pdu(
+/// The room's first power levels content, from the defaults and overrides.
+///
+/// Since room version 12 the creators outrank every power level, and the
+/// authorization rules refuse power levels that list one in `users`. Such a
+/// request is refused here, before the room exists, rather than by the rules
+/// once the create event and the creator's join are stored.
+async fn power_levels_content(
 	services: &Services,
 	body: &Ruma<create_room::v3::Request>,
 	preset: &RoomPreset,
 	version_rules: &RoomVersionRules,
-	sender_user: &UserId,
-	room_id: &RoomId,
-	state_lock: &RoomMutexGuard,
-) -> Result {
+	additional_creators: &[OwnedUserId],
+) -> Result<JsonValue> {
+	let sender_user = body.sender_user();
 	let users =
 		build_power_levels_users(services, body, preset, version_rules, sender_user).await;
 
@@ -242,12 +276,40 @@ async fn apply_power_levels_pdu(
 		users,
 	)?;
 
+	let lists_creator = version_rules
+		.authorization
+		.explicitly_privilege_room_creators
+		&& power_levels_content["users"]
+			.as_object()
+			.is_some_and(|users| {
+				once(sender_user)
+					.chain(additional_creators.iter().map(AsRef::as_ref))
+					.any(|creator| users.contains_key(creator.as_str()))
+			});
+
+	if lists_creator {
+		return Err!(Request(InvalidRoomState(
+			"Room creators have the highest power level in this room version and cannot be \
+			 listed in the power levels `users` field."
+		)));
+	}
+
+	Ok(power_levels_content)
+}
+
+async fn apply_power_levels_pdu(
+	services: &Services,
+	power_levels_content: &JsonValue,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	state_lock: &RoomMutexGuard,
+) -> Result {
 	services
 		.timeline
 		.build_and_append_pdu(
 			PduBuilder {
 				event_type: TimelineEventType::RoomPowerLevels,
-				content: to_raw_value(&power_levels_content)?.into(),
+				content: to_raw_value(power_levels_content)?.into(),
 				state_key: Some(StateKey::new()),
 				..Default::default()
 			},
@@ -315,16 +377,12 @@ async fn apply_canonical_alias_pdu(
 		.map(|_| ())
 }
 
-async fn apply_preset_state_pdus(
+/// The request's `initial_state`, parsed, without the entries the server skips.
+fn initial_state_events(
 	services: &Services,
 	body: &Ruma<create_room::v3::Request>,
-	preset: &RoomPreset,
-	sender_user: &UserId,
-	room_id: &RoomId,
-	state_lock: &RoomMutexGuard,
 ) -> Result<Vec<InitialEvent>> {
-	let mut initial_state = body
-		.initial_state
+	body.initial_state
 		.iter()
 		.map(|state| Ok(state.deserialize_as_unchecked::<InitialEvent>()?))
 		.filter_ok(|event| {
@@ -343,8 +401,17 @@ async fn apply_preset_state_pdus(
 		})
 		.filter_ok(|event| body.name.is_none() || event.event_type != StateEventType::RoomName)
 		.filter_ok(|event| body.topic.is_none() || event.event_type != StateEventType::RoomTopic)
-		.collect::<Result<Vec<_>>>()?;
+		.collect()
+}
 
+async fn apply_preset_state_pdus(
+	services: &Services,
+	mut initial_state: Vec<InitialEvent>,
+	preset: &RoomPreset,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	state_lock: &RoomMutexGuard,
+) -> Result<Vec<InitialEvent>> {
 	let join_rule_pdubuilder =
 		take_initial(&mut initial_state, &StateEventType::RoomJoinRules, "")
 			.map(Into::into)
@@ -603,12 +670,47 @@ async fn copy_creator_predecessor_push_rule(
 		.ok();
 }
 
+/// The create event's `additional_creators`, when the room version has them:
+/// those `creation_content` names and, for `trusted_private_chat`, the
+/// invitees, sorted and without duplicates.
+fn additional_creators(
+	body: &Ruma<create_room::v3::Request>,
+	preset: &RoomPreset,
+	version_rules: &RoomVersionRules,
+) -> Vec<OwnedUserId> {
+	if !version_rules
+		.authorization
+		.additional_room_creators
+	{
+		return Vec::new();
+	}
+
+	let mut additional_creators = body
+		.creation_content
+		.as_ref()
+		.and_then(|c| {
+			c.deserialize_as_unchecked::<CreationContent>()
+				.ok()
+		})
+		.unwrap_or_default()
+		.additional_creators;
+
+	if *preset == RoomPreset::TrustedPrivateChat {
+		additional_creators.extend(body.invite.clone());
+	}
+
+	additional_creators
+		.into_iter()
+		.sorted()
+		.dedup()
+		.collect_vec()
+}
+
 async fn create_create_event(
 	services: &Services,
 	body: &Ruma<create_room::v3::Request>,
-	preset: &RoomPreset,
+	additional_creators: &[OwnedUserId],
 	room_version: &RoomVersionId,
-	version_rules: &RoomVersionRules,
 ) -> Result<(OwnedRoomId, RoomMutexGuard)> {
 	let _sender_user = body.sender_user();
 
@@ -652,34 +754,9 @@ async fn create_create_event(
 		},
 	};
 
-	if version_rules
-		.authorization
-		.additional_room_creators
-	{
-		let mut additional_creators = body
-			.creation_content
-			.as_ref()
-			.and_then(|c| {
-				c.deserialize_as_unchecked::<CreationContent>()
-					.ok()
-			})
-			.unwrap_or_default()
-			.additional_creators;
-
-		if *preset == RoomPreset::TrustedPrivateChat {
-			additional_creators.extend(body.invite.clone());
-		}
-
-		let additional_creators = additional_creators
-			.into_iter()
-			.sorted()
-			.dedup()
-			.collect_vec();
-
-		if !additional_creators.is_empty() {
-			create_content
-				.insert("additional_creators".into(), json!(additional_creators).try_into()?);
-		}
+	if !additional_creators.is_empty() {
+		create_content
+			.insert("additional_creators".into(), json!(additional_creators).try_into()?);
 	}
 
 	// 1. The room create event, using a placeholder room_id
