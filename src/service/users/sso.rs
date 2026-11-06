@@ -175,9 +175,9 @@ impl Service {
 		Ok((guard, empty))
 	}
 
-	/// Hold an existing account a first sign-in takes because no identity is
-	/// linked to it, until the link is stored. It is refused if another
-	/// identity, such as an assignment's, was linked to it meanwhile.
+	/// Hold an account a first sign-in takes by name, new or existing, until its
+	/// link is stored. It is refused if another identity, such as an
+	/// assignment's, is linked to it.
 	pub async fn hold_unlinked_account(&self, user_id: &UserId) -> Result<SsoAssignment> {
 		let guard = self.changing_password.lock(user_id).await;
 
@@ -188,9 +188,7 @@ impl Service {
 			.is_linked(user_id)
 			.await
 		{
-			return Err!(Request(UserInUse(warn!(
-				"{user_id} is linked to another identity."
-			))));
+			return Err!(Request(UserInUse(warn!("{user_id} is linked to another identity."))));
 		}
 
 		Ok((guard, false))
