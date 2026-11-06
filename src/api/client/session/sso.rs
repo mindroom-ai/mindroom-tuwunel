@@ -1102,17 +1102,13 @@ async fn decide_user_id(
 	];
 
 	for choice in choices.into_iter().flatten() {
-		if let Some(user_id) = try_user_id(services, provider, &choice, false).await {
-			let existed = services.users.exists(&user_id).await;
-
+		if let Some((user_id, existed)) = try_user_id(services, provider, &choice, false).await {
 			return Ok((user_id, hold.then_some(existed)));
 		}
 	}
 
 	let localpart = fallback_localpart(unique_id);
-	if let Some(user_id) = try_user_id(services, provider, &localpart, true).await {
-		let existed = services.users.exists(&user_id).await;
-
+	if let Some((user_id, existed)) = try_user_id(services, provider, &localpart, true).await {
 		return Ok((user_id, hold.then_some(existed)));
 	}
 
@@ -1125,7 +1121,7 @@ async fn try_user_id(
 	provider: &Provider,
 	username: &str,
 	unique_id: bool,
-) -> Option<OwnedUserId> {
+) -> Option<(OwnedUserId, bool)> {
 	let server_name = services.globals.server_name();
 	let user_id = parse_user_id(server_name, username)
 		.inspect_err(|e| warn!(?username, "Username invalid: {e}"))
@@ -1149,7 +1145,8 @@ async fn try_user_id(
 		return None;
 	}
 
-	if services.users.exists(&user_id).await {
+	let existed = services.users.exists(&user_id).await;
+	if existed {
 		if provider.trusted {
 			info!(
 				?username,
@@ -1157,7 +1154,7 @@ async fn try_user_id(
 				"Authorizing trusted provider access to existing account."
 			);
 
-			return Some(user_id);
+			return Some((user_id, existed));
 		}
 
 		if services
@@ -1217,7 +1214,7 @@ async fn try_user_id(
 		}
 	}
 
-	Some(user_id)
+	Some((user_id, existed))
 }
 
 fn parse_user_id(server_name: &ServerName, username: &str) -> Result<OwnedUserId> {

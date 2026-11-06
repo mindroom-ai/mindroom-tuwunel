@@ -207,6 +207,33 @@ impl Service {
 	) -> Result {
 		let _password_guard = self.changing_password.lock(user_id).await;
 
+		self.create_locked(user_id, password, origin).await
+	}
+
+	/// Create a new user account as `create` does, but refuse one that exists,
+	/// checked under the account's password lock, so an account created
+	/// meanwhile (by an appservice, say) is neither overwritten nor taken.
+	pub async fn create_new(
+		&self,
+		user_id: &UserId,
+		password: Option<&str>,
+		origin: Option<&str>,
+	) -> Result {
+		let _password_guard = self.changing_password.lock(user_id).await;
+
+		if self.exists(user_id).await {
+			return Err!(Request(UserInUse("User ID is not available.")));
+		}
+
+		self.create_locked(user_id, password, origin).await
+	}
+
+	async fn create_locked(
+		&self,
+		user_id: &UserId,
+		password: Option<&str>,
+		origin: Option<&str>,
+	) -> Result {
 		self.check_creation(user_id).await?;
 
 		let origin = origin.unwrap_or("password");

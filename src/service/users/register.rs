@@ -55,10 +55,10 @@ pub async fn full_register(
 		return Err!(Request(UserInUse("User ID is not available.")));
 	}
 
-	// Create user
+	// Create user; an account created since the check above is refused.
 	self.services
 		.users
-		.create(user_id, password, origin)
+		.create_new(user_id, password, origin)
 		.await?;
 
 	let displayname_suffix = self
