@@ -6,7 +6,7 @@ use tuwunel_core::{
 	matrix::pdu::{PduCount, RawPduId},
 	ruma::{EventId, OwnedEventId, RoomId, UserId},
 };
-use tuwunel_service::Services;
+use tuwunel_service::{Services, pusher::Notified};
 
 use self::{
 	client::{Client, field, register},
@@ -94,24 +94,8 @@ fn sibling_backlog_does_not_block_sends() -> Result {
 		let reply = sender
 			.message(&room, "backlog-reply", Some(&root))
 			.await?;
-		let id = services.timeline.get_pdu_id(&reply).await?;
-		let stored = services.db["pduid_pdu"].get(&id).await?;
-		let source = services.pusher.get_notifications(&user, None);
-		futures::pin_mut!(source);
-		let (_, notification) = futures::StreamExt::next(&mut source)
-			.await
-			.expect("notification");
-		for _ in 0..100_000 {
-			let count = services.globals.next_count();
-			let id: RawPduId = PduId {
-				shortroomid: notification.sroomid,
-				count: PduCount::Normal(*count),
-			}
-			.into();
-			services.db["pduid_pdu"].insert(&id, stored.as_ref());
-			services.db["useridcount_notification"]
-				.put((&user, *count), tuwunel_database::Json(&notification));
-		}
+		let notification = first_notification(services, &user).await?;
+		seed(services, &reply, 100_000, Some((&user, &notification))).await?;
 		services.db["userroomid_notificationcount"].put((&user, &room, &root), 100_001_u64);
 		let receipt = async {
 			let start = Instant::now();
@@ -121,32 +105,114 @@ fn sibling_backlog_does_not_block_sends() -> Result {
 		let send = async {
 			tokio::time::sleep(Duration::from_millis(50)).await;
 			let start = Instant::now();
-			let event = sender
-				.message(&room, "during-recount", None)
+			sender
+				.message(&room, "during-recount", Some(&root))
 				.await?;
-			Ok::<_, tuwunel_core::Error>((start.elapsed(), event))
+			Ok::<_, tuwunel_core::Error>(start.elapsed())
 		};
 		let (receipt, send) = futures::join!(receipt, send);
-		let receipt = receipt?;
-		let (send, _) = send?;
+		let (receipt, send) = (receipt?, send?);
 		eprintln!("bounded recount: receipt={receipt:?}, concurrent send={send:?}");
 		assert!(receipt < Duration::from_secs(2), "receipt scanned sibling backlog: {receipt:?}");
 		assert!(send < Duration::from_secs(1), "send waited for recount: {send:?}");
-		assert_eq!(
-			services
-				.pusher
-				.notification_count(&user, &room)
-				.await,
-			2
-		);
-		assert_eq!(
-			services
-				.pusher
-				.thread_notification_counts(&user, &room)
-				.await[&root]
-				.0,
-			100_001
-		);
+		// The root is the newest main event: an overflowing main recount reads
+		// the main timeline through the present and leaves the thread alone.
+		let counts = Counts { services, user: &user, room: &room };
+		assert_eq!(counts.get().await, json!([0, { root.as_str(): 100_002 }]));
+		Ok(())
+	})
+}
+
+/// A receipt on the newest event of its context reads it entirely, however
+/// many later room events (here 4,097 without notifications, such as edits,
+/// reactions and other threads) a recount would have to walk.
+#[test]
+fn newest_event_clears_after_busy_room() -> Result {
+	boot("newest-after-busy-room", ["log_enable=false"], async |services, base| {
+		let user = register(services, "newestreader", READER_TOKEN).await?;
+		register(services, "newestsender", SENDER_TOKEN).await?;
+		let reader = Client { services, base, token: READER_TOKEN };
+		let sender = Client { services, base, token: SENDER_TOKEN };
+		let room = sender
+			.create_room(&json!({"preset": "public_chat"}))
+			.await?;
+		reader
+			.post(&format!("rooms/{room}/join"), &json!({}))
+			.await?;
+		let old_root = sender.message(&room, "old-root", None).await?;
+		let old_reply = sender
+			.message(&room, "old-reply", Some(&old_root))
+			.await?;
+		let busy_root = sender.message(&room, "busy-root", None).await?;
+		let busy_reply = sender
+			.message(&room, "busy-reply", Some(&busy_root))
+			.await?;
+		seed(services, &busy_reply, 4097, None).await?;
+		let counts = Counts { services, user: &user, room: &room };
+		reader
+			.receipt(&room, &busy_root, Some("main"))
+			.await?;
+		reader
+			.receipt(&room, &old_reply, Some(old_root.as_str()))
+			.await?;
+		assert_eq!(counts.get().await, json!([0, { busy_root.as_str(): 1 }]));
+		Ok(())
+	})
+}
+
+/// Reading a thread removes its count row instead of leaving a zero, so rows
+/// exist only for threads with unread notifications; rows an older server left
+/// at zero go with the next unthreaded receipt.
+#[test]
+fn read_threads_leave_no_rows() -> Result {
+	boot("read-threads-leave-no-rows", ["log_enable=false"], async |services, base| {
+		let user = register(services, "rowsreader", READER_TOKEN).await?;
+		register(services, "rowssender", SENDER_TOKEN).await?;
+		let reader = Client { services, base, token: READER_TOKEN };
+		let sender = Client { services, base, token: SENDER_TOKEN };
+		let room = sender
+			.create_room(&json!({"preset": "public_chat"}))
+			.await?;
+		reader
+			.post(&format!("rooms/{room}/join"), &json!({}))
+			.await?;
+		let read = sender.message(&room, "read-root", None).await?;
+		let reply = sender
+			.message(&room, "read-reply", Some(&read))
+			.await?;
+		reader
+			.receipt(&room, &reply, Some(read.as_str()))
+			.await?;
+		let answered = sender
+			.message(&room, "answered-root", None)
+			.await?;
+		sender
+			.message(&room, "answered-reply", Some(&answered))
+			.await?;
+		reader
+			.message(&room, "own-reply", Some(&answered))
+			.await?;
+		let rows = services
+			.pusher
+			.thread_notification_counts(&user, &room)
+			.await;
+		assert!(rows.is_empty(), "read threads left rows: {rows:?}");
+
+		for i in 0..4097 {
+			let root: OwnedEventId = format!("$zero{i}:localhost").try_into()?;
+			services.db["userroomid_notificationcount"].put((&user, &room, &root), 0_u64);
+		}
+		let newest = sender.message(&room, "newest", None).await?;
+		reader.receipt(&room, &newest, None).await?;
+		let rows = services
+			.pusher
+			.thread_notification_counts(&user, &room)
+			.await;
+		let main = services
+			.pusher
+			.notification_count(&user, &room)
+			.await;
+		assert_eq!((main, rows.len()), (0, 0), "unthreaded receipt on the newest event");
 		Ok(())
 	})
 }
@@ -159,8 +225,8 @@ const SENDER_TOKEN: &str = "receipt-read-position-sender-token";
 /// The reader's counts after a receipt are those of the notified events after
 /// the receipt's event: an unthreaded or main receipt on the fourth of six
 /// unread messages leaves two, and a thread receipt on the first of three
-/// replies leaves two in that thread. A scan that exceeds its work limit
-/// retains the previous count.
+/// replies leaves two in that thread. A recount that exceeds its work limit
+/// reads its context through the present.
 #[test]
 fn receipt_reads_up_to_its_event() -> Result {
 	boot("receipt-read-position", ["log_enable=false"], exercise)
@@ -235,15 +301,8 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let other = sender
 		.create_room(&json!({ "preset": "public_chat" }))
 		.await?;
-	let other_short = services.short.get_shortroomid(&other).await?;
-	let source = services
-		.pusher
-		.get_notifications(&reader_id, None);
-	futures::pin_mut!(source);
-	let (_, mut notification) = futures::StreamExt::next(&mut source)
-		.await
-		.ok_or_else(|| err!("missing source notification"))?;
-	notification.sroomid = other_short;
+	let mut notification = first_notification(services, &reader_id).await?;
+	notification.sroomid = services.short.get_shortroomid(&other).await?;
 	for _ in 0..4097 {
 		let count = services.globals.next_count();
 		services.db["useridcount_notification"]
@@ -277,27 +336,15 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		json!([1, { root.as_str(): 1 }]),
 	);
 
-	// Seed stored notifications and their timeline rows to exercise a busy
-	// thread without thousands of HTTP sends. Its traffic must not consume a
-	// main receipt's budget, and a capped thread recount must retain counts.
+	// A busy thread's traffic must not consume a main receipt's budget, and a
+	// recount past its limit reads its context through the present, as an
+	// unbounded clear would.
 	let busy_root = sender.message(&room, "busy-root", None).await?;
 	let busy_reply = sender
 		.message(&room, "busy-reply", Some(&busy_root))
 		.await?;
-	let original = services.timeline.get_pdu_id(&busy_reply).await?;
-	let stored = services.db["pduid_pdu"].get(&original).await?;
 	notification.sroomid = services.short.get_shortroomid(&room).await?;
-	for _ in 0..4097 {
-		let count = services.globals.next_count();
-		let id: RawPduId = PduId {
-			shortroomid: notification.sroomid,
-			count: PduCount::Normal(*count),
-		}
-		.into();
-		services.db["pduid_pdu"].insert(&id, stored.as_ref());
-		services.db["useridcount_notification"]
-			.put((&reader_id, *count), tuwunel_database::Json(&notification));
-	}
+	seed(services, &busy_reply, 4097, Some((&reader_id, &notification))).await?;
 	services.db["userroomid_notificationcount"].put((&reader_id, &room, &busy_root), 4098_u64);
 	reader
 		.receipt(&room, &busy_root, Some("main"))
@@ -305,21 +352,21 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	check(
 		"main receipt after busy other thread",
 		counts.get().await,
-		json!([2, { root.as_str(): 1, busy_root.as_str(): 4098 }]),
+		json!([0, { root.as_str(): 1, busy_root.as_str(): 4098 }]),
 	);
 	reader
 		.receipt(&room, &busy_reply, Some(busy_root.as_str()))
 		.await?;
 	check(
-		"incomplete thread recount retains counts",
+		"overflowing thread recount reads the thread",
 		counts.get().await,
-		json!([2, { root.as_str(): 1, busy_root.as_str(): 4098 }]),
+		json!([0, { root.as_str(): 1 }]),
 	);
 	reader.receipt(&room, &busy_reply, None).await?;
 	check(
-		"incomplete unthreaded recount retains counts",
+		"overflowing unthreaded recount reads the room",
 		counts.get().await,
-		json!([2, { root.as_str(): 1, busy_root.as_str(): 4098 }]),
+		json!([0, {}]),
 	);
 
 	if failures.is_empty() {
@@ -327,6 +374,44 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	}
 
 	Err(err!("{}", failures.join("\n")))
+}
+
+/// The user's oldest stored notification, to copy into seeded rows.
+async fn first_notification(services: &Services, user: &UserId) -> Result<Notified> {
+	let source = services.pusher.get_notifications(user, None);
+	futures::pin_mut!(source);
+	futures::StreamExt::next(&mut source)
+		.await
+		.map(|(_, notification)| notification)
+		.ok_or_else(|| err!("missing source notification"))
+}
+
+/// Copy `template`'s stored PDU to `n` later positions of its room, each with
+/// `notified`'s notification row when given: stands in for thousands of sends.
+async fn seed(
+	services: &Services,
+	template: &EventId,
+	n: usize,
+	notified: Option<(&UserId, &Notified)>,
+) -> Result {
+	let original = services.timeline.get_pdu_id(template).await?;
+	let stored = services.db["pduid_pdu"].get(&original).await?;
+	let shortroomid = PduId::from(original).shortroomid;
+	for _ in 0..n {
+		let count = services.globals.next_count();
+		let id: RawPduId = PduId {
+			shortroomid,
+			count: PduCount::Normal(*count),
+		}
+		.into();
+		services.db["pduid_pdu"].insert(&id, stored.as_ref());
+		if let Some((user, notification)) = notified {
+			services.db["useridcount_notification"]
+				.put((user, *count), tuwunel_database::Json(notification));
+		}
+	}
+	services.clear_cache().await;
+	Ok(())
 }
 
 /// The reader's unread counts in one room.

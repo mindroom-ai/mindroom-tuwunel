@@ -115,8 +115,7 @@ fn distinct_threads_have_distinct_keys() {
 	assert_ne!(thread_key(root_a()), thread_key(root_b()));
 }
 
-/// Sweeping the 3-tuple prefix removes thread rows but not the main row,
-/// per `clear_all_thread_notification_counts`.
+/// The 3-tuple prefix that lists a room's thread rows leaves out its main row.
 #[test]
 fn thread_prefix_sweep_preserves_main() {
 	let prefix = interfix_prefix();

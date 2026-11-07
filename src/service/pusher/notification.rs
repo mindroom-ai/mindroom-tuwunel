@@ -28,15 +28,8 @@ type ThreadLastReads = BTreeMap<OwnedEventId, u64>;
 const RECOUNT_LIMIT: usize = 4096;
 type Unread = BTreeMap<Option<OwnedEventId>, (u64, u64)>;
 
-/// Retained for internal callers that explicitly read the present main timeline.
-#[implement(super::Service)]
-pub async fn reset_notification_counts(&self, user_id: &UserId, room_id: &RoomId) {
-	self.reset_notification_counts_for_thread(user_id, room_id, None, &ReceiptThread::Main)
-		.await;
-}
-
-/// Read only through the acknowledged event; an incomplete or raced recount
-/// keeps the previous counts. Own sends (`None`) still read their own context.
+/// Read only through the acknowledged event. Own sends (`None`) and a recount
+/// past its limit read through the present; a raced context keeps its counts.
 #[implement(super::Service)]
 pub async fn reset_notification_counts_for_thread(
 	&self,
@@ -58,17 +51,14 @@ pub async fn reset_notification_counts_for_thread(
 	let contexts = match thread {
 		| ReceiptThread::Main => vec![None],
 		| ReceiptThread::Thread(root) => vec![Some(root.clone())],
-		| _ => {
-			let counts = self
-				.thread_counts_bounded(user_id, room_id, RECOUNT_LIMIT + 1)
-				.await;
-			if counts.len() > RECOUNT_LIMIT {
-				return;
-			}
-			std::iter::once(None)
-				.chain(counts.into_keys().map(Some))
-				.collect()
-		},
+		| _ => std::iter::once(None)
+			.chain(
+				self.thread_notification_counts(user_id, room_id)
+					.await
+					.into_keys()
+					.map(Some),
+			)
+			.collect(),
 	};
 	// These snapshots and the bounded PDU scan never hold the insertion lock.
 	let mut before = BTreeMap::new();
@@ -79,15 +69,16 @@ pub async fn reset_notification_counts_for_thread(
 				.await,
 		);
 	}
+	// Contexts already at zero cannot go lower, so they need no scan.
+	let pending = before
+		.values()
+		.any(|state| state.0 > 0 || state.1 > 0);
 	let unread = match read_to {
-		| Some(count) => match self
+		| Some(count) if pending => self
 			.unread_after(user_id, room_id, count, thread)
 			.await
-		{
-			| Some(unread) => unread,
-			| None => return,
-		},
-		| None => Unread::new(),
+			.unwrap_or_default(),
+		| _ => Unread::new(),
 	};
 	let _lock = self
 		.notification_increment_mutex
@@ -105,7 +96,7 @@ pub async fn reset_notification_counts_for_thread(
 		let after = unread.get(&root).copied().unwrap_or_default();
 		let left = (snapshot.0.min(after.0), snapshot.1.min(after.1));
 		let key = notification_key(user_id, room_id, root.as_deref());
-		if root.is_some() && matches!(thread, ReceiptThread::Unthreaded) && left == (0, 0) {
+		if root.is_some() && left == (0, 0) {
 			self.db.userroomid_notificationcount.remove(&key);
 			self.db.userroomid_highlightcount.remove(&key);
 		} else {
@@ -296,23 +287,11 @@ pub async fn thread_notification_counts(
 	user_id: &UserId,
 	room_id: &RoomId,
 ) -> ThreadCounts {
-	self.thread_counts_bounded(user_id, room_id, usize::MAX)
-		.await
-}
-
-#[implement(super::Service)]
-async fn thread_counts_bounded(
-	&self,
-	user_id: &UserId,
-	room_id: &RoomId,
-	limit: usize,
-) -> ThreadCounts {
 	let prefix = (user_id, room_id, Interfix);
 	let notifications = self
 		.db
 		.userroomid_notificationcount
 		.stream_prefix(&prefix)
-		.take(limit)
 		.ignore_err()
 		.map(notification_kv);
 
@@ -320,7 +299,6 @@ async fn thread_counts_bounded(
 		.db
 		.userroomid_highlightcount
 		.stream_prefix(&prefix)
-		.take(limit)
 		.ignore_err()
 		.map(highlight_kv);
 
