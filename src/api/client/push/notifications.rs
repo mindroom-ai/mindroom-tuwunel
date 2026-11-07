@@ -1,11 +1,7 @@
-use std::collections::BTreeMap;
-
 use axum::extract::State;
 use futures::StreamExt;
 use ruma::{
-	EventId, MilliSecondsSinceUnixEpoch, RoomId, UserId,
-	api::{Direction::Forward, client::push::get_notifications},
-	events::{AnySyncEphemeralRoomEvent, receipt::ReceiptThread},
+	EventId, MilliSecondsSinceUnixEpoch, RoomId, UserId, api::client::push::get_notifications,
 	push::Action,
 };
 use tuwunel_core::{
@@ -80,7 +76,7 @@ pub(crate) async fn get_notifications_route(
 					.await
 					.is_ok_and(|last_read| last_read.ge(&count)),
 				| Some(root) =>
-					thread_read(&services, sender_user, event.room_id(), &root, count).await,
+					thread_read(&services, sender_user, event.room_id(), &root, pdu_id).await,
 			};
 
 			let ts = notify
@@ -124,78 +120,45 @@ pub(crate) async fn get_notifications_route(
 	})
 }
 
-/// Whether the reply at `count` in the thread of `root` is read: by the user's
-/// unthreaded or thread read, public or private, at or after it, or by an own
-/// reply in the thread after it. Thread read stamps are not consulted: an
-/// unthreaded receipt on an older event deletes them.
+/// Whether the entry at `pdu_id` in the thread of `root` is read. The thread's
+/// sync count is the user's newest notifying events in the thread, so the entry
+/// is read once that many of them follow it.
 async fn thread_read(
 	services: &Services,
 	user: &UserId,
 	room: &RoomId,
 	root: &EventId,
-	count: u64,
+	pdu_id: PduId,
 ) -> bool {
-	let receipts = &services.read_receipt;
-	for thread in [ReceiptThread::Unthreaded, ReceiptThread::Thread(root.to_owned())] {
-		let read = receipts
-			.private_read_position(room, user, &thread)
-			.await;
-
-		if read.is_ok_and(|(read, _)| read >= count) {
-			return true;
-		}
-	}
-
-	// A receipt is stored after its event, so only rows past `count` can cover it.
-	let public = receipts
-		.readreceipts_since(room, count, None)
-		.ready_filter(|(receipt_user, ..)| *receipt_user == user)
-		.ready_filter_map(|(_, _, raw)| {
-			let AnySyncEphemeralRoomEvent::Receipt(receipt) = raw.deserialize().ok()? else {
-				return None;
-			};
-			let (event_id, receipts) = receipt.content.0.into_iter().next()?;
-			let receipt = receipts
-				.into_values()
-				.flat_map(BTreeMap::into_values)
-				.next()?;
-
-			match receipt.thread {
-				| ReceiptThread::Unthreaded => Some(event_id),
-				| ReceiptThread::Thread(thread) if *thread == *root => Some(event_id),
-				| _ => None,
-			}
-		})
-		.any(async |event_id| {
-			services
-				.timeline
-				.get_pdu_count(&event_id)
-				.await
-				.is_ok_and(|read| read >= PduCount::Normal(count))
-		});
-
-	if public.await {
-		return true;
-	}
-
-	// An unthreaded private receipt drops the private thread marker an own
-	// reply left, so the reply itself is looked up.
-	let Ok(root_id) = services.timeline.get_pdu_id(root).await else {
-		return false;
-	};
-	let PduId { shortroomid, count: root_count } = root_id.into();
-
-	services
-		.pdu_metadata
-		.get_relations(shortroomid, root_count, Some(PduCount::Normal(count)), Forward, None)
-		.ready_filter(|(_, pdu)| pdu.sender() == user)
-		.any(async |(_, pdu)| {
-			services
-				.threads
-				.get_thread_id(&pdu)
-				.await
-				.as_deref()
-				== Some(root)
-		})
+	let unread = services
+		.pusher
+		.thread_notification_counts(user, room)
 		.await
+		.get(root)
+		.map_or(0, at!(0));
+
+	let after = services
+		.pusher
+		.get_notifications(user, None)
+		.ready_take_while(|(later, _)| PduCount::Normal(*later) > pdu_id.count)
+		.ready_filter(|(_, notified)| {
+			notified.sroomid == pdu_id.shortroomid
+				&& notified.actions.iter().any(Action::should_notify)
+		})
+		.filter_map(async |(later, _)| {
+			let later = PduId { count: PduCount::Normal(later), ..pdu_id };
+			let pdu = services
+				.timeline
+				.get_pdu_from_id(&later.into())
+				.await
+				.ok()?;
+			let thread = services.threads.get_thread_id(&pdu).await;
+
+			(thread.as_deref() == Some(root)).then_some(())
+		})
+		.take(usize::try_from(unread).unwrap_or(usize::MAX))
+		.count()
+		.await;
+
+	u64::try_from(after).is_ok_and(|after| after >= unread)
 }
