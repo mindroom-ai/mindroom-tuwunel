@@ -22,6 +22,8 @@ use self::support::Harness;
 
 const READER_TOKEN: &str = "notifications-thread-reader-token-0123456789abcdef";
 const HELPER_TOKEN: &str = "notifications-thread-helper-token-0123456789abcdef";
+/// The tests share one process, which takes only one global tracing subscriber.
+const QUIET: &str = "log_global_default=false";
 
 /// MSC3771: a `"main"` receipt, or the reader's own main-timeline message,
 /// reads only the main timeline, so the room's thread replies stay unread in
@@ -31,7 +33,7 @@ const HELPER_TOKEN: &str = "notifications-thread-helper-token-0123456789abcdef";
 /// reads its replies.
 #[test]
 fn main_read_leaves_thread_replies_unread() -> Result {
-	let harness = Harness::new("mindroom_notifications_thread_read", [])?;
+	let harness = Harness::new("mindroom_notifications_thread_read", [QUIET.to_owned()])?;
 
 	harness.with_services(async |services| {
 		let (router, _guard) = serve(services).await?;
@@ -88,7 +90,7 @@ fn main_read_leaves_thread_replies_unread() -> Result {
 /// marker.
 #[test]
 fn thread_reads_survive_older_unthreaded_receipt() -> Result {
-	let harness = Harness::new("mindroom_notifications_thread_reads_kept", [])?;
+	let harness = Harness::new("mindroom_notifications_thread_reads_kept", [QUIET.to_owned()])?;
 
 	harness.with_services(async |services| {
 		let (router, _guard) = serve(services).await?;
@@ -141,7 +143,7 @@ fn thread_reads_survive_older_unthreaded_receipt() -> Result {
 /// reader's receipt in another thread, and the reader's reaction to the root.
 #[test]
 fn other_reads_leave_thread_replies_unread() -> Result {
-	let harness = Harness::new("mindroom_notifications_other_reads", [])?;
+	let harness = Harness::new("mindroom_notifications_other_reads", [QUIET.to_owned()])?;
 
 	harness.with_services(async |services| {
 		let (router, _guard) = serve(services).await?;
