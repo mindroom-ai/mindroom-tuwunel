@@ -1201,12 +1201,14 @@ bug. File: `src/api/client/push/notifications.rs`; test in
 it. A `"main"` receipt and the user's own main-timeline event move that
 watermark too, so they marked every thread reply in the room read while the
 sync thread counts still had it unread. A main-timeline entry still follows
-the room watermark. A thread entry now follows its thread's sync count `N`,
-which always holds the user's newest `N` notifying events in the thread: the
-entry is read once `N` of the user's notifying events in the same thread
-follow it. One walk down the user's notification rows, to the oldest entry of a
-thread with `N` above 0, serves the whole page; rows of other rooms are skipped
-without loading their events. Counting rows rather than relations of the root
+the room watermark. A thread entry now follows its thread's sync counts, `N`
+notifications and `H` highlights, which always hold the user's newest such
+events in the thread: the entry is read once `N` of the user's notifying and
+`H` of their highlighting events in the same thread follow it. One walk down
+the user's notification rows, to the oldest entry of a thread with unread
+events, serves the whole page and stops once every such thread has found
+them; rows of other rooms are skipped without loading their events. Counting
+rows rather than relations of the root
 counts finished stream edits like the replies they finish. A reply redacted
 since the last recount still counts in `N` but not in the walk, so an earlier
 reply can show unread until the next receipt, as the count does. File:

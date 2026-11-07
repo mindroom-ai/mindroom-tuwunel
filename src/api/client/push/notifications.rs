@@ -124,12 +124,14 @@ pub(crate) async fn get_notifications_route(
 	})
 }
 
-/// Marks each thread entry read once `N` of the user's notifying events in its
-/// thread are newer, `N` being the thread's sync count, which holds the user's
-/// newest notifying events in the thread. One walk down the user's
-/// notifications finds the `N`th of each thread for the whole page.
+/// Marks each thread entry read once `N` of the user's notifying events and `H`
+/// of their highlighting events in its thread are newer, `N` and `H` being the
+/// thread's sync counts, which hold the user's newest such events in the
+/// thread. One walk down the user's notifications finds them for the whole
+/// page, and stops once every thread has.
 async fn read_threads(services: &Services, user: &UserId, page: &mut [Entry]) {
-	// Per thread: notifying events left to find, and the last one found.
+	// Per thread, for its notifying and its highlighting events: how many are
+	// left to find, and the last one found.
 	let (mut threads, mut rooms, mut oldest) = (HashMap::new(), HashSet::new(), u64::MAX);
 	let mut counts = HashMap::new();
 	for (count, notification, thread) in page.iter() {
@@ -148,10 +150,11 @@ async fn read_threads(services: &Services, user: &UserId, page: &mut [Entry]) {
 
 		let unread = counts[&notification.room_id]
 			.get(root)
-			.map_or(0, at!(0));
+			.copied()
+			.unwrap_or_default();
 
-		threads.insert(root.clone(), (unread, u64::MAX));
-		if unread > 0 {
+		threads.insert(root.clone(), [(unread.0, u64::MAX), (unread.1, u64::MAX)]);
+		if unread != (0, 0) {
 			rooms.insert(*room);
 			oldest = oldest.min(*count);
 		}
@@ -161,13 +164,17 @@ async fn read_threads(services: &Services, user: &UserId, page: &mut [Entry]) {
 		.pusher
 		.get_notifications(user, None)
 		.ready_take_while(|(count, _)| *count >= oldest)
-		.ready_filter(|(_, notified)| {
-			rooms.contains(&notified.sroomid)
-				&& notified.actions.iter().any(Action::should_notify)
-		});
+		.ready_filter(|(_, notified)| rooms.contains(&notified.sroomid));
 
 	pin_mut!(rows);
-	while let Some((count, notified)) = rows.next().await {
+	let mut pending = threads
+		.values()
+		.flatten()
+		.filter(|(left, _)| *left > 0)
+		.count();
+	while pending > 0
+		&& let Some((count, notified)) = rows.next().await
+	{
 		let pdu_id = PduId {
 			shortroomid: notified.sroomid,
 			count: PduCount::Normal(count),
@@ -181,19 +188,26 @@ async fn read_threads(services: &Services, user: &UserId, page: &mut [Entry]) {
 			continue;
 		};
 
+		let counted = [
+			notified.actions.iter().any(Action::should_notify),
+			notified.actions.iter().any(Action::is_highlight),
+		];
 		let thread = services.threads.get_thread_id(&pdu).await;
-		if let Some((left, last)) = thread.and_then(|root| threads.get_mut(&root))
-			&& *left > 0
-		{
-			*left = left.saturating_sub(1);
-			*last = count;
+		let found = thread.and_then(|root| threads.get_mut(&root));
+		for ((left, last), counted) in found.into_iter().flatten().zip(counted) {
+			if counted && *left > 0 {
+				*left = left.saturating_sub(1);
+				*last = count;
+				pending = pending.saturating_sub(usize::from(*left == 0));
+			}
 		}
 	}
 
 	for (count, notification, thread) in page.iter_mut() {
 		if let Some((_, root)) = thread {
-			let (left, last) = threads[root];
-			notification.read = left == 0 && *count < last;
+			notification.read = threads[root]
+				.iter()
+				.all(|(left, last)| *left == 0 && *count < *last);
 		}
 	}
 }
