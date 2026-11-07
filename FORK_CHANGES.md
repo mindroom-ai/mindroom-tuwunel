@@ -714,8 +714,9 @@ addresses; the map is read live, so a reload applies. An identity with no
 account yet whose `email` claim is listed gets that account and no other:
 the sign-in is refused, with a warning naming the reason, when the provider
 says the address is unverified (any `email_verified` value other than
-`true`; an absent or null claim is not checked), or the account does not exist or cannot be read, is the server
-user, is deactivated (an empty password with a recorded reason, or a mark
+`true`; an absent or null claim is not checked), or the account does not
+exist or cannot be read, is the server user, is deactivated (an empty
+password with a recorded reason, or a mark
 in the column a migrated database left; anything unreadable counts), or is
 linked to any identity, including one adopted from another server's
 database. A chained sign-in whose identity has no link yet is refused when
