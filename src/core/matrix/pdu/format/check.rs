@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, ID_MAX_BYTES, RoomId, int,
 	room_version_rules::EventFormatRules,
@@ -45,7 +47,7 @@ pub fn check_room_id(pdu: &Pdu, room_id: &RoomId) -> Result {
 ///
 /// This checks the following and enforces their size limits:
 ///
-/// * Full PDU
+/// * Full PDU, without `unsigned`
 /// * `sender`
 /// * `room_id`
 /// * `type`
@@ -61,8 +63,14 @@ pub fn check_room_id(pdu: &Pdu, room_id: &RoomId) -> Result {
 /// [size limits]: https://spec.matrix.org/latest/client-server-api/#size-limits
 /// [checks performed on receipt of a PDU]: https://spec.matrix.org/latest/server-server-api/#checks-performed-on-receipt-of-a-pdu
 pub fn check_rules(pdu: &CanonicalJsonObject, rules: &EventFormatRules) -> Result {
-	// Check the PDU size, it must occur on the full PDU with signatures.
-	let json = to_json_string(&pdu)
+	// Check the PDU size, it must occur on the full PDU with signatures. The
+	// `unsigned` data is not part of the PDU; it can hold a copy of the
+	// replaced state's content.
+	let signed: BTreeMap<_, _> = pdu
+		.iter()
+		.filter(|(key, _)| *key != "unsigned")
+		.collect();
+	let json = to_json_string(&signed)
 		.map_err(|e| err!(Request(BadJson("Failed to serialize canonical JSON: {e}"))))?;
 
 	if json.len() > MAX_PDU_BYTES {

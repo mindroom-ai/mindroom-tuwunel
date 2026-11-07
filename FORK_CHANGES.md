@@ -177,6 +177,17 @@ same key, keeps its copy. Upstream has the same bug. Files:
 `src/service/rooms/timeline/{append.rs,mod.rs,redact.rs}`; tests in
 `src/main/tests/redaction_prev_content.rs`.
 
+### The PDU size limit leaves out `unsigned`
+
+A local state event that replaces another carries the replaced content in
+`unsigned.prev_content`, and the 65,535-byte PDU check counted it, so a state
+event over about 32 KB could be set once and never changed. The check now
+measures the PDU without `unsigned`, which is not covered by signatures or
+hashes; incoming events already drop it before their checks, and Synapse adds
+`prev_content` only when it serves an event. Upstream has the same bug. Files:
+`src/core/matrix/pdu/format/check.rs`; test in
+`src/mindroom-tests/tests/large_state_replace.rs`.
+
 ### Sliding sync looks up delivered required state selectors in a set
 
 When a room's sliding sync configuration changes, each required state entry is
