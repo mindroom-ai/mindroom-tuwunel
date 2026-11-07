@@ -308,13 +308,18 @@ Whoever controls a listed address gets the account and everything in it. Avoid
 multi-tenant apps, and providers whose users can set or edit their own address
 without verifying it (Keycloak, for one, lets users edit their email unless
 verification is required). A sign-in whose provider says the address is
-unverified (any `email_verified` other than `true`) is refused. Many providers send that claim,
-such as Google, Keycloak, Okta, Auth0, GitLab and Authentik; others, such as
-Microsoft Entra ID and GitHub, do not, and its absence is not checked.
+unverified (any `email_verified` value other than `true` or the string `"true"`
+in any case) is refused. Many providers send that claim, such as Google,
+Keycloak, Okta, Auth0, GitLab and Authentik; others, such as Microsoft Entra ID
+and GitHub, do not, and an absent or null claim is not checked.
 
-A listed account is reserved for its listed address: no other sign-in gets it
-by name or as its fallback, at any provider (an admin association still can). Do not combine
-`assigned_accounts` with `trusted = true` on one provider all the same.
+A listed account is reserved for its listed address: no other sign-in gets it by
+name or as its fallback, at any provider (an admin association still can). Only
+SSO honors the list, though: the other ways to create an account (registration,
+LDAP, JWT login, the admin API and admin commands) do not, so create each listed
+account before listing it, or a listed name that does not exist yet can be taken
+through them. Do not combine `assigned_accounts` with `trusted = true` on one
+provider all the same.
 
 Each value must be a local user ID, and no address may be listed twice; the
 server refuses to start otherwise. Addresses are compared ignoring ASCII case
