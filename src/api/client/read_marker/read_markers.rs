@@ -118,7 +118,7 @@ pub(crate) async fn set_read_marker_route(
 			continue;
 		};
 		let count = services.timeline.get_pdu_count(event).await.ok();
-		if furthest.is_none_or(|(furthest, _)| count > furthest) {
+		if furthest.is_none_or(|(best, _)| count > best) {
 			furthest = Some((count, event));
 		}
 	}
