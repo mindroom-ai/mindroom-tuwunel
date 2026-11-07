@@ -175,7 +175,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.notification_count(&reader_id, &room)
 		.ne(&main_before)
 		.await
-		|| threads_after.get(&root_a) != Some(&(0, 0))
+		|| threads_after.contains_key(&root_a)
 		|| threads_after.get(&root_b) != threads_before.get(&root_b)
 		|| !watermarks_after.contains_key(&root_a)
 		|| watermarks_after.get(&root_b) != watermarks_before.get(&root_b)

@@ -100,7 +100,6 @@ const MINDROOM_TERMINAL_STREAM_STATUSES: [&str; 4] =
 pub struct Service {
 	services: Arc<crate::services::OnceServices>,
 	notification_increment_mutex: MutexMap<(OwnedRoomId, OwnedUserId), ()>,
-	highlight_increment_mutex: MutexMap<(OwnedRoomId, OwnedUserId), ()>,
 	db: Data,
 	suppressed: suppressed::SuppressedQueue,
 	sent_badges: SentBadges,
@@ -234,7 +233,6 @@ impl crate::Service for Service {
 		Ok(Arc::new(Self {
 			services: args.services.clone(),
 			notification_increment_mutex: MutexMap::new(),
-			highlight_increment_mutex: MutexMap::new(),
 			db: Data {
 				db: args.db.clone(),
 				senderkey_pusher: args.db["senderkey_pusher"].clone(),
