@@ -140,8 +140,9 @@ fn thread_reads_survive_older_unthreaded_receipt() -> Result {
 /// Reads that do not cover a thread reply leave it unread, as its sync count
 /// does: another member's later reply in the thread and unthreaded receipt, the
 /// reader's receipt in another thread, and the reader's reaction to the root.
-/// A later notice in the thread, which does not notify, and a later
-/// main-timeline reply to the root do not count as replies after it.
+/// A later notice in the thread, which does not notify, a later reply that
+/// only highlights, and a later main-timeline reply to the root do not count as
+/// replies after it.
 #[test]
 fn other_reads_leave_thread_replies_unread() -> Result {
 	let harness = Harness::new("mindroom_notifications_other_reads", [QUIET.to_owned()])?;
@@ -162,6 +163,15 @@ fn other_reads_leave_thread_replies_unread() -> Result {
 		let mut notice = thread_reply(&root_c);
 		notice["msgtype"] = "m.notice".into();
 		send(&router, &room, HELPER_TOKEN, "c-notice", notice).await;
+		let rule = json!({
+			"conditions": [{"kind": "event_match", "key": "content.body", "pattern": "quiet"}],
+			"actions": [{"set_tweak": "highlight"}],
+		});
+		let path = "/pushrules/global/override/quiet";
+		request(&router, Method::PUT, path, READER_TOKEN, rule).await;
+		let mut quiet = thread_reply(&root_c);
+		quiet["body"] = "quiet".into();
+		send(&router, &room, HELPER_TOKEN, "c-quiet", quiet).await;
 		let main_reply = json!({
 			"msgtype": "m.text",
 			"body": "Answer in the room",
