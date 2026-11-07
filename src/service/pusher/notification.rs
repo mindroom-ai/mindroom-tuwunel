@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use futures::{StreamExt, future::join4, stream::select};
+use futures::{StreamExt, future::join3, stream::select};
 use ruma::{EventId, OwnedEventId, RoomId, UserId, events::receipt::ReceiptThread};
 use tuwunel_core::{
 	Error, Result, implement, trace,
@@ -62,17 +62,27 @@ pub async fn reset_notification_counts_for_thread(
 			.collect(),
 	};
 	// These snapshots and the bounded PDU scan never hold the insertion lock.
+	// Own sends read through the present, so they need none. The room stamp is
+	// read first: a reset publishes it after its counts.
+	let room_read = self
+		.last_notification_read(user_id, room_id)
+		.await
+		.ok();
 	let mut before = BTreeMap::new();
 	for root in contexts {
-		before.insert(
-			root.clone(),
-			self.notification_state(user_id, room_id, root.as_deref())
-				.await,
-		);
+		let snapshot = match read_to {
+			| Some(_) => Some(
+				self.notification_state(user_id, room_id, root.as_deref())
+					.await,
+			),
+			| None => None,
+		};
+		before.insert(root, snapshot);
 	}
-	// Contexts already at zero cannot go lower, so they need no scan.
+	// No scan when every context is already at zero: none can go lower.
 	let pending = before
 		.values()
+		.flatten()
 		.any(|state| state.0 > 0 || state.1 > 0);
 	let unread = match read_to {
 		| Some(count) if pending => self
@@ -85,17 +95,29 @@ pub async fn reset_notification_counts_for_thread(
 		.notification_increment_mutex
 		.lock(&(room_id.to_owned(), user_id.to_owned()))
 		.await;
-	let stamp = self.services.globals.next_count();
-	for (root, snapshot) in before {
-		if self
-			.notification_state(user_id, room_id, root.as_deref())
+	// A room-wide reset since the snapshot invalidates every context.
+	let raced = read_to.is_some()
+		&& self
+			.last_notification_read(user_id, room_id)
 			.await
-			!= snapshot
-		{
-			continue;
-		}
-		let after = unread.get(&root).copied().unwrap_or_default();
-		let left = (snapshot.0.min(after.0), snapshot.1.min(after.1));
+			.ok()
+			!= room_read;
+	for (root, snapshot) in before {
+		let left = match snapshot {
+			| None => (0, 0),
+			| Some(snapshot) => {
+				if raced
+					|| self
+						.notification_state(user_id, room_id, root.as_deref())
+						.await
+						!= snapshot
+				{
+					continue;
+				}
+				let after = unread.get(&root).copied().unwrap_or_default();
+				(snapshot.0.min(after.0), snapshot.1.min(after.1))
+			},
+		};
 		let key = notification_key(user_id, room_id, root.as_deref());
 		if root.is_some() && left == (0, 0) {
 			self.db.userroomid_notificationcount.remove(&key);
@@ -108,37 +130,40 @@ pub async fn reset_notification_counts_for_thread(
 				.userroomid_highlightcount
 				.raw_put(&key, left.1);
 		}
-		if let Some(root) = &root {
-			if matches!(thread, ReceiptThread::Unthreaded) {
-				self.db
-					.roomuserid_lastnotificationread
-					.del((room_id, user_id, root));
-			} else {
-				self.db
-					.roomuserid_lastnotificationread
-					.put((room_id, user_id, root), *stamp);
-			}
+		// Each stamp's permit spans only its write, so syncs never wait on the
+		// recount; a stamp is published after the counts it covers.
+		if let ReceiptThread::Thread(root) = thread {
+			self.db
+				.roomuserid_lastnotificationread
+				.put((room_id, user_id, root), *self.services.globals.next_count());
 		}
 	}
-	// Publish the room stamp last, including when a concurrent insertion kept
-	// the main count unchanged, so every room-wide reset invalidates snapshots.
+	// Publish the room stamp even when a concurrent insertion kept the main
+	// count unchanged, so every room-wide reset invalidates snapshots. It is
+	// newer than every thread stamp an unthreaded receipt removes.
 	if !matches!(thread, ReceiptThread::Thread(_)) {
 		self.db
 			.roomuserid_lastnotificationread
-			.put((room_id, user_id), *stamp);
+			.put((room_id, user_id), *self.services.globals.next_count());
+		if matches!(thread, ReceiptThread::Unthreaded) {
+			self.db
+				.roomuserid_lastnotificationread
+				.del_prefix(&(room_id, user_id, Interfix))
+				.await;
+		}
 		self.clear_suppressed_room(user_id, room_id);
 	}
 }
 
-/// Counts detect concurrent insertions; read stamps prevent ABA when a
-/// concurrent receipt lowers counts and a subsequent event raises them again.
+/// Counts detect concurrent insertions; the thread's read stamp prevents ABA
+/// when a concurrent receipt lowers counts and a later event raises them again.
 #[implement(super::Service)]
 async fn notification_state(
 	&self,
 	user: &UserId,
 	room: &RoomId,
 	root: Option<&EventId>,
-) -> (u64, u64, u64, u64) {
+) -> (u64, u64, u64) {
 	let key = notification_key(user, room, root);
 	let count = async |map: &Arc<Map>| {
 		map.get(&key)
@@ -146,14 +171,9 @@ async fn notification_state(
 			.deserialized::<u64>()
 			.unwrap_or(0)
 	};
-	join4(
+	join3(
 		count(&self.db.userroomid_notificationcount),
 		count(&self.db.userroomid_highlightcount),
-		async {
-			self.last_notification_read(user, room)
-				.await
-				.unwrap_or(0)
-		},
 		async {
 			match root {
 				| Some(root) => self
