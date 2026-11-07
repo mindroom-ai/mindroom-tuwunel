@@ -63,7 +63,10 @@ pub async fn reset_notification_counts_for_thread(
 	// These snapshots and the bounded PDU scan never hold the insertion lock.
 	// Own sends read through the present, so they need none. The room stamp is
 	// read first: a reset publishes it after its counts.
-	let room_read = self.last_notification_read(user_id, room_id).await.ok();
+	let room_read = self
+		.last_notification_read(user_id, room_id)
+		.await
+		.ok();
 	let mut before = BTreeMap::new();
 	for root in contexts {
 		let snapshot = match read_to {
@@ -93,7 +96,11 @@ pub async fn reset_notification_counts_for_thread(
 		.await;
 	// A room-wide reset since the snapshot invalidates every context.
 	let raced = read_to.is_some()
-		&& self.last_notification_read(user_id, room_id).await.ok() != room_read;
+		&& self
+			.last_notification_read(user_id, room_id)
+			.await
+			.ok()
+			!= room_read;
 	for (root, snapshot) in before {
 		let left = match snapshot {
 			| None => (0, 0),
@@ -101,7 +108,8 @@ pub async fn reset_notification_counts_for_thread(
 				if raced
 					|| self
 						.notification_state(user_id, room_id, root.as_deref())
-						.await != snapshot
+						.await
+						!= snapshot
 				{
 					continue;
 				}
