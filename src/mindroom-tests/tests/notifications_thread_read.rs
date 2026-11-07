@@ -86,7 +86,8 @@ fn main_read_leaves_thread_replies_unread() -> Result {
 }
 
 async fn read_flags(router: &Router) -> Vec<(String, bool)> {
-	let response = request(router, Method::GET, "/notifications", READER_TOKEN, Value::Null).await;
+	let response =
+		request(router, Method::GET, "/notifications", READER_TOKEN, Value::Null).await;
 
 	response["notifications"]
 		.as_array()

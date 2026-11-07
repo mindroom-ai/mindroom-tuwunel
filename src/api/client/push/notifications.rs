@@ -1,14 +1,22 @@
+use std::collections::BTreeMap;
+
 use axum::extract::State;
 use futures::StreamExt;
-use ruma::{MilliSecondsSinceUnixEpoch, api::client::push::get_notifications, push::Action};
+use ruma::{
+	EventId, MilliSecondsSinceUnixEpoch, RoomId, UserId,
+	api::client::push::get_notifications,
+	events::{AnySyncEphemeralRoomEvent, receipt::ReceiptThread},
+	push::Action,
+};
 use tuwunel_core::{
 	Result, at, err,
-	matrix::{Event, PduId},
+	matrix::{Event, PduCount, PduId},
 	utils::{
 		stream::{ReadyExt, WidebandExt},
 		string::to_small_string,
 	},
 };
+use tuwunel_service::Services;
 
 use crate::Ruma;
 
@@ -65,21 +73,15 @@ pub(crate) async fn get_notifications_route(
 				.ok()
 				.filter(|event| !event.is_redacted())?;
 
-			let read = services
-				.pusher
-				.last_notification_read(sender_user, event.room_id())
-				.await
-				.is_ok_and(|last_read| last_read.ge(&count));
-
-			let read = read
-				|| match services.threads.get_thread_id(&event).await {
-					| None => false,
-					| Some(thread_root) => services
-						.pusher
-						.last_thread_notification_read(sender_user, event.room_id(), &thread_root)
-						.await
-						.is_ok_and(|last_read| last_read.ge(&count)),
-				};
+			let read = match services.threads.get_thread_id(&event).await {
+				| None => services
+					.pusher
+					.last_notification_read(sender_user, event.room_id())
+					.await
+					.is_ok_and(|last_read| last_read.ge(&count)),
+				| Some(root) =>
+					thread_read(&services, sender_user, event.room_id(), &root, count).await,
+			};
 
 			let ts = notify
 				.ts
@@ -120,4 +122,75 @@ pub(crate) async fn get_notifications_route(
 
 		notifications: notifications.into_iter().map(at!(1)).collect(),
 	})
+}
+
+/// Whether the reply at `count` in the thread of `root` is read. A `"main"` read
+/// also advances the room watermark, so past the thread's own watermark only
+/// the user's unthreaded receipt, or a receipt in the thread, reads the reply.
+async fn thread_read(
+	services: &Services,
+	user: &UserId,
+	room: &RoomId,
+	root: &EventId,
+	count: u64,
+) -> bool {
+	let covers = |last_read: Result<u64>| last_read.is_ok_and(|last_read| last_read >= count);
+
+	if covers(
+		services
+			.pusher
+			.last_thread_notification_read(user, room, root)
+			.await,
+	) {
+		return true;
+	}
+
+	// Every read through `count` advanced the room watermark past it.
+	if !covers(
+		services
+			.pusher
+			.last_notification_read(user, room)
+			.await,
+	) {
+		return false;
+	}
+
+	let private = services
+		.read_receipt
+		.private_read_get_count(room, user)
+		.await;
+
+	if covers(private.map(|(read, _)| read)) {
+		return true;
+	}
+
+	// A receipt is stored after its event, so only rows past `count` can cover it.
+	services
+		.read_receipt
+		.readreceipts_since(room, count, None)
+		.ready_filter(|(receipt_user, ..)| *receipt_user == user)
+		.ready_filter_map(|(_, _, raw)| {
+			let AnySyncEphemeralRoomEvent::Receipt(receipt) = raw.deserialize().ok()? else {
+				return None;
+			};
+			let (event_id, receipts) = receipt.content.0.into_iter().next()?;
+			let receipt = receipts
+				.into_values()
+				.flat_map(BTreeMap::into_values)
+				.next()?;
+
+			match receipt.thread {
+				| ReceiptThread::Unthreaded => Some(event_id),
+				| ReceiptThread::Thread(thread) if *thread == *root => Some(event_id),
+				| _ => None,
+			}
+		})
+		.any(async |event_id| {
+			services
+				.timeline
+				.get_pdu_count(&event_id)
+				.await
+				.is_ok_and(|read| read >= PduCount::Normal(count))
+		})
+		.await
 }
