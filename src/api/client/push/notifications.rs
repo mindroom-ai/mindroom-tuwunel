@@ -131,15 +131,22 @@ pub(crate) async fn get_notifications_route(
 async fn read_threads(services: &Services, user: &UserId, page: &mut [Entry]) {
 	// Per thread: notifying events left to find, and the last one found.
 	let (mut threads, mut rooms, mut oldest) = (HashMap::new(), HashSet::new(), u64::MAX);
+	let mut counts = HashMap::new();
 	for (count, notification, thread) in page.iter() {
 		let Some((room, root)) = thread else {
 			continue;
 		};
 
-		let unread = services
-			.pusher
-			.thread_notification_counts(user, &notification.room_id)
-			.await
+		if !counts.contains_key(&notification.room_id) {
+			let room_counts = services
+				.pusher
+				.thread_notification_counts(user, &notification.room_id)
+				.await;
+
+			counts.insert(notification.room_id.clone(), room_counts);
+		}
+
+		let unread = counts[&notification.room_id]
 			.get(root)
 			.map_or(0, at!(0));
 
