@@ -572,7 +572,8 @@ mod tests {
 	async fn marker_and_encryption(router: &Router, base: &str, root: &str) {
 		// The clients take a notice with any truthy marker, such as the older
 		// `true`, as a title, so it never becomes the conversational preview.
-		let reply = send(router, base, OWNER, "marker-reply", thread(root, "m.text", "answer")).await;
+		let reply =
+			send(router, base, OWNER, "marker-reply", thread(root, "m.text", "answer")).await;
 		for (txn, marker) in [
 			("true-marker", json!(true)),
 			("number-marker", json!(1)),
@@ -585,7 +586,10 @@ mod tests {
 			let served = event(router, base, OWNER, root).await;
 			let summary = &served["unsigned"]["m.relations"]["m.thread"];
 			assert_eq!(summary["io.mindroom.title"]["event_id"], title, "{txn}: {summary}");
-			assert_eq!(summary["io.mindroom.latest_reply"]["event_id"], reply, "{txn}: {summary}");
+			assert_eq!(
+				summary["io.mindroom.latest_reply"]["event_id"], reply,
+				"{txn}: {summary}"
+			);
 		}
 		// A falsy marker leaves an ordinary notice conversational.
 		for (txn, marker) in [
@@ -599,7 +603,10 @@ mod tests {
 			let notice = send(router, base, OWNER, txn, notice).await;
 			let served = event(router, base, OWNER, root).await;
 			let summary = &served["unsigned"]["m.relations"]["m.thread"];
-			assert_eq!(summary["io.mindroom.latest_reply"]["event_id"], notice, "{txn}: {summary}");
+			assert_eq!(
+				summary["io.mindroom.latest_reply"]["event_id"], notice,
+				"{txn}: {summary}"
+			);
 		}
 
 		let title_root = send(
