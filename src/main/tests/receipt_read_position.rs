@@ -165,7 +165,7 @@ fn newest_event_clears_after_busy_room() -> Result {
 
 /// Reading a thread removes its count row instead of leaving a zero, so rows
 /// exist only for threads with unread notifications; rows an older server left
-/// at zero go with the next unthreaded receipt.
+/// at zero and thread read stamps go with the next unthreaded receipt.
 #[test]
 fn read_threads_leave_no_rows() -> Result {
 	boot("read-threads-leave-no-rows", ["log_enable=false"], async |services, base| {
@@ -215,7 +215,15 @@ fn read_threads_leave_no_rows() -> Result {
 			.pusher
 			.notification_count(&user, &room)
 			.await;
-		assert_eq!((main, rows.len()), (0, 0), "unthreaded receipt on the newest event");
+		let stamps = services
+			.pusher
+			.thread_last_notification_reads(&user, &room)
+			.await;
+		assert_eq!(
+			(main, rows.len(), stamps.len()),
+			(0, 0, 0),
+			"unthreaded receipt on the newest event"
+		);
 		Ok(())
 	})
 }
