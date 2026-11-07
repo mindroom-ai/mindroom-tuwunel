@@ -570,16 +570,37 @@ mod tests {
 	}
 
 	async fn marker_and_encryption(router: &Router, base: &str, root: &str) {
-		// The marker must be an object, and ordinary notices remain replies.
-		let mut malformed = thread(root, "m.notice", "ordinary notice");
-		malformed["io.mindroom.thread_summary"] = json!(true);
-		let notice = send(router, base, OWNER, "malformed-marker", malformed).await;
-		let served = event(router, base, OWNER, root).await;
-		assert_eq!(
-			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.latest_reply"]["event_id"],
-			notice,
-			"a non-object marker remains conversational"
-		);
+		// The clients take a notice with any truthy marker, such as the older
+		// `true`, as a title, so it never becomes the conversational preview.
+		let reply = send(router, base, OWNER, "marker-reply", thread(root, "m.text", "answer")).await;
+		for (txn, marker) in [
+			("true-marker", json!(true)),
+			("number-marker", json!(1)),
+			("string-marker", json!("topic")),
+			("array-marker", json!([])),
+		] {
+			let mut notice = thread(root, "m.notice", "topic");
+			notice["io.mindroom.thread_summary"] = marker;
+			let title = send(router, base, OWNER, txn, notice).await;
+			let served = event(router, base, OWNER, root).await;
+			let summary = &served["unsigned"]["m.relations"]["m.thread"];
+			assert_eq!(summary["io.mindroom.title"]["event_id"], title, "{txn}: {summary}");
+			assert_eq!(summary["io.mindroom.latest_reply"]["event_id"], reply, "{txn}: {summary}");
+		}
+		// A falsy marker leaves an ordinary notice conversational.
+		for (txn, marker) in [
+			("false-marker", json!(false)),
+			("zero-marker", json!(0)),
+			("empty-marker", json!("")),
+			("null-marker", Value::Null),
+		] {
+			let mut notice = thread(root, "m.notice", "ordinary notice");
+			notice["io.mindroom.thread_summary"] = marker;
+			let notice = send(router, base, OWNER, txn, notice).await;
+			let served = event(router, base, OWNER, root).await;
+			let summary = &served["unsigned"]["m.relations"]["m.thread"];
+			assert_eq!(summary["io.mindroom.latest_reply"]["event_id"], notice, "{txn}: {summary}");
+		}
 
 		let title_root = send(
 			router,
