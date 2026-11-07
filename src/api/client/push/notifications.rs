@@ -4,7 +4,7 @@ use axum::extract::State;
 use futures::StreamExt;
 use ruma::{
 	EventId, MilliSecondsSinceUnixEpoch, RoomId, UserId,
-	api::client::push::get_notifications,
+	api::{Direction::Forward, client::push::get_notifications},
 	events::{AnySyncEphemeralRoomEvent, receipt::ReceiptThread},
 	push::Action,
 };
@@ -124,9 +124,10 @@ pub(crate) async fn get_notifications_route(
 	})
 }
 
-/// Whether the reply at `count` in the thread of `root` is read. A `"main"` read
-/// also advances the room watermark, so past the thread's own watermark only
-/// the user's unthreaded receipt, or a receipt in the thread, reads the reply.
+/// Whether the reply at `count` in the thread of `root` is read: by the user's
+/// unthreaded or thread read, public or private, at or after it, or by an own
+/// reply in the thread after it. Thread read stamps are not consulted: an
+/// unthreaded receipt on an older event deletes them.
 async fn thread_read(
 	services: &Services,
 	user: &UserId,
@@ -134,39 +135,19 @@ async fn thread_read(
 	root: &EventId,
 	count: u64,
 ) -> bool {
-	let covers = |last_read: Result<u64>| last_read.is_ok_and(|last_read| last_read >= count);
+	let receipts = &services.read_receipt;
+	for thread in [ReceiptThread::Unthreaded, ReceiptThread::Thread(root.to_owned())] {
+		let read = receipts
+			.private_read_position(room, user, &thread)
+			.await;
 
-	if covers(
-		services
-			.pusher
-			.last_thread_notification_read(user, room, root)
-			.await,
-	) {
-		return true;
-	}
-
-	// Every read through `count` advanced the room watermark past it.
-	if !covers(
-		services
-			.pusher
-			.last_notification_read(user, room)
-			.await,
-	) {
-		return false;
-	}
-
-	let private = services
-		.read_receipt
-		.private_read_get_count(room, user)
-		.await;
-
-	if covers(private.map(|(read, _)| read)) {
-		return true;
+		if read.is_ok_and(|(read, _)| read >= count) {
+			return true;
+		}
 	}
 
 	// A receipt is stored after its event, so only rows past `count` can cover it.
-	services
-		.read_receipt
+	let public = receipts
 		.readreceipts_since(room, count, None)
 		.ready_filter(|(receipt_user, ..)| *receipt_user == user)
 		.ready_filter_map(|(_, _, raw)| {
@@ -191,6 +172,30 @@ async fn thread_read(
 				.get_pdu_count(&event_id)
 				.await
 				.is_ok_and(|read| read >= PduCount::Normal(count))
+		});
+
+	if public.await {
+		return true;
+	}
+
+	// An unthreaded private receipt drops the private thread marker an own
+	// reply left, so the reply itself is looked up.
+	let Ok(root_id) = services.timeline.get_pdu_id(root).await else {
+		return false;
+	};
+	let PduId { shortroomid, count: root_count } = root_id.into();
+
+	services
+		.pdu_metadata
+		.get_relations(shortroomid, root_count, Some(PduCount::Normal(count)), Forward, None)
+		.ready_filter(|(_, pdu)| pdu.sender() == user)
+		.any(async |(_, pdu)| {
+			services
+				.threads
+				.get_thread_id(&pdu)
+				.await
+				.as_deref()
+				== Some(root)
 		})
 		.await
 }

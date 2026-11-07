@@ -339,7 +339,7 @@ impl Data {
 	/// An unthreaded context reads the legacy 2-tuple row; a threaded one
 	/// reads its own 3-tuple row.
 	#[inline]
-	async fn private_read_position(
+	pub(super) async fn private_read_position(
 		&self,
 		room_id: &RoomId,
 		user_id: &UserId,

@@ -343,7 +343,9 @@ trade-off: when two receipts of one user race, the later one can be dropped (a
 main receipt also invalidates a concurrent thread receipt), and because it was
 stored, the count stays until the next event in that context. Notification
 actions and both count increments share the lock. No column or index is added.
-Inbox read flags and per-thread suppressed pushes are a separate draft change.
+Per-thread suppressed pushes are a separate draft change. Inbox read flags go
+by read positions; see "`/notifications` reads thread replies only by reads
+that cover them".
 Tests cover old receipts, both marker fields, cross-room traffic, overflow,
 receipts on the newest event behind 4,097 later events, read threads leaving no
 rows or stamps, and a concurrent send behind 100,000 sibling rows.
@@ -1198,13 +1200,17 @@ bug. File: `src/api/client/push/notifications.rs`; test in
 `/notifications` marked an entry read once the room's read watermark passed
 it. A `"main"` receipt and the user's own main-timeline event move that
 watermark too, so they marked every thread reply in the room read while the
-sync thread counts still had it unread. A thread reply is now read when its
-thread's watermark passes it, or when the user's unthreaded receipt (public or
-private) or public receipt in that thread reads through it. A main-timeline
-entry still follows the room watermark. The receipt lookup runs only for a
-reply that the room watermark passed and its thread's did not, and reads only
-the room's receipt rows written after the reply. File:
-`src/api/client/push/notifications.rs`; test in
+sync thread counts still had it unread. A main-timeline entry still follows
+the room watermark. A thread reply is now read when one of the user's reads
+covers its position: the private read marker, unthreaded or of its thread
+(private receipts and own sends in the thread), a public unthreaded receipt or
+public receipt in its thread, or an own reply later in the thread, which an
+unthreaded private receipt cannot sweep away. Thread read stamps are not
+consulted, because an unthreaded receipt on an older event deletes them. The
+lookups are two point reads, the room's receipt rows written after the reply,
+and the thread's relations after it. File:
+`src/api/client/push/notifications.rs` (and an accessor in
+`src/service/rooms/read_receipt/`); test in
 `src/mindroom-tests/tests/notifications_thread_read.rs`.
 
 ### The user directory leaves out deactivated accounts

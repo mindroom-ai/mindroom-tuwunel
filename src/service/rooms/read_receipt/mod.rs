@@ -408,6 +408,20 @@ impl Service {
 			.await
 	}
 
+	/// Returns the private read marker PDU count of one thread context.
+	pub async fn private_read_position(
+		&self,
+		room_id: &RoomId,
+		user_id: &UserId,
+		thread: &ReceiptThread,
+	) -> Result<(u64, Option<u64>)> {
+		let thread_kind = thread.as_str().unwrap_or_default();
+
+		self.db
+			.private_read_position(room_id, user_id, thread_kind)
+			.await
+	}
+
 	/// Returns the announced unthreaded private read marker PDU count.
 	#[tracing::instrument(
 		name = "get_private_sync_count",
