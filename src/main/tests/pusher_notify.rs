@@ -24,6 +24,7 @@ use tuwunel_core::{
 			error::ErrorKind,
 		},
 		device_id,
+		events::receipt::ReceiptThread,
 		presence::PresenceState,
 		push::{HttpPusherData, PushFormat, Ruleset},
 	},
@@ -894,11 +895,16 @@ async fn counts_only_delivery(
 	let pusher = &fixture.services.pusher;
 
 	pusher
-		.reset_notification_counts(fixture.user, room_id)
+		.reset_notification_counts_for_thread(fixture.user, room_id, None, &ReceiptThread::Main)
 		.await;
 
 	pusher
-		.reset_notification_counts(fixture.user, other_room_id)
+		.reset_notification_counts_for_thread(
+			fixture.user,
+			other_room_id,
+			None,
+			&ReceiptThread::Main,
+		)
 		.await;
 
 	let remaining = pusher
