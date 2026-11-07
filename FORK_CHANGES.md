@@ -1627,8 +1627,8 @@ standard `unsigned.m.relations.m.thread` fields, so a new device can list
 threads with their titles and real last replies without opening each one:
 
 - `io.mindroom.title`: the newest title event in the thread.
-- `io.mindroom.latest_reply`: the newest direct thread event without a title
-  marker.
+- `io.mindroom.latest_reply`: the newest direct thread event that is not a
+  title.
 
 Both are full client events without `room_id`, like `latest_event`. With
 `bundle_edit_relations` on, each carries its newest valid `m.replace` edit
@@ -1639,10 +1639,13 @@ newer edit falls back to an earlier valid one. `latest_event`, `count` and
 timelines through the shared bundler. Encrypted rooms receive neither field.
 
 A title is a direct, non-state, unencrypted `m.thread` event with
-`msgtype: m.notice` and an `io.mindroom.thread_summary` **object**, from any
-sender, as MindRoom and its clients read titles: agents retitle threads they
-never replied in, and any member can rename a thread. Every other direct
-thread event is a conversational reply, including an `m.text` with a marker.
+`msgtype: m.notice` and an `io.mindroom.thread_summary` that JavaScript treats
+as true (an object, the older `true`, a non-empty string, a non-zero number or
+an array), from any sender, as MindRoom and its clients read titles: agents
+retitle threads they never replied in, and any member can rename a thread.
+Every other direct thread event is a conversational reply, including an
+`m.text` with a marker and a notice whose marker is `false`, `0`, `""` or
+`null`.
 A marker inside an edit's `m.new_content` never makes a title: clients read
 the title only from `io.mindroom.title`.
 
@@ -1653,9 +1656,10 @@ A redacted root keeps previews of its live children.
 Cost: each served root reads its native relation rows (every event relating
 to the root: thread events, reactions, edits of the root, rich replies)
 newest first and stops as soon as both fields are found, reading at most
-**50 rows**, plus at most 50 edit rows per selected preview. A field whose event is not within those 50 rows is
-omitted; clients fall back to opening the thread. There is no preview index,
-migration, purge hook or configuration option.
+**50 rows**, plus at most 50 edit rows per selected preview. A field whose
+event is not within those 50 rows is omitted; clients fall back to opening
+the thread. There is no preview index, migration, purge hook or
+configuration option.
 
 Live relations to backfilled events now enter the native relation index
 (`add_relation`), so a backfilled root's live replies are found. Such
