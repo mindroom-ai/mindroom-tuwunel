@@ -107,8 +107,9 @@ pub(crate) async fn set_read_marker_route(
 		},
 	};
 
-	// Each accepted field reads through its event, like `/receipt`. Recounting
-	// both can only lower counts, so the furthest accepted position wins.
+	// Each accepted field reads through its event, like `/receipt`; one recount
+	// through the furthest of them covers both.
+	let mut furthest = None;
 	for (advanced, event) in [
 		(private_advanced, body.private_read_receipt.as_deref()),
 		(public_advanced, body.read_receipt.as_deref()),
@@ -116,6 +117,12 @@ pub(crate) async fn set_read_marker_route(
 		let Some(event) = event.filter(|_| advanced) else {
 			continue;
 		};
+		let count = services.timeline.get_pdu_count(event).await.ok();
+		if furthest.is_none_or(|(best, _)| count > best) {
+			furthest = Some((count, event));
+		}
+	}
+	if let Some((_, event)) = furthest {
 		reset_and_refresh_badge(
 			&services,
 			sender_user,
