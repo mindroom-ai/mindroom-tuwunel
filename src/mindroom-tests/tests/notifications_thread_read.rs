@@ -85,9 +85,7 @@ fn main_read_leaves_thread_replies_unread() -> Result {
 /// A thread the reader read in the thread stays read after an unthreaded
 /// receipt on an older main-timeline event, as its sync count does: read by a
 /// private thread receipt, an own reply, or a public thread receipt, then an
-/// unthreaded `m.read` by `/receipt` or `/read_markers`. An own reply also
-/// outlives an unthreaded private receipt, which drops the private thread
-/// marker.
+/// unthreaded receipt, public or private, by `/receipt` or `/read_markers`.
 #[test]
 fn thread_reads_survive_older_unthreaded_receipt() -> Result {
 	let harness = Harness::new("mindroom_notifications_thread_reads_kept", [QUIET.to_owned()])?;
@@ -95,7 +93,8 @@ fn thread_reads_survive_older_unthreaded_receipt() -> Result {
 	harness.with_services(async |services| {
 		let (router, _guard) = serve(services).await?;
 
-		for case in ["private", "own", "read_markers", "public", "own_private"] {
+		for case in ["private", "own", "read_markers", "public", "own_private", "private_private"]
+		{
 			let room = create_room(&router).await;
 			let path = format!("/rooms/{room}/join");
 			request(&router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
@@ -109,7 +108,7 @@ fn thread_reads_survive_older_unthreaded_receipt() -> Result {
 
 			let in_thread = json!({"thread_id": root});
 			match case {
-				| "private" | "read_markers" =>
+				| "private" | "read_markers" | "private_private" =>
 					receipt(&router, &room, "m.read.private", &reply, in_thread).await,
 				| "public" => receipt(&router, &room, "m.read", &reply, in_thread).await,
 				| _ => {
@@ -124,7 +123,7 @@ fn thread_reads_survive_older_unthreaded_receipt() -> Result {
 					request(&router, Method::POST, &path, READER_TOKEN, json!({"m.read": older}))
 						.await;
 				},
-				| "own_private" =>
+				| "own_private" | "private_private" =>
 					receipt(&router, &room, "m.read.private", &older, json!({})).await,
 				| _ => receipt(&router, &room, "m.read", &older, json!({})).await,
 			}
@@ -141,6 +140,8 @@ fn thread_reads_survive_older_unthreaded_receipt() -> Result {
 /// Reads that do not cover a thread reply leave it unread, as its sync count
 /// does: another member's later reply in the thread and unthreaded receipt, the
 /// reader's receipt in another thread, and the reader's reaction to the root.
+/// A later notice in the thread, which does not notify, and a later
+/// main-timeline reply to the root do not count as replies after it.
 #[test]
 fn other_reads_leave_thread_replies_unread() -> Result {
 	let harness = Harness::new("mindroom_notifications_other_reads", [QUIET.to_owned()])?;
@@ -156,6 +157,17 @@ fn other_reads_leave_thread_replies_unread() -> Result {
 		let reply_b = send(&router, &room, HELPER_TOKEN, "b-1", thread_reply(&root_b)).await;
 		send(&router, &room, HELPER_TOKEN, "b-2", thread_reply(&root_b)).await;
 		let reply_a = send(&router, &room, HELPER_TOKEN, "a-1", thread_reply(&root_a)).await;
+		let root_c = send(&router, &room, HELPER_TOKEN, "root-c", text("Third")).await;
+		let reply_c = send(&router, &room, HELPER_TOKEN, "c-1", thread_reply(&root_c)).await;
+		let mut notice = thread_reply(&root_c);
+		notice["msgtype"] = "m.notice".into();
+		send(&router, &room, HELPER_TOKEN, "c-notice", notice).await;
+		let main_reply = json!({
+			"msgtype": "m.text",
+			"body": "Answer in the room",
+			"m.relates_to": {"m.in_reply_to": {"event_id": root_c}},
+		});
+		send(&router, &room, HELPER_TOKEN, "c-main", main_reply).await;
 
 		let path = format!("/rooms/{room}/receipt/m.read/{reply_a}");
 		request(&router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
@@ -170,6 +182,67 @@ fn other_reads_leave_thread_replies_unread() -> Result {
 		assert_eq!(flag(&flags, &reply_a), Some(true), "{flags:?}");
 		assert_eq!(flag(&flags, &reply_b), Some(false), "{flags:?}");
 		assert_eq!(thread_count(&router, &room, &root_b).await, 2, "sync");
+		assert_eq!(flag(&flags, &reply_c), Some(false), "{flags:?}");
+		assert_eq!(thread_count(&router, &room, &root_c).await, 1, "sync");
+
+		Ok(())
+	})
+}
+
+/// A finished stream counts in its thread by its terminal edit, which relates
+/// to the reply rather than the root. When the reader reads the thread while a
+/// second reply streams, sync counts only the second, and the Inbox shows the
+/// first finished reply read and the second unread.
+#[test]
+fn finished_streams_follow_the_thread_count() -> Result {
+	let harness = Harness::new("mindroom_notifications_streams", [QUIET.to_owned()])?;
+
+	harness.with_services(async |services| {
+		let (router, _guard) = serve(services).await?;
+
+		let room = create_room(&router).await;
+		let path = format!("/rooms/{room}/join");
+		request(&router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
+		let root = send(&router, &room, HELPER_TOKEN, "root", text("Question")).await;
+		let first_a = send(&router, &room, HELPER_TOKEN, "a", streaming(&root)).await;
+		let done_a = send(&router, &room, HELPER_TOKEN, "a-done", finished(&first_a)).await;
+		let first_b = send(&router, &room, HELPER_TOKEN, "b", streaming(&root)).await;
+		receipt(&router, &room, "m.read", &first_b, json!({"thread_id": root})).await;
+		let done_b = send(&router, &room, HELPER_TOKEN, "b-done", finished(&first_b)).await;
+
+		let flags = read_flags(&router).await;
+		assert_eq!(flag(&flags, &done_a), Some(true), "{flags:?}");
+		assert_eq!(flag(&flags, &done_b), Some(false), "{flags:?}");
+		assert_eq!(thread_count(&router, &room, &root).await, 1, "sync");
+
+		Ok(())
+	})
+}
+
+/// An unthreaded receipt whose recount passes its limit of 4,096 events reads
+/// every thread through the present in the sync counts, and the Inbox agrees.
+#[test]
+fn recount_past_limit_reads_thread_replies() -> Result {
+	let harness = Harness::new("mindroom_notifications_recount_limit", [QUIET.to_owned()])?;
+
+	harness.with_services(async |services| {
+		let (router, _guard) = serve(services).await?;
+
+		let room = create_room(&router).await;
+		let path = format!("/rooms/{room}/join");
+		request(&router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
+		let early = send(&router, &room, HELPER_TOKEN, "early", text("Early")).await;
+		let root = send(&router, &room, HELPER_TOKEN, "root", text("Question")).await;
+		let reply = send(&router, &room, HELPER_TOKEN, "reply", thread_reply(&root)).await;
+		for i in 0..4100 {
+			let path = format!("/rooms/{room}/send/org.example.filler/filler-{i}");
+			request(&router, Method::PUT, &path, HELPER_TOKEN, json!({"n": i})).await;
+		}
+		receipt(&router, &room, "m.read", &early, json!({})).await;
+
+		let flags = read_flags(&router).await;
+		assert_eq!(flag(&flags, &reply), Some(true), "{flags:?}");
+		assert_eq!(thread_count(&router, &room, &root).await, 0, "sync");
 
 		Ok(())
 	})
@@ -234,6 +307,27 @@ fn flag(flags: &[(String, bool)], event: &OwnedEventId) -> Option<bool> {
 }
 
 fn text(body: &str) -> Value { json!({"msgtype": "m.text", "body": body}) }
+
+/// The first event of a reply streaming in the thread of `root`.
+fn streaming(root: &OwnedEventId) -> Value {
+	json!({
+		"msgtype": "m.text",
+		"body": "Thinking",
+		"io.mindroom.stream_status": "streaming",
+		"m.relates_to": {"rel_type": "m.thread", "event_id": root},
+	})
+}
+
+/// The terminal edit that finishes the stream started by `first`.
+fn finished(first: &OwnedEventId) -> Value {
+	json!({
+		"msgtype": "m.text",
+		"body": "* Answer",
+		"m.new_content": {"msgtype": "m.text", "body": "Answer"},
+		"io.mindroom.stream_status": "completed",
+		"m.relates_to": {"rel_type": "m.replace", "event_id": first},
+	})
+}
 
 fn thread_reply(root: &OwnedEventId) -> Value {
 	json!({
