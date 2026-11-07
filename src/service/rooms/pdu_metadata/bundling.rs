@@ -557,7 +557,7 @@ const REPLY: &str = "io.mindroom.latest_reply";
 const PREVIEW_ROWS: usize = 50;
 
 /// MindRoom previews beside the standard thread summary: the newest title (an
-/// `m.notice` thread event with an `io.mindroom.thread_summary` object) and
+/// `m.notice` thread event with a truthy `io.mindroom.thread_summary`) and
 /// the newest other thread event, each with its newest valid edit the
 /// requester may see. Unencrypted rooms only; a field outside the window is
 /// omitted.
@@ -601,8 +601,10 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 		);
 		while let Some((count, mut child)) = replies.next().await {
 			let title = child.get_content::<Value>().is_ok_and(|content| {
+				let marker = &content["io.mindroom.thread_summary"];
+				// Truthy in JavaScript, as both clients test the marker.
 				content["msgtype"] == "m.notice"
-					&& content["io.mindroom.thread_summary"].is_object()
+					&& !(marker.is_null() || *marker == false || *marker == 0 || *marker == "")
 			});
 			let field = if title { TITLE } else { REPLY };
 			if thread.contains_key(field)
