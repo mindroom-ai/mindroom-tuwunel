@@ -1204,11 +1204,12 @@ sync thread counts still had it unread. A main-timeline entry still follows
 the room watermark. A thread entry now follows its thread's sync count `N`,
 which always holds the user's newest `N` notifying events in the thread: the
 entry is read once `N` of the user's notifying events in the same thread
-follow it. That walks the user's newer notification rows, so finished stream
-edits count like the replies they finish, and it stops after `N`; a read
-thread (`N` = 0) walks nothing. A reply redacted since the last recount still
-counts in `N` but not in the walk, so an earlier reply can show unread until
-the next receipt, as the count does. File:
+follow it. One walk down the user's notification rows, to the oldest entry of a
+thread with `N` above 0, serves the whole page; rows of other rooms are skipped
+without loading their events. Counting rows rather than relations of the root
+counts finished stream edits like the replies they finish. A reply redacted
+since the last recount still counts in `N` but not in the walk, so an earlier
+reply can show unread until the next receipt, as the count does. File:
 `src/api/client/push/notifications.rs`; test in
 `src/mindroom-tests/tests/notifications_thread_read.rs`.
 
