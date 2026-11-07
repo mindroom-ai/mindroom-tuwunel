@@ -32,8 +32,8 @@ const THREADED_LAZY_MEMBERS: &str = concat!(
 /// carries the room must therefore list every thread that has notifications on
 /// any round: after a `"main"` receipt, another member's typing or receipt, or
 /// the reader's receipt in one thread, and under a filter that lazy loads
-/// members. A thread read down to zero is sent as zero in the round its read
-/// moves and left out after that, an unthreaded receipt reads them all, and a
+/// members. A thread read down to zero is left out, which clears it on the
+/// client, an unthreaded receipt reads them all, and a
 /// room with nothing new still stays out of the response. The reader's own
 /// send reads only the thread it is in, or the main timeline; a state event
 /// reads nothing.
@@ -107,11 +107,12 @@ fn sync_lists_every_thread_count() -> Result {
 		// Consume that typing update, so the receipt alone carries the room next.
 		let stopped = sync(&router, THREADED, Some(&typing)).await;
 
-		// The reader opens the first thread. Its read position moved in this
-		// round, so the map sends it as zero; the second is still unread.
+		// The reader opens the first thread. Its recount leaves nothing unread,
+		// so its rows go and the map leaves it out, which clears it on the
+		// client; the second is still unread.
 		receipt(&router, &room, READER_TOKEN, &first_reply, json!({"thread_id": first})).await;
 		let read = sync(&router, THREADED, Some(&stopped)).await;
-		assert_eq!(counts(&read, &room, &first), Some((0, 0)), "read thread: {read}");
+		assert_eq!(counts(&read, &room, &first), None, "read thread: {read}");
 		assert_eq!(client_counts(&read, &room, &first), Some((0, 0)), "read thread: {read}");
 		assert_eq!(counts(&read, &room, &second), Some((1, 1)), "unread thread: {read}");
 

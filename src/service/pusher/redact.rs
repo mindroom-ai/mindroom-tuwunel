@@ -118,9 +118,11 @@ async fn redact_pdu_for_user(&self, user: &UserId, redacted: Redacted<'_>) {
 		raises: Action::should_notify,
 	};
 
+	// Both counters share the notification lock, under which a receipt's
+	// recount checks and writes them together.
 	let highlights = Counter {
 		counts: &self.db.userroomid_highlightcount,
-		mutex: &self.highlight_increment_mutex,
+		mutex: &self.notification_increment_mutex,
 		raises: Action::is_highlight,
 	};
 
@@ -135,10 +137,8 @@ async fn redact_pdu_for_user(&self, user: &UserId, redacted: Redacted<'_>) {
 /// Subtract the event from one of the user's counters if its actions raised
 /// that counter and it still counts the event.
 ///
-/// Runs under the counter's increment lock, which the notification reset
-/// also holds while it zeroes its counter. The highlight reset takes no lock,
-/// so a receipt racing a redaction can lose its zero, as it can racing an
-/// increment.
+/// Runs under the counters' increment lock, which a receipt's recount also
+/// holds while it checks and writes both counters.
 #[implement(super::Service)]
 async fn uncount(
 	&self,

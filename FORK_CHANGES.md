@@ -275,6 +275,39 @@ same bug. Files:
 `src/api/server/send.rs`, `src/api/client/read_marker/mod.rs`; test in
 `src/main/tests/federation_receipt_edu.rs`.
 
+### A receipt recounts only the unread events after its event
+
+An older receipt used to clear every unread count in its context. Both
+`/receipt` and `/read_markers` now recount notified events after the event they
+acknowledge, restricted to the room and receipt context. Counts only decrease;
+when both read-marker fields advance, their furthest accepted event wins.
+Own sends keep #139's context selection and still read the present.
+
+The recount uses the existing room timeline range and visits at most 4,097
+PDUs, including sibling threads and events without notification actions. Past
+that it reads its context through the present, as every receipt did before: a
+receipt on the newest event of its context always clears it, and only an older
+receipt in a very busy room clears too much. A context already at zero skips
+the scan. Reading a thread removes its count row instead of writing a zero, so
+rows exist only for threads with unread notifications; an unthreaded receipt
+visits each of the room's thread rows and removes the zero rows older servers
+left behind.
+
+The recount scans without the insertion lock, then checks
+notification/highlight counts and read stamps under that lock before applying
+a result. A concurrent insertion or read keeps that context's counts
+unchanged. Accepted trade-off: when two receipts of one user race, the later
+one can be dropped (a main receipt also invalidates a concurrent thread
+receipt), and because it was stored, the count stays until the next event in
+that context. Notification actions and both count increments share the lock,
+and so does upstream's removal of a redacted event from both counts
+(`0177e2de8`). No column or index is added. Inbox read flags and per-thread
+suppressed pushes
+are a separate draft change. Tests cover old receipts, both marker fields,
+cross-room traffic, overflow, receipts on the newest event behind 4,097 later
+events, read threads leaving no rows, and a concurrent send behind 100,000
+sibling rows.
+
 ### A withdrawn knock does not move a former member's departure
 
 Under `shared` history visibility a former member reads events up to their

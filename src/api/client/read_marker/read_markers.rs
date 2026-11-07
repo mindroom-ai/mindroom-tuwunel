@@ -92,14 +92,20 @@ pub(crate) async fn set_read_marker_route(
 		},
 	};
 
-	// Route through the dispatcher so per-thread counts are also cleared;
-	// `/read_markers` predates MSC3771 and carries no thread field.
-	if private_advanced || public_advanced {
+	// Each accepted field reads through its event, like `/receipt`. Recounting
+	// both can only lower counts, so the furthest accepted position wins.
+	for (advanced, event) in [
+		(private_advanced, body.private_read_receipt.as_deref()),
+		(public_advanced, body.read_receipt.as_deref()),
+	] {
+		let Some(event) = event.filter(|_| advanced) else {
+			continue;
+		};
 		reset_and_refresh_badge(
 			&services,
 			sender_user,
 			&body.room_id,
-			None,
+			Some(event),
 			&ReceiptThread::Unthreaded,
 		)
 		.await;
