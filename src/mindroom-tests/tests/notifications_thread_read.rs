@@ -167,6 +167,8 @@ fn other_reads_leave_thread_replies_unread() -> Result {
 			"conditions": [{"kind": "event_match", "key": "content.body", "pattern": "quiet"}],
 			"actions": [{"set_tweak": "highlight"}],
 		});
+		// Loading the rules stores the defaults the account was created without.
+		request(&router, Method::GET, "/pushrules/global/", READER_TOKEN, Value::Null).await;
 		let path = "/pushrules/global/override/quiet";
 		request(&router, Method::PUT, path, READER_TOKEN, rule).await;
 		let mut quiet = thread_reply(&root_c);
