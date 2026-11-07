@@ -21,9 +21,10 @@ const HELPER_TOKEN: &str = "notifications-thread-helper-token-0123456789abcdef";
 
 /// MSC3771: a `"main"` receipt, or the reader's own main-timeline message,
 /// reads only the main timeline, so the room's thread replies stay unread in
-/// `/notifications` as they do in the sync counts. An unthreaded receipt reads
-/// every thread through its event, and a later reply in that thread leaves the
-/// earlier replies read. A receipt in the thread reads its replies.
+/// `/notifications` as they do in the sync counts. An unthreaded receipt,
+/// public or private, reads every thread through its event, and a later reply
+/// in that thread leaves the earlier replies read. A receipt in the thread
+/// reads its replies.
 #[test]
 fn main_read_leaves_thread_replies_unread() -> Result {
 	let harness = Harness::new("mindroom_notifications_thread_read", [])?;
@@ -80,6 +81,13 @@ fn main_read_leaves_thread_replies_unread() -> Result {
 		receipt(&router, &room, &again, json!({"thread_id": root})).await;
 		let flags = read_flags(&router).await;
 		assert_eq!(flag(&flags, &again), Some(true), "thread receipt: {flags:?}");
+
+		let last = send(&router, &room, HELPER_TOKEN, "last", thread_reply(&root)).await;
+		let newest = send(&router, &room, HELPER_TOKEN, "newest", text("Newest")).await;
+		let path = format!("/rooms/{room}/receipt/m.read.private/{newest}");
+		request(&router, Method::POST, &path, READER_TOKEN, json!({})).await;
+		let flags = read_flags(&router).await;
+		assert_eq!(flag(&flags, &last), Some(true), "private receipt: {flags:?}");
 
 		Ok(())
 	})

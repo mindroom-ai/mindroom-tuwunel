@@ -1190,6 +1190,20 @@ gives `next_token` only when that notification exists. Upstream has the same
 bug. File: `src/api/client/push/notifications.rs`; test in
 `src/main/tests/notifications_next_token.rs`.
 
+### `/notifications` reads thread replies only by reads that cover them
+
+`/notifications` marked an entry read once the room's read watermark passed
+it. A `"main"` receipt and the user's own main-timeline event move that
+watermark too, so they marked every thread reply in the room read while the
+sync thread counts still had it unread. A thread reply is now read when its
+thread's watermark passes it, or when the user's unthreaded receipt (public or
+private) or public receipt in that thread reads through it. A main-timeline
+entry still follows the room watermark. The receipt lookup runs only for a
+reply that the room watermark passed and its thread's did not, and reads only
+the room's receipt rows written after the reply. File:
+`src/api/client/push/notifications.rs`; test in
+`src/mindroom-tests/tests/notifications_thread_read.rs`.
+
 ### The user directory leaves out deactivated accounts
 
 On servers that list all local users (`show_all_local_users_in_user_directory
