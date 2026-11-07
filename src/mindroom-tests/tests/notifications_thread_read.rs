@@ -5,14 +5,18 @@
 
 mod support;
 
+use std::sync::Arc;
+
 use axum::{Router, body::Body};
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use tuwunel_api::router::state::Guard;
 use tuwunel_core::{
 	Result,
 	http::{Method, Request, StatusCode, header},
 	ruma::{OwnedEventId, OwnedRoomId, RoomId, user_id},
 };
+use tuwunel_service::Services;
 
 use self::support::Harness;
 
@@ -30,23 +34,7 @@ fn main_read_leaves_thread_replies_unread() -> Result {
 	let harness = Harness::new("mindroom_notifications_thread_read", [])?;
 
 	harness.with_services(async |services| {
-		for (user, token) in [
-			(user_id!("@reader:localhost"), READER_TOKEN),
-			(user_id!("@helper:localhost"), HELPER_TOKEN),
-		] {
-			services
-				.users
-				.create(user, Some("password"), None)
-				.await?;
-			services
-				.users
-				.create_device(user, None, (Some(token), None), None, None, None)
-				.await?;
-		}
-
-		let (state, _guard) = tuwunel_api::router::state::create(services.clone());
-		let router =
-			tuwunel_api::router::build(Router::new(), &services.server).with_state(state);
+		let (router, _guard) = serve(services).await?;
 
 		let room = create_room(&router).await;
 		let path = format!("/rooms/{room}/join");
@@ -56,7 +44,7 @@ fn main_read_leaves_thread_replies_unread() -> Result {
 		let reply = send(&router, &room, HELPER_TOKEN, "reply", thread_reply(&root)).await;
 		let main = send(&router, &room, HELPER_TOKEN, "main", text("Main timeline")).await;
 
-		receipt(&router, &room, &main, json!({"thread_id": "main"})).await;
+		receipt(&router, &room, "m.read", &main, json!({"thread_id": "main"})).await;
 		let flags = read_flags(&router).await;
 		assert_eq!(flag(&flags, &root), Some(true), "main receipt: {flags:?}");
 		assert_eq!(flag(&flags, &main), Some(true), "main receipt: {flags:?}");
@@ -66,31 +54,121 @@ fn main_read_leaves_thread_replies_unread() -> Result {
 		let flags = read_flags(&router).await;
 		assert_eq!(flag(&flags, &reply), Some(false), "own main message: {flags:?}");
 
-		receipt(&router, &room, &main, json!({})).await;
+		receipt(&router, &room, "m.read", &main, json!({})).await;
 		let flags = read_flags(&router).await;
 		assert_eq!(flag(&flags, &reply), Some(true), "unthreaded receipt: {flags:?}");
 
 		let again = send(&router, &room, HELPER_TOKEN, "again", thread_reply(&root)).await;
 		let later = send(&router, &room, HELPER_TOKEN, "later", text("Later")).await;
-		receipt(&router, &room, &later, json!({"thread_id": "main"})).await;
+		receipt(&router, &room, "m.read", &later, json!({"thread_id": "main"})).await;
 		let flags = read_flags(&router).await;
 		assert_eq!(flag(&flags, &reply), Some(true), "earlier reply: {flags:?}");
 		assert_eq!(flag(&flags, &later), Some(true), "later main: {flags:?}");
 		assert_eq!(flag(&flags, &again), Some(false), "later reply: {flags:?}");
 
-		receipt(&router, &room, &again, json!({"thread_id": root})).await;
+		receipt(&router, &room, "m.read", &again, json!({"thread_id": root})).await;
 		let flags = read_flags(&router).await;
 		assert_eq!(flag(&flags, &again), Some(true), "thread receipt: {flags:?}");
 
 		let last = send(&router, &room, HELPER_TOKEN, "last", thread_reply(&root)).await;
 		let newest = send(&router, &room, HELPER_TOKEN, "newest", text("Newest")).await;
-		let path = format!("/rooms/{room}/receipt/m.read.private/{newest}");
-		request(&router, Method::POST, &path, READER_TOKEN, json!({})).await;
+		receipt(&router, &room, "m.read.private", &newest, json!({})).await;
 		let flags = read_flags(&router).await;
 		assert_eq!(flag(&flags, &last), Some(true), "private receipt: {flags:?}");
 
 		Ok(())
 	})
+}
+
+/// A thread the reader read in the thread stays read after an unthreaded
+/// receipt on an older main-timeline event, as its sync count does: read by a
+/// private thread receipt, an own reply, or a public thread receipt, then an
+/// unthreaded `m.read` by `/receipt` or `/read_markers`. An own reply also
+/// outlives an unthreaded private receipt, which drops the private thread
+/// marker.
+#[test]
+fn thread_reads_survive_older_unthreaded_receipt() -> Result {
+	let harness = Harness::new("mindroom_notifications_thread_reads_kept", [])?;
+
+	harness.with_services(async |services| {
+		let (router, _guard) = serve(services).await?;
+
+		for case in ["private", "own", "read_markers", "public", "own_private"] {
+			let room = create_room(&router).await;
+			let path = format!("/rooms/{room}/join");
+			request(&router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
+			let older =
+				send(&router, &room, HELPER_TOKEN, &format!("{case}-older"), text("Older")).await;
+			let root =
+				send(&router, &room, HELPER_TOKEN, &format!("{case}-root"), text("Root")).await;
+			let reply =
+				send(&router, &room, HELPER_TOKEN, &format!("{case}-reply"), thread_reply(&root))
+					.await;
+
+			let in_thread = json!({"thread_id": root});
+			match case {
+				| "private" | "read_markers" =>
+					receipt(&router, &room, "m.read.private", &reply, in_thread).await,
+				| "public" => receipt(&router, &room, "m.read", &reply, in_thread).await,
+				| _ => {
+					let txn = format!("{case}-own");
+					send(&router, &room, READER_TOKEN, &txn, thread_reply(&root)).await;
+				},
+			}
+
+			match case {
+				| "read_markers" => {
+					let path = format!("/rooms/{room}/read_markers");
+					request(&router, Method::POST, &path, READER_TOKEN, json!({"m.read": older}))
+						.await;
+				},
+				| "own_private" =>
+					receipt(&router, &room, "m.read.private", &older, json!({})).await,
+				| _ => receipt(&router, &room, "m.read", &older, json!({})).await,
+			}
+
+			let flags = read_flags(&router).await;
+			assert_eq!(flag(&flags, &reply), Some(true), "{case}: {flags:?}");
+			assert_eq!(thread_count(&router, &room, &root).await, 0, "{case}: sync");
+		}
+
+		Ok(())
+	})
+}
+
+async fn serve(services: Arc<Services>) -> Result<(Router, Guard)> {
+	for (user, token) in [
+		(user_id!("@reader:localhost"), READER_TOKEN),
+		(user_id!("@helper:localhost"), HELPER_TOKEN),
+	] {
+		services
+			.users
+			.create(user, Some("password"), None)
+			.await?;
+		services
+			.users
+			.create_device(user, None, (Some(token), None), None, None, None)
+			.await?;
+	}
+
+	let (state, guard) = tuwunel_api::router::state::create(services.clone());
+	let router = tuwunel_api::router::build(Router::new(), &services.server).with_state(state);
+
+	Ok((router, guard))
+}
+
+/// The reader's sync count for the thread of `root`; a thread left out of
+/// `unread_thread_notifications` has none.
+async fn thread_count(router: &Router, room: &RoomId, root: &OwnedEventId) -> u64 {
+	let filter = r#"{"room":{"timeline":{"unread_thread_notifications":true}}}"#;
+	let filter: String = url::form_urlencoded::byte_serialize(filter.as_bytes()).collect();
+	let path = format!("/sync?timeout=0&filter={filter}");
+	let sync = request(router, Method::GET, &path, READER_TOKEN, Value::Null).await;
+
+	sync["rooms"]["join"][room.as_str()]["unread_thread_notifications"][root.as_str()]
+		["notification_count"]
+		.as_u64()
+		.unwrap_or(0)
 }
 
 async fn read_flags(router: &Router) -> Vec<(String, bool)> {
@@ -126,8 +204,8 @@ fn thread_reply(root: &OwnedEventId) -> Value {
 	})
 }
 
-async fn receipt(router: &Router, room: &RoomId, event: &OwnedEventId, body: Value) {
-	let path = format!("/rooms/{room}/receipt/m.read/{event}");
+async fn receipt(router: &Router, room: &RoomId, kind: &str, event: &OwnedEventId, body: Value) {
+	let path = format!("/rooms/{room}/receipt/{kind}/{event}");
 	request(router, Method::POST, &path, READER_TOKEN, body).await;
 }
 
