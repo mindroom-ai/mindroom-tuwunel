@@ -302,10 +302,9 @@ multi-tenant apps, and providers whose users can set or edit their own address
 without verifying it (Keycloak, for one, lets users edit their email unless
 verification is required). A sign-in whose provider says the address is
 unverified (any `email_verified` value other than `true` or the string
-`"true"`) is refused. Many
-providers send that claim, such as Google, Keycloak, Okta, Auth0, GitLab and
-Authentik; others, such as Microsoft Entra ID and GitHub, do not, and an absent
-or null claim is not checked.
+`"true"`) is refused. Many providers send that claim, such as Google, Keycloak,
+Okta, Auth0, GitLab and Authentik; others, such as Microsoft Entra ID and
+GitHub, do not, and an absent or null claim is not checked.
 
 A listed account is reserved for its listed address: no other sign-in gets it by
 name or as its fallback, at any provider (an admin association still can). Only
