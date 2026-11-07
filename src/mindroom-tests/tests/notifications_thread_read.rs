@@ -136,6 +136,43 @@ fn thread_reads_survive_older_unthreaded_receipt() -> Result {
 	})
 }
 
+/// Reads that do not cover a thread reply leave it unread, as its sync count
+/// does: another member's later reply in the thread and unthreaded receipt, the
+/// reader's receipt in another thread, and the reader's reaction to the root.
+#[test]
+fn other_reads_leave_thread_replies_unread() -> Result {
+	let harness = Harness::new("mindroom_notifications_other_reads", [])?;
+
+	harness.with_services(async |services| {
+		let (router, _guard) = serve(services).await?;
+
+		let room = create_room(&router).await;
+		let path = format!("/rooms/{room}/join");
+		request(&router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
+		let root_a = send(&router, &room, HELPER_TOKEN, "root-a", text("First")).await;
+		let root_b = send(&router, &room, HELPER_TOKEN, "root-b", text("Second")).await;
+		let reply_b = send(&router, &room, HELPER_TOKEN, "b-1", thread_reply(&root_b)).await;
+		send(&router, &room, HELPER_TOKEN, "b-2", thread_reply(&root_b)).await;
+		let reply_a = send(&router, &room, HELPER_TOKEN, "a-1", thread_reply(&root_a)).await;
+
+		let path = format!("/rooms/{room}/receipt/m.read/{reply_a}");
+		request(&router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
+		receipt(&router, &room, "m.read", &reply_a, json!({"thread_id": root_a})).await;
+		let path = format!("/rooms/{room}/send/m.reaction/reaction");
+		let reaction = json!({
+			"m.relates_to": {"rel_type": "m.annotation", "event_id": root_b, "key": "+1"},
+		});
+		request(&router, Method::PUT, &path, READER_TOKEN, reaction).await;
+
+		let flags = read_flags(&router).await;
+		assert_eq!(flag(&flags, &reply_a), Some(true), "{flags:?}");
+		assert_eq!(flag(&flags, &reply_b), Some(false), "{flags:?}");
+		assert_eq!(thread_count(&router, &room, &root_b).await, 2, "sync");
+
+		Ok(())
+	})
+}
+
 async fn serve(services: Arc<Services>) -> Result<(Router, Guard)> {
 	for (user, token) in [
 		(user_id!("@reader:localhost"), READER_TOKEN),
