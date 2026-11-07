@@ -194,6 +194,7 @@ fn other_reads_leave_thread_replies_unread() -> Result {
 		let flags = read_flags(&router).await;
 		assert_eq!(flag(&flags, &quiet_d), Some(false), "highlight only: {flags:?}");
 		assert_eq!(thread_counts(&router, &room, &root_d).await, (0, 1), "sync");
+		assert_eq!(paged_flags(&router).await, flags, "highlight only, one entry per page");
 		let reply_d = send(&router, &room, HELPER_TOKEN, "d-1", thread_reply(&root_d)).await;
 		let main_reply = json!({
 			"msgtype": "m.text",
