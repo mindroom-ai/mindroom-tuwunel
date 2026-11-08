@@ -430,57 +430,50 @@ fn redacted_reply_leaves_main_entries_unread() -> Result {
 	})
 }
 
-/// A poll ended in a thread counts there by its end, which references the start
-/// rather than the root. Once the start is redacted, the end stays in the
-/// thread: for the Inbox, for the recounts of later receipts, and for a thread
-/// receipt on the redaction. So the main entries stay unread while the room's
-/// count holds them.
+/// Redaction strips a thread event's `m.relates_to`, so its redaction and an
+/// event related to it, such as a poll end, belong to the main timeline
+/// afterwards, where MSC3771 clients such as matrix-js-sdk file them. A `"main"`
+/// receipt on either is accepted and reads the main timeline, in the sync count
+/// and in the Inbox.
 #[test]
-fn redacted_poll_start_keeps_its_end_in_the_thread() -> Result {
-	let harness = Harness::new("mindroom_notifications_redacted_poll", [QUIET.to_owned()])?;
+fn main_receipt_after_thread_redaction_reads_main() -> Result {
+	let harness = Harness::new("mindroom_notifications_redaction_main", [QUIET.to_owned()])?;
 
 	harness.with_services(async |services| {
 		let (router, _guard) = serve(services).await?;
 
-		let room = create_room(&router).await;
-		let path = format!("/rooms/{room}/join");
-		request(&router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
-		let older = send(&router, &room, HELPER_TOKEN, "older", text("Older")).await;
-		let root = send(&router, &room, HELPER_TOKEN, "root", text("Question")).await;
-		let path = format!("/rooms/{room}/send/org.matrix.msc3381.poll.start/start");
-		let start =
-			event_id(&request(&router, Method::PUT, &path, HELPER_TOKEN, poll(&root)).await);
-		let path = format!("/rooms/{room}/send/org.matrix.msc3381.poll.end/end");
-		let end = json!({
-			"org.matrix.msc3381.poll.end": {},
-			"body": "Ended",
-			"m.relates_to": {"rel_type": "m.reference", "event_id": start},
-		});
-		let end = event_id(&request(&router, Method::PUT, &path, HELPER_TOKEN, end).await);
-		assert_eq!(thread_counts(&router, &room, &root).await, (2, 0), "poll: sync");
-		let path = format!("/rooms/{room}/redact/{start}/redact-start");
-		let redaction =
-			event_id(&request(&router, Method::PUT, &path, HELPER_TOKEN, json!({})).await);
+		for case in ["redaction", "end"] {
+			let room = create_room(&router).await;
+			let path = format!("/rooms/{room}/join");
+			request(&router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
+			let txn = |name: &str| format!("{case}-{name}");
+			let older = send(&router, &room, HELPER_TOKEN, &txn("older"), text("Older")).await;
+			let root = send(&router, &room, HELPER_TOKEN, &txn("root"), text("Question")).await;
+			let kind = "org.matrix.msc3381.poll.start";
+			let path = format!("/rooms/{room}/send/{kind}/{}", txn("start"));
+			let start =
+				event_id(&request(&router, Method::PUT, &path, HELPER_TOKEN, poll(&root)).await);
+			let end = json!({
+				"org.matrix.msc3381.poll.end": {},
+				"body": "Ended",
+				"m.relates_to": {"rel_type": "m.reference", "event_id": start},
+			});
+			let kind = "org.matrix.msc3381.poll.end";
+			let path = format!("/rooms/{room}/send/{kind}/{}", txn("end"));
+			let end = event_id(&request(&router, Method::PUT, &path, HELPER_TOKEN, end).await);
+			let path = format!("/rooms/{room}/redact/{start}/{}", txn("redact"));
+			let redaction =
+				event_id(&request(&router, Method::PUT, &path, HELPER_TOKEN, json!({})).await);
+			assert_eq!(room_counts(&router, &room).await, (2, 0), "{case}: sync");
 
-		let flags = read_flags(&router).await;
-		assert_eq!(flag(&flags, &older), Some(false), "{flags:?}");
-		assert_eq!(flag(&flags, &root), Some(false), "{flags:?}");
-		assert_eq!(flag(&flags, &end), Some(false), "{flags:?}");
-		assert_eq!(room_counts(&router, &room).await, (2, 0), "sync");
-
-		receipt(&router, &room, "m.read", &older, json!({"thread_id": "main"})).await;
-		assert_eq!(room_counts(&router, &room).await, (1, 0), "main receipt: sync");
-
-		receipt(&router, &room, "m.read", &root, json!({})).await;
-		assert_eq!(room_counts(&router, &room).await, (0, 0), "unthreaded receipt: sync");
-		assert_eq!(thread_count(&router, &room, &root).await, 1, "unthreaded receipt: sync");
-		let flags = read_flags(&router).await;
-		assert_eq!(flag(&flags, &end), Some(false), "unthreaded receipt: {flags:?}");
-
-		receipt(&router, &room, "m.read", &redaction, json!({"thread_id": root})).await;
-		assert_eq!(thread_count(&router, &room, &root).await, 0, "thread receipt: sync");
-		let flags = read_flags(&router).await;
-		assert_eq!(flag(&flags, &end), Some(true), "thread receipt: {flags:?}");
+			let target = if case == "end" { &end } else { &redaction };
+			receipt(&router, &room, "m.read", target, json!({"thread_id": "main"})).await;
+			assert_eq!(room_counts(&router, &room).await, (0, 0), "{case}: main receipt");
+			let flags = read_flags(&router).await;
+			for event in [&older, &root, &end] {
+				assert_eq!(flag(&flags, event), Some(true), "{case}: {flags:?}");
+			}
+		}
 
 		Ok(())
 	})
@@ -609,8 +602,7 @@ fn finished(first: &OwnedEventId) -> Value {
 	})
 }
 
-/// An unstable poll start in the thread of `root`, which notifies by the
-/// default push rules, as its end does.
+/// An unstable poll start in the thread of `root`.
 fn poll(root: &OwnedEventId) -> Value {
 	json!({
 		"org.matrix.msc3381.poll.start": {

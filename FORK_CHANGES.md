@@ -1221,25 +1221,15 @@ relations counts finished stream edits like the replies they finish. The walk
 skips redacted events, as the recount does; a redacted reply names no thread
 and would otherwise count in the main timeline. An event redacted since the
 last recount still counts in `N` but not in the walk, so an earlier entry can
-show unread until the next receipt, as the count does. File:
-`src/api/client/push/notifications.rs`; test in
-`src/mindroom-tests/tests/notifications_thread_read.rs`.
-
-### An event related to a redacted thread event stays in that thread
-
-An event that relates to a thread event without a thread relation, such as a
-poll end or a reaction, belongs to that event's thread. Redaction strips the
-thread event's `m.relates_to`, so once it was redacted the related event fell
-into the main timeline while its push counts stayed in the thread. The next
-receipt's recount then counted it in the main timeline, `/notifications` took
-it for a main entry and showed the oldest counted main entry read, and a
-thread receipt on it, or on the redaction, was refused. The thread lookup now
-reads a redacted event's relation from its retained original
-(`save_unredacted_events`, kept for `redaction_retention_seconds`), so the
-counts, the recounts, `/notifications` and receipt checks keep the thread.
-Without a retained original the event falls into the main timeline as before.
-Upstream has the same gap. File: `src/service/rooms/threads/mod.rs`; test in
-`src/mindroom-tests/tests/notifications_thread_read.rs`.
+show unread until the next receipt, as the count does. An event related to a
+thread event by another relation, such as a poll end or a reaction, belongs to
+the main timeline once that thread event is redacted, because redaction strips
+its `m.relates_to`; MSC3771 clients such as matrix-js-sdk file it there too, and
+read it with `"main"` receipts. Its counts were made in the thread. Until a
+main or unthreaded receipt recounts the main timeline, the walk finds it among
+the main events while the main count does not hold it, so the oldest counted
+main entry can show read. File: `src/api/client/push/notifications.rs`; test
+in `src/mindroom-tests/tests/notifications_thread_read.rs`.
 
 ### The user directory leaves out deactivated accounts
 

@@ -133,8 +133,7 @@ impl Service {
 	/// links, bounded at `MAX_THREAD_HOPS`. Returns `None` for events
 	/// that belong to the main timeline. Redaction events carry no
 	/// `m.relates_to` of their own; their thread is resolved from the
-	/// redacted target event per MSC3771/MSC3773. A redacted event on the
-	/// walk is read from its retained original, see `relation_of`.
+	/// redacted target event per MSC3771/MSC3773.
 	pub async fn get_thread_id<E>(&self, event: &E) -> Option<OwnedEventId>
 	where
 		E: Event,
@@ -151,7 +150,15 @@ impl Service {
 				return Some(relates_to.event_id);
 			}
 
-			relates_to = self.relation_of(&relates_to.event_id).await?;
+			relates_to = self
+				.services
+				.timeline
+				.get_pdu(&relates_to.event_id)
+				.await
+				.ok()?
+				.get_content::<ExtractThreadRelation>()
+				.ok()?
+				.relates_to;
 		}
 
 		None
@@ -177,32 +184,12 @@ impl Service {
 
 		let target_id = event.redacts_id(&room_rules)?;
 
-		self.relation_of(&target_id).await
-	}
-
-	/// The relation of the stored event `event_id`. Redaction strips it, so a
-	/// redacted event's relation is read from its retained original: an event
-	/// related to a redacted thread event, or the redaction itself, stays in
-	/// the thread its counts were made in.
-	async fn relation_of(&self, event_id: &EventId) -> Option<ThreadRelation> {
-		let pdu = self
-			.services
+		self.services
 			.timeline
-			.get_pdu(event_id)
+			.get_pdu(&target_id)
 			.await
-			.ok()?;
-
-		let pdu = if pdu.is_redacted() {
-			self.services
-				.retention
-				.get_original_pdu(event_id)
-				.await
-				.ok()?
-		} else {
-			pdu
-		};
-
-		pdu.get_content::<ExtractThreadRelation>()
+			.ok()?
+			.get_content::<ExtractThreadRelation>()
 			.ok()
 			.map(|t| t.relates_to)
 	}
