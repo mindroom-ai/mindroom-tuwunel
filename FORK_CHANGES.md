@@ -1070,13 +1070,22 @@ notifying and `H` of their highlighting events in the same timeline follow it.
 One walk down the user's notification rows, to the oldest entry of a timeline
 with unread events, serves the whole page and stops once every such timeline
 has found them; rows of other rooms are skipped without loading their events.
-Counting rows rather than relations of the root counts finished stream edits
-like the replies they finish. The walk skips redacted events, as the recount
-does; a redacted reply names no thread and would otherwise count in the main
-timeline. An event redacted since the last recount still counts in `N` but not
-in the walk, so an earlier entry can show unread until the next receipt, as
-the count does. File: `src/api/client/push/notifications.rs`; test in
-`src/mindroom-tests/tests/notifications_thread_read.rs`.
+A notifying event that lands between the count reads and the walk can show the
+oldest unread entry of its timeline read until the next poll, for main entries
+as for thread entries. Counting notification rows rather than a root's
+relations counts finished stream edits like the replies they finish. The walk
+skips redacted events, as the recount does; a redacted reply names no thread
+and would otherwise count in the main timeline. An event redacted since the
+last recount still counts in `N` but not in the walk, so an earlier entry can
+show unread until the next receipt, as the count does. An event related to a
+thread event by another relation, such as a poll end or a reaction, belongs to
+the main timeline once that thread event is redacted, because redaction strips
+its `m.relates_to`; MSC3771 clients such as matrix-js-sdk file it there too, and
+read it with `"main"` receipts. Its counts were made in the thread. Until a
+main or unthreaded receipt recounts the main timeline, the walk finds it among
+the main events while the main count does not hold it, so the oldest counted
+main entry can show read. File: `src/api/client/push/notifications.rs`; test
+in `src/mindroom-tests/tests/notifications_thread_read.rs`.
 
 ### The user directory leaves out deactivated accounts
 
