@@ -1,3 +1,6 @@
+use std::collections::BTreeSet;
+
+use futures::StreamExt;
 use ruma::{
 	CanonicalJsonValue, OwnedUserId,
 	api::{
@@ -11,6 +14,7 @@ use tuwunel_core::{
 	utils::{
 		OptionExt,
 		future::{OptionFutureExt, TryExtExt},
+		stream::ReadyExt,
 	},
 };
 use tuwunel_service::{Services, uiaa::SESSION_ID_LENGTH};
@@ -54,16 +58,22 @@ where
 
 	// Determine the exact IdP to bind to the UIAA session.
 	//
-	// The correct binding comes from the device that made this request, not
-	// from a heuristic scan of all user sessions.  Rules:
+	// The best binding comes from the device that made this request.  Rules:
 	//
 	//  1. Preferred: the device is tagged with an idp_id from when it was created
 	//     via the OIDC token endpoint → use that idp_id directly. This is exact and
 	//     correct even on multi-provider servers.
 	//  2. Fallback: the device has no idp tag (pre-dates the idp_id field or was
-	//     created through a legacy path) but origin=="sso" and only one provider is
-	//     configured → routing is still unambiguous.
-	//  3. Otherwise: cannot determine provider → do NOT advertise m.login.sso.
+	//     created through a legacy path such as an `m.login.token` sign-in after
+	//     SSO) but origin=="sso" and the account is linked to a configured
+	//     provider → one it is linked to (the default provider when it is one of
+	//     them). The SSO callback only completes the stage for an identity that
+	//     belongs to the account, so any linked provider proves the same thing.
+	//  3. Fallback: no linked provider either, origin=="sso" and only one provider
+	//     is configured → routing is still unambiguous.
+	//  4. Otherwise: cannot determine provider → do NOT advertise m.login.sso.
+	//     An SSO account without a password then has no flow at all, and cannot
+	//     replace its cross-signing keys or do anything else behind UIAA.
 	let sso_flow = [AuthType::Sso];
 	let device_bound_idp: Option<String> = if sender_uses_sso {
 		sender_user
@@ -85,9 +95,30 @@ where
 	} else {
 		None
 	};
+	let linked_idps: BTreeSet<String> = match sender_user {
+		| Some(sender_user) if sender_uses_sso && device_bound_idp.is_none() =>
+			services
+				.oauth
+				.sessions
+				.get_by_user(sender_user)
+				.ready_filter_map(|session| session.ok()?.idp_id)
+				.ready_filter_map(|idp_id| {
+					let config = services
+						.oauth
+						.providers
+						.find_config(&idp_id)
+						.ok()?;
+
+					Some(config.id().to_owned())
+				})
+				.collect()
+				.await,
+		| _ => BTreeSet::new(),
+	};
 	let bound_idp = select_bound_sso_idp(
 		sender_uses_sso,
 		device_bound_idp,
+		&linked_idps,
 		services.config.identity_provider.len(),
 		services.oauth.providers.get_default_id(),
 	);
@@ -192,6 +223,7 @@ where
 fn select_bound_sso_idp(
 	sender_uses_sso: bool,
 	device_idp: Option<String>,
+	linked_idps: &BTreeSet<String>,
 	identity_provider_count: usize,
 	default_idp: Option<String>,
 ) -> Option<String> {
@@ -201,6 +233,13 @@ fn select_bound_sso_idp(
 
 	device_idp
 		.filter(|idp| !idp.is_empty())
+		.or_else(|| {
+			default_idp
+				.as_ref()
+				.filter(|idp| linked_idps.contains(*idp))
+				.or_else(|| linked_idps.first())
+				.cloned()
+		})
 		.or_else(|| {
 			(identity_provider_count == 1)
 				.then_some(default_idp)
@@ -223,32 +262,72 @@ mod tests {
 
 	use super::*;
 
+	fn linked(idps: &[&str]) -> BTreeSet<String> {
+		idps.iter()
+			.copied()
+			.map(ToOwned::to_owned)
+			.collect()
+	}
+
 	#[test]
 	fn sso_idp_binding_prefers_request_device_idp() {
-		let selected =
-			select_bound_sso_idp(true, Some("apple".to_owned()), 1, Some("google".to_owned()));
+		let selected = select_bound_sso_idp(
+			true,
+			Some("apple".to_owned()),
+			&linked(&["google"]),
+			1,
+			Some("google".to_owned()),
+		);
 
 		assert_eq!(selected.as_deref(), Some("apple"));
 	}
 
 	#[test]
 	fn sso_idp_binding_falls_back_to_single_default_provider() {
-		let selected = select_bound_sso_idp(true, None, 1, Some("default".to_owned()));
+		let selected =
+			select_bound_sso_idp(true, None, &linked(&[]), 1, Some("default".to_owned()));
 
 		assert_eq!(selected.as_deref(), Some("default"));
 	}
 
 	#[test]
 	fn sso_idp_binding_rejects_ambiguous_multi_provider_fallback() {
-		let selected = select_bound_sso_idp(true, None, 2, Some("default".to_owned()));
+		let selected =
+			select_bound_sso_idp(true, None, &linked(&[]), 2, Some("default".to_owned()));
 
 		assert_eq!(selected, None);
 	}
 
 	#[test]
-	fn sso_idp_binding_is_not_available_for_password_origin_users() {
+	fn sso_idp_binding_uses_the_linked_provider_of_an_untagged_device() {
 		let selected =
-			select_bound_sso_idp(false, Some("apple".to_owned()), 1, Some("default".to_owned()));
+			select_bound_sso_idp(true, None, &linked(&["github"]), 3, Some("google".to_owned()));
+
+		assert_eq!(selected.as_deref(), Some("github"));
+	}
+
+	#[test]
+	fn sso_idp_binding_prefers_the_default_among_linked_providers() {
+		let selected = select_bound_sso_idp(
+			true,
+			None,
+			&linked(&["apple", "github", "google"]),
+			3,
+			Some("google".to_owned()),
+		);
+
+		assert_eq!(selected.as_deref(), Some("google"));
+	}
+
+	#[test]
+	fn sso_idp_binding_is_not_available_for_password_origin_users() {
+		let selected = select_bound_sso_idp(
+			false,
+			Some("apple".to_owned()),
+			&linked(&["apple"]),
+			1,
+			Some("default".to_owned()),
+		);
 
 		assert_eq!(selected, None);
 	}
