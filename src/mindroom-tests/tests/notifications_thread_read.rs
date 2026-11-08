@@ -352,6 +352,48 @@ fn older_receipt_leaves_newer_main_entries_unread() -> Result {
 	})
 }
 
+/// A main-timeline message that only highlights stays unread after a receipt
+/// on an older message while the room's highlight count holds it, also once a
+/// later message notifies.
+#[test]
+fn highlight_only_main_entry_stays_unread() -> Result {
+	let harness = Harness::new("mindroom_notifications_main_highlight", [QUIET.to_owned()])?;
+
+	harness.with_services(async |services| {
+		let (router, _guard) = serve(services).await?;
+
+		let rule = json!({
+			"conditions": [{"kind": "event_match", "key": "content.body", "pattern": "quiet"}],
+			"actions": [{"set_tweak": "highlight"}],
+		});
+		// Loading the rules stores the defaults the account was created without.
+		request(&router, Method::GET, "/pushrules/global/", READER_TOKEN, Value::Null).await;
+		let path = "/pushrules/global/override/quiet";
+		request(&router, Method::PUT, path, READER_TOKEN, rule).await;
+
+		let room = create_room(&router).await;
+		let path = format!("/rooms/{room}/join");
+		request(&router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
+		let first = send(&router, &room, HELPER_TOKEN, "first", text("First")).await;
+		let quiet = send(&router, &room, HELPER_TOKEN, "quiet", text("quiet")).await;
+		receipt(&router, &room, "m.read", &first, json!({})).await;
+
+		let flags = read_flags(&router).await;
+		assert_eq!(flag(&flags, &first), Some(true), "{flags:?}");
+		assert_eq!(flag(&flags, &quiet), Some(false), "{flags:?}");
+		assert_eq!(room_counts(&router, &room).await, (0, 1), "sync");
+
+		let later = send(&router, &room, HELPER_TOKEN, "later", text("Later")).await;
+		let flags = read_flags(&router).await;
+		assert_eq!(flag(&flags, &first), Some(true), "later: {flags:?}");
+		assert_eq!(flag(&flags, &quiet), Some(false), "later: {flags:?}");
+		assert_eq!(flag(&flags, &later), Some(false), "later: {flags:?}");
+		assert_eq!(room_counts(&router, &room).await, (1, 1), "later: sync");
+
+		Ok(())
+	})
+}
+
 /// A redacted thread reply no longer names its thread. Taken for a
 /// main-timeline event, it would stand in for one the room's count holds and
 /// show that one read.
