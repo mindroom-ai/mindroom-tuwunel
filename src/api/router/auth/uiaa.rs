@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use futures::StreamExt;
 use ruma::{
-	CanonicalJsonValue, OwnedUserId,
+	CanonicalJsonValue, OwnedUserId, UserId,
 	api::{
 		IncomingRequest,
 		client::uiaa::{AuthData, AuthFlow, AuthType, Jwt, UiaaInfo},
@@ -95,24 +95,9 @@ where
 	} else {
 		None
 	};
-	let linked_idps: BTreeSet<String> = match sender_user {
+	let linked_idps = match sender_user {
 		| Some(sender_user) if sender_uses_sso && device_bound_idp.is_none() =>
-			services
-				.oauth
-				.sessions
-				.get_by_user(sender_user)
-				.ready_filter_map(|session| session.ok()?.idp_id)
-				.ready_filter_map(|idp_id| {
-					let config = services
-						.oauth
-						.providers
-						.find_config(&idp_id)
-						.ok()?;
-
-					Some(config.id().to_owned())
-				})
-				.collect()
-				.await,
+			linked_sso_idps(services, sender_user).await,
 		| _ => BTreeSet::new(),
 	};
 	let bound_idp = select_bound_sso_idp(
@@ -218,6 +203,34 @@ where
 			| _ => Err!(Request(NotJson("JSON body is not valid"))),
 		},
 	}
+}
+
+/// The configured providers `user_id` has a link to, as configured ids. Only
+/// sessions whose sign-in finished (`user_info` is stored on completion) are
+/// links: a chained sign-in indexes the next provider's session under the
+/// account before that provider has authenticated anyone.
+async fn linked_sso_idps(services: &Services, user_id: &UserId) -> BTreeSet<String> {
+	services
+		.oauth
+		.sessions
+		.get_by_user(user_id)
+		.ready_filter_map(|session| {
+			session
+				.ok()
+				.filter(|session| session.user_info.is_some())?
+				.idp_id
+		})
+		.ready_filter_map(|idp_id| {
+			let config = services
+				.oauth
+				.providers
+				.find_config(&idp_id)
+				.ok()?;
+
+			Some(config.id().to_owned())
+		})
+		.collect()
+		.await
 }
 
 fn select_bound_sso_idp(

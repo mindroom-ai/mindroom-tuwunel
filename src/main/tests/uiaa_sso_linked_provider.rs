@@ -7,7 +7,11 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{Err, Result, ruma::UserId};
-use tuwunel_service::{Services, oauth::Session, users::PASSWORD_SENTINEL};
+use tuwunel_service::{
+	Services,
+	oauth::{Session, UserInfo},
+	users::PASSWORD_SENTINEL,
+};
 
 use self::client::wait_until_ready;
 
@@ -17,14 +21,18 @@ use self::client::wait_until_ready;
 )]
 mod client;
 
+// The other provider's id sorts first, so preferring the default is not the
+// set's own order.
 const DEFAULT_IDP: &str = "uiaa-default-idp";
-const OTHER_IDP: &str = "uiaa-other-idp";
+const OTHER_IDP: &str = "uiaa-another-idp";
 
 /// With several providers configured, a device that signed in through the
 /// legacy SSO redirect and `m.login.token` carries no provider tag. An SSO
 /// account without a password must still get `m.login.sso`, bound to the
 /// provider the account is linked to; otherwise it is offered no flow and can
-/// never replace its cross-signing keys.
+/// never replace its cross-signing keys. A sign-in that never finished (a
+/// chained provider's session is stored under the account before it
+/// authenticates) is not a link.
 #[test]
 fn uiaa_sso_binds_the_linked_provider_of_an_untagged_device() -> Result {
 	let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -89,10 +97,12 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	};
 	let no_flows = (json!([]), json!({}));
 
-	for (localpart, linked, (expected_flows, expected_params)) in [
-		("linked-other", &[OTHER_IDP][..], sso(OTHER_IDP)),
-		("linked-both", &[OTHER_IDP, DEFAULT_IDP][..], sso(DEFAULT_IDP)),
-		("linked-gone", &["uiaa-removed-idp"][..], no_flows.clone()),
+	// Each session: its provider and whether its sign-in finished.
+	for (localpart, sessions, (expected_flows, expected_params)) in [
+		("linked-other", &[(OTHER_IDP, true)][..], sso(OTHER_IDP)),
+		("linked-both", &[(OTHER_IDP, true), (DEFAULT_IDP, true)][..], sso(DEFAULT_IDP)),
+		("linked-pending", &[(OTHER_IDP, true), (DEFAULT_IDP, false)][..], sso(OTHER_IDP)),
+		("linked-gone", &[("uiaa-removed-idp", true)][..], no_flows.clone()),
 		("unlinked", &[][..], no_flows.clone()),
 	] {
 		let user_id = UserId::parse_with_server_name(localpart, services.globals.server_name())?;
@@ -101,11 +111,16 @@ async fn exercise(services: &Services, base: &str) -> Result {
 			.create(&user_id, Some(PASSWORD_SENTINEL), Some("sso"))
 			.await?;
 
-		for (index, idp_id) in linked.iter().enumerate() {
+		for (index, &(idp_id, finished)) in sessions.iter().enumerate() {
+			let user_info = UserInfo {
+				sub: format!("uiaa-linked-sub-{localpart}-{index}"),
+				..Default::default()
+			};
 			let session = Session {
-				idp_id: Some((*idp_id).to_owned()),
+				idp_id: Some(idp_id.to_owned()),
 				sess_id: Some(format!("uiaa-linked-session-{localpart}-{index}")),
 				user_id: Some(user_id.clone()),
+				user_info: finished.then_some(user_info),
 				..Default::default()
 			};
 

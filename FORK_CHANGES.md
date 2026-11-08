@@ -1384,8 +1384,12 @@ Behavior:
   never to a passwordless SSO account. This fork hardens the rest of the
   advertisement: `m.login.sso` only for SSO-origin accounts (never for a
   password account, even on a device an identity provider issued) and only
-  when the exact IdP is unambiguous (the device's own IdP or the single
-  configured provider), JWT UIAA rejected for SSO-origin users and no longer
+  bound to an IdP that can complete it: the device's own IdP; else, for a
+  device without one (a legacy SSO redirect and `m.login.token` sign-in),
+  a configured provider the account has a finished sign-in link to, the
+  default provider when it is one of them; else the single configured
+  provider. Without any, a passwordless SSO account is offered no flow at
+  all. JWT UIAA rejected for SSO-origin users and no longer
   advertised (its fallback/web page is not implemented), and legacy SSO-origin
   account metadata repaired on the fly before the flows are chosen.
 - Reactivates a deactivated local SSO account on re-login, but only when the
@@ -1568,6 +1572,9 @@ Stream classification also has unit tests in `src/service/pusher/tests.rs`.
 The v1.9.3 rebase adds pins for its semantic overlaps:
 `uiaa_sso_policy.rs` (the advertised UIAA flows per account origin and
 credential, the legacy-origin repair, and the JWT refusal for SSO accounts),
+`uiaa_sso_linked_provider.rs` (the IdP a device without its own is bound to
+on a multi-provider server: a linked provider, the default among several,
+never an unfinished sign-in or a provider no longer configured),
 `sync_edit_compaction.rs` (legacy and sliding `/sync` compaction, initial and
 incremental, keeping a state event that claims a replacement), a
 `loginToken` exchange after SSO self-reactivation in
