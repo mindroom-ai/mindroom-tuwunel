@@ -7,7 +7,11 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{Err, Result, ruma::UserId};
-use tuwunel_service::{Services, oauth::Session, users::PASSWORD_SENTINEL};
+use tuwunel_service::{
+	Services,
+	oauth::{Session, UserInfo},
+	users::PASSWORD_SENTINEL,
+};
 
 use self::{client::wait_until_ready, fixture::boot, uiaa_signing::exercise as exercise_signing};
 
@@ -326,10 +330,16 @@ async fn exercise_linked(services: &Services, base: &str) -> Result {
 			.await?;
 
 		for (index, &idp_id) in linked.iter().enumerate() {
+			// MindRoom: only a finished sign-in, which stores `user_info`, is a link.
+			let user_info = UserInfo {
+				sub: format!("{localpart}-{index}"),
+				..Default::default()
+			};
 			let session = Session {
 				idp_id: Some(idp_id.to_owned()),
 				sess_id: Some(format!("{localpart}-{index}")),
 				user_id: Some(user_id.clone()),
+				user_info: Some(user_info),
 				..Default::default()
 			};
 
