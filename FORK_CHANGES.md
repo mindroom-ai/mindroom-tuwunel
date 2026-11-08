@@ -338,20 +338,21 @@ The recount scans without the insertion lock, then checks
 notification/highlight counts and read stamps under that lock before applying
 a result. The room stamp is read once per phase, and a read stamp takes its
 sequence number only for its own write, after the counts it covers, so a
-receipt's recount holds none: syncs wait on it only while a send holding its
-own sequence number waits for the lock. Own sends and joins recount while
-they hold their event's. A concurrent insertion or read keeps that context's
-counts unchanged. Accepted trade-off: when two receipts of one user race, the
-later one can be dropped (a main receipt also invalidates a concurrent thread
-receipt), and because it was stored, the count stays until the next event in
-that context. Notification actions and both count increments share the lock.
-No column or index is added. Per-thread suppressed pushes are a separate draft
-change. Inbox read flags go by the sync counts; see "`/notifications` reads
-thread replies by their thread's sync count". Tests cover old receipts, both
-marker fields (also with more than 4,097 events between them), cross-room
-traffic, overflow, receipts on the newest event behind 4,097 later events,
-read threads leaving no rows or stamps, syncs racing an unthreaded receipt
-over 4,097 thread rows, and a concurrent send behind 100,000 sibling rows.
+receipt's recount holds no sequence number: syncs wait on it only while a
+send holding its own sequence number waits for the lock. Own sends and joins
+recount while holding their event's sequence number. A concurrent insertion
+or read keeps that context's counts unchanged. Accepted trade-off: when two
+receipts of one user race, the later one can be dropped (a main receipt also
+invalidates a concurrent thread receipt), and because it was stored, the count
+stays until the next event in that context. Notification actions and both
+count increments share the lock. No column or index is added. Per-thread
+suppressed pushes are a separate draft change. Inbox read flags go by the sync
+counts; see "`/notifications` reads thread replies by their thread's sync
+count". Tests cover old receipts, both marker fields (also with more than
+4,097 events between them), cross-room traffic, overflow, receipts on the
+newest event behind 4,097 later events, read threads leaving no rows or
+stamps, syncs racing an unthreaded receipt over 4,097 thread rows, and a
+concurrent send behind 100,000 sibling rows.
 
 ### A withdrawn knock does not move a former member's departure
 
@@ -1234,14 +1235,16 @@ Files: `src/api/client/user_directory.rs`, `src/service/users/sso.rs`
 with helpers in `src/mindroom-tests/tests/support/directory.rs`.
 
 Behavior:
-- A local account is left out of every search, whatever
+- An account is left out of every search, whatever
   `show_all_local_users_in_user_directory` and
   `show_appservice_users_in_user_directory` say, when its stored password is
   empty and a deactivation is recorded for it (`deactivation_recorded`, the
   same test SSO assignment uses: a recorded reason, or a mark in the column a
   migrated database left; anything unreadable counts). Every deactivation
   this server performs goes through `deactivate_account`, which records the
-  reason, and every reactivation replaces the empty password.
+  reason, and every reactivation replaces the empty password. Only local
+  accounts get a reason; a mark hides an account whatever its server (the
+  origin server filled the column with its own accounts).
 - An empty password alone does not hide an account: remote users, appservice
   senders, and users created without a password store one too, and keep
   their earlier visibility.

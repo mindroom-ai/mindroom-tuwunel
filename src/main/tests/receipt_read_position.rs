@@ -241,10 +241,12 @@ fn read_threads_leave_no_rows() -> Result {
 	})
 }
 
-/// A sync sends a zero count only in a round whose window holds the read
-/// stamp, so a receipt publishes its stamp after every count it covers. Syncs
-/// racing an unthreaded receipt over 4,097 unread threads in a quiet room,
-/// where no later round lists the room again, must end on the server's counts.
+/// In a quiet room with a main read stamp (here from the reader's join), a
+/// round lists the room for its counts only when its window holds a read
+/// stamp, so the round holding a receipt's stamp is the last to list it. A
+/// receipt therefore takes its stamp's sequence number after every count it
+/// covers. Syncs racing an unthreaded receipt over 4,097 unread threads must
+/// end on the server's counts.
 #[test]
 fn syncs_racing_a_receipt_end_at_its_counts() -> Result {
 	boot("syncs-racing-receipt", ["log_enable=false"], async |services, base| {

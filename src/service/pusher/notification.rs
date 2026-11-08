@@ -130,9 +130,10 @@ pub async fn reset_notification_counts_for_thread(
 				.raw_put(&key, left.1);
 		}
 		// A stamp takes its sequence number only for its own write, after the
-		// counts it covers, so a receipt's recount holds none: syncs wait on it
-		// only while a send holding its own sequence number waits for this
-		// lock. Own sends and joins recount while they hold their event's.
+		// counts it covers, so a receipt's recount holds no sequence number:
+		// syncs wait on it only while a send holding its own sequence number
+		// waits for this lock. Own sends and joins recount while holding their
+		// event's sequence number.
 		if let ReceiptThread::Thread(root) = thread {
 			self.db
 				.roomuserid_lastnotificationread
