@@ -208,8 +208,19 @@ where
 /// The configured providers `user_id` has a link to, as configured ids. Only
 /// sessions whose sign-in finished (`user_info` is stored on completion) are
 /// links: a chained sign-in indexes the next provider's session under the
-/// account before that provider has authenticated anyone.
+/// account before that provider has authenticated anyone. A finished session
+/// holds the exact id (the callback refuses any other), so the id must equal a
+/// configured one; a retired id that happens to be another provider's brand
+/// does not count.
 async fn linked_sso_idps(services: &Services, user_id: &UserId) -> BTreeSet<String> {
+	let configured = |idp_id: &String| {
+		services
+			.config
+			.identity_provider
+			.values()
+			.any(|config| config.id() == idp_id)
+	};
+
 	services
 		.oauth
 		.sessions
@@ -220,15 +231,7 @@ async fn linked_sso_idps(services: &Services, user_id: &UserId) -> BTreeSet<Stri
 				.filter(|session| session.user_info.is_some())?
 				.idp_id
 		})
-		.ready_filter_map(|idp_id| {
-			let config = services
-				.oauth
-				.providers
-				.find_config(&idp_id)
-				.ok()?;
-
-			Some(config.id().to_owned())
-		})
+		.ready_filter(configured)
 		.collect()
 		.await
 }

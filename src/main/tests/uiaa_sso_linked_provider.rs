@@ -103,6 +103,8 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		("linked-both", &[(OTHER_IDP, true), (DEFAULT_IDP, true)][..], sso(DEFAULT_IDP)),
 		("linked-pending", &[(OTHER_IDP, true), (DEFAULT_IDP, false)][..], sso(OTHER_IDP)),
 		("linked-gone", &[("uiaa-removed-idp", true)][..], no_flows.clone()),
+		// A retired provider whose id is the default provider's brand.
+		("linked-brand", &[(OTHER_IDP, true), ("first", true)][..], sso(OTHER_IDP)),
 		("unlinked", &[][..], no_flows.clone()),
 	] {
 		let user_id = UserId::parse_with_server_name(localpart, services.globals.server_name())?;
