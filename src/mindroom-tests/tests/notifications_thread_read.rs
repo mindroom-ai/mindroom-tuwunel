@@ -399,7 +399,8 @@ fn highlight_only_main_entry_stays_unread() -> Result {
 
 /// A redacted thread reply no longer names its thread. Taken for a
 /// main-timeline event, it would stand in for one the room's count holds and
-/// show that one read.
+/// show that one read. A streamed reply notifies by its terminal edit, which is
+/// redacted with the reply.
 #[test]
 fn redacted_reply_leaves_main_entries_unread() -> Result {
 	let harness = Harness::new("mindroom_notifications_redacted_reply", [QUIET.to_owned()])?;
@@ -413,13 +414,66 @@ fn redacted_reply_leaves_main_entries_unread() -> Result {
 		let older = send(&router, &room, HELPER_TOKEN, "older", text("Older")).await;
 		let root = send(&router, &room, HELPER_TOKEN, "root", text("Question")).await;
 		let reply = send(&router, &room, HELPER_TOKEN, "reply", thread_reply(&root)).await;
-		let path = format!("/rooms/{room}/redact/{reply}/redact-reply");
-		request(&router, Method::PUT, &path, HELPER_TOKEN, json!({})).await;
+		let first = send(&router, &room, HELPER_TOKEN, "first", streaming(&root)).await;
+		send(&router, &room, HELPER_TOKEN, "done", finished(&first)).await;
+		for (event, txn) in [(&reply, "redact-reply"), (&first, "redact-first")] {
+			let path = format!("/rooms/{room}/redact/{event}/{txn}");
+			request(&router, Method::PUT, &path, HELPER_TOKEN, json!({})).await;
+		}
 
 		let flags = read_flags(&router).await;
 		assert_eq!(flag(&flags, &older), Some(false), "{flags:?}");
 		assert_eq!(flag(&flags, &root), Some(false), "{flags:?}");
 		assert_eq!(room_counts(&router, &room).await, (2, 0), "sync");
+
+		Ok(())
+	})
+}
+
+/// Redaction strips a thread event's `m.relates_to`, so its redaction and an
+/// event related to it, such as a poll end, belong to the main timeline
+/// afterwards, where MSC3771 clients such as matrix-js-sdk file them. A `"main"`
+/// receipt on either is accepted and reads the main timeline, in the sync count
+/// and in the Inbox.
+#[test]
+fn main_receipt_after_thread_redaction_reads_main() -> Result {
+	let harness = Harness::new("mindroom_notifications_redaction_main", [QUIET.to_owned()])?;
+
+	harness.with_services(async |services| {
+		let (router, _guard) = serve(services).await?;
+
+		for case in ["redaction", "end"] {
+			let room = create_room(&router).await;
+			let path = format!("/rooms/{room}/join");
+			request(&router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
+			let txn = |name: &str| format!("{case}-{name}");
+			let older = send(&router, &room, HELPER_TOKEN, &txn("older"), text("Older")).await;
+			let root = send(&router, &room, HELPER_TOKEN, &txn("root"), text("Question")).await;
+			let kind = "org.matrix.msc3381.poll.start";
+			let path = format!("/rooms/{room}/send/{kind}/{}", txn("start"));
+			let start =
+				event_id(&request(&router, Method::PUT, &path, HELPER_TOKEN, poll(&root)).await);
+			let end = json!({
+				"org.matrix.msc3381.poll.end": {},
+				"body": "Ended",
+				"m.relates_to": {"rel_type": "m.reference", "event_id": start},
+			});
+			let kind = "org.matrix.msc3381.poll.end";
+			let path = format!("/rooms/{room}/send/{kind}/{}", txn("end"));
+			let end = event_id(&request(&router, Method::PUT, &path, HELPER_TOKEN, end).await);
+			let path = format!("/rooms/{room}/redact/{start}/{}", txn("redact"));
+			let redaction =
+				event_id(&request(&router, Method::PUT, &path, HELPER_TOKEN, json!({})).await);
+			assert_eq!(room_counts(&router, &room).await, (2, 0), "{case}: sync");
+
+			let target = if case == "end" { &end } else { &redaction };
+			receipt(&router, &room, "m.read", target, json!({"thread_id": "main"})).await;
+			assert_eq!(room_counts(&router, &room).await, (0, 0), "{case}: main receipt");
+			let flags = read_flags(&router).await;
+			for event in [&older, &root, &end] {
+				assert_eq!(flag(&flags, event), Some(true), "{case}: {flags:?}");
+			}
+		}
 
 		Ok(())
 	})
@@ -548,6 +602,20 @@ fn finished(first: &OwnedEventId) -> Value {
 	})
 }
 
+/// An unstable poll start in the thread of `root`.
+fn poll(root: &OwnedEventId) -> Value {
+	json!({
+		"org.matrix.msc3381.poll.start": {
+			"question": {"body": "Lunch?"},
+			"kind": "org.matrix.msc3381.poll.disclosed",
+			"max_selections": 1,
+			"answers": [{"id": "yes", "body": "Yes"}, {"id": "no", "body": "No"}],
+		},
+		"body": "Lunch?",
+		"m.relates_to": {"rel_type": "m.thread", "event_id": root},
+	})
+}
+
 fn thread_reply(root: &OwnedEventId) -> Value {
 	json!({
 		"msgtype": "m.text",
@@ -580,8 +648,11 @@ async fn send(
 	content: Value,
 ) -> OwnedEventId {
 	let path = format!("/rooms/{room}/send/m.room.message/{txn}");
-	let response = request(router, Method::PUT, &path, token, content).await;
 
+	event_id(&request(router, Method::PUT, &path, token, content).await)
+}
+
+fn event_id(response: &Value) -> OwnedEventId {
 	response["event_id"]
 		.as_str()
 		.expect("sent event id")
