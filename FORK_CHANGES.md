@@ -298,18 +298,23 @@ user's thread read stamps in the room.
 The recount scans without the insertion lock, then checks
 notification/highlight counts and read stamps under that lock before applying
 a result. The room stamp is read once per phase, and a read stamp takes its
-sequence number only for its own write, so syncs never wait on a recount. A
-concurrent insertion or read keeps that context's counts unchanged. Accepted
-trade-off: when two receipts of one user race, the later one can be dropped (a
-main receipt also invalidates a concurrent thread receipt), and because it was
-stored, the count stays until the next event in that context. Notification
-actions and both count increments share the lock, and so does upstream's
-removal of a redacted event from both counts (`0177e2de8`). No column or index
-is added. Per-thread suppressed pushes are a separate draft change. Inbox read
-flags go by the sync counts; see "`/notifications` reads thread replies by
-their thread's sync count". Tests cover old receipts, both marker fields,
-cross-room traffic, overflow, receipts on the newest event behind 4,097 later
-events, read threads leaving no rows or stamps, and a concurrent send behind
+sequence number only for its own write, after the counts it covers, so a
+receipt's recount holds none: syncs wait on it only while a send, or a
+redaction settling the counts of the event it redacts, holds its own sequence
+number and waits for the lock. Own sends and joins recount while they hold
+their event's. A concurrent insertion or read keeps that context's counts
+unchanged. Accepted trade-off: when two receipts of one user race, the later
+one can be dropped (a main receipt also invalidates a concurrent thread
+receipt), and because it was stored, the count stays until the next event in
+that context. Notification actions and both count increments share the lock,
+and so does upstream's removal of a redacted event from both counts
+(`0177e2de8`). No column or index is added. Per-thread suppressed pushes are a
+separate draft change. Inbox read flags go by the sync counts; see
+"`/notifications` reads thread replies by their thread's sync count". Tests
+cover old receipts, both marker fields (also with more than 4,097 events
+between them), cross-room traffic, overflow, receipts on the newest event
+behind 4,097 later events, read threads leaving no rows or stamps, syncs racing
+an unthreaded receipt over 4,097 thread rows, and a concurrent send behind
 100,000 sibling rows.
 
 ### A withdrawn knock does not move a former member's departure
@@ -1079,7 +1084,8 @@ room membership. Synapse removes an account from its directory when it is
 deactivated; upstream Tuwunel (checked on `main`, `d5151f783`) has no such
 filter.
 
-Files: `src/api/client/user_directory.rs`; tests in
+Files: `src/api/client/user_directory.rs`, `src/service/users/sso.rs`
+(`deactivation_recorded`, shared with SSO assignment); tests in
 `src/mindroom-tests/tests/user_directory_deactivated.rs` (option on) and
 `src/mindroom-tests/tests/user_directory_deactivated_rooms.rs` (option off),
 with helpers in `src/mindroom-tests/tests/support/directory.rs`.
@@ -1099,9 +1105,9 @@ Behavior:
 - Accounts deactivated with neither a reason nor a mark stay listed: those
   deactivated before the fork started recording reasons (release
   `v1.5.0-mindroom.16`, 2026-03-04), and deactivations imported from Conduit
-  databases. Running
-  `!admin users deactivate --no-leave-rooms <user>` again on such an account
-  records a reason and hides it; SSO self-reactivation stays refused.
+  databases. Running `!admin users deactivate --no-leave-rooms <user>` again
+  on such an account records a reason and hides it; SSO self-reactivation
+  stays refused.
 - The appservice filtering and the public-room and shared-room rules are
   unchanged.
 
@@ -1525,9 +1531,8 @@ an array), from any sender, as MindRoom and its clients read titles: agents
 retitle threads they never replied in, and any member can rename a thread.
 Every other direct thread event is a conversational reply, including an
 `m.text` with a marker and a notice whose marker is `false`, `0`, `""` or
-`null`.
-A marker inside an edit's `m.new_content` never makes a title: clients read
-the title only from `io.mindroom.title`.
+`null`. A marker inside an edit's `m.new_content` never makes a title:
+clients read the title only from `io.mindroom.title`.
 
 Reads skip redacted, ignored-user, forbidden-server and erased events and
 enforce the requester's history visibility for each candidate and each edit.
