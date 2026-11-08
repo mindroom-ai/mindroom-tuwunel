@@ -628,7 +628,8 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 		while let Some((count, mut child)) = replies.next().await {
 			let title = child.get_content::<Value>().is_ok_and(|content| {
 				let marker = &content["io.mindroom.thread_summary"];
-				// Truthy in JavaScript, as both clients test the marker.
+				// Truthy in JavaScript, as both clients test the marker. Events
+				// hold no floats (canonical JSON), so 0 is the only zero.
 				content["msgtype"] == "m.notice"
 					&& !(marker.is_null() || *marker == false || *marker == 0 || *marker == "")
 			});
