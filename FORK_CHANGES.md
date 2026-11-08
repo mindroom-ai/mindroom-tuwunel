@@ -310,12 +310,12 @@ the next event in that context. Notification actions and both count
 increments share the lock, and so does upstream's removal of a redacted event
 from both counts (`0177e2de8`). No column or index is added. Per-thread
 suppressed pushes are a separate draft change. Inbox read flags go by the sync
-counts; see "`/notifications` reads thread replies by their thread's sync
-count". Tests cover old receipts, both marker fields (also with more than
-4,097 events between them), cross-room traffic, overflow, receipts on the
-newest event behind 4,097 later events, read threads leaving no rows or
-stamps, syncs racing an unthreaded receipt over 4,097 thread rows, and a
-concurrent send behind 100,000 sibling rows.
+counts; see "`/notifications` reads entries by their timeline's sync count".
+Tests cover old receipts, both marker fields (also with more than 4,097 events
+between them), cross-room traffic, overflow, receipts on the newest event
+behind 4,097 later events, read threads leaving no rows or stamps, syncs
+racing an unthreaded receipt over 4,097 thread rows, and a concurrent send
+behind 100,000 sibling rows.
 
 ### A withdrawn knock does not move a former member's departure
 
@@ -1055,24 +1055,27 @@ gives `next_token` only when that notification exists. Upstream has the same
 bug. File: `src/api/client/push/notifications.rs`; test in
 `src/main/tests/notifications_next_token.rs`.
 
-### `/notifications` reads thread replies by their thread's sync count
+### `/notifications` reads entries by their timeline's sync count
 
 `/notifications` marked an entry read once the room's read watermark passed
 it. A `"main"` receipt and the user's own main-timeline event move that
 watermark too, so they marked every thread reply in the room read while the
-sync thread counts still had it unread. A main-timeline entry still follows
-the room watermark. A thread entry now follows its thread's sync counts, `N`
-notifications and `H` highlights, which always hold the user's newest such
-events in the thread: the entry is read once `N` of the user's notifying and
-`H` of their highlighting events in the same thread follow it. One walk down
-the user's notification rows, to the oldest entry of a thread with unread
-events, serves the whole page and stops once every such thread has found
-them; rows of other rooms are skipped without loading their events. Counting
-rows rather than relations of the root
-counts finished stream edits like the replies they finish. A reply redacted
-since the last recount still counts in `N` but not in the walk, so an earlier
-reply can show unread until the next receipt, as the count does. File:
-`src/api/client/push/notifications.rs`; test in
+sync thread counts still had it unread. A receipt also reads only up to the
+event it names, while the watermark moves to its arrival, so after an older
+receipt the Inbox showed main-timeline entries read that the room's sync count
+still held. An entry now follows its timeline's sync counts, its thread's or
+its room's main ones, `N` notifications and `H` highlights, which always hold
+the user's newest such events there: the entry is read once `N` of the user's
+notifying and `H` of their highlighting events in the same timeline follow it.
+One walk down the user's notification rows, to the oldest entry of a timeline
+with unread events, serves the whole page and stops once every such timeline
+has found them; rows of other rooms are skipped without loading their events.
+Counting rows rather than relations of the root counts finished stream edits
+like the replies they finish. The walk skips redacted events, as the recount
+does; a redacted reply names no thread and would otherwise count in the main
+timeline. An event redacted since the last recount still counts in `N` but not
+in the walk, so an earlier entry can show unread until the next receipt, as
+the count does. File: `src/api/client/push/notifications.rs`; test in
 `src/mindroom-tests/tests/notifications_thread_read.rs`.
 
 ### The user directory leaves out deactivated accounts

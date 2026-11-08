@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use axum::extract::State;
-use futures::{StreamExt, pin_mut};
+use futures::{StreamExt, future::join3, pin_mut};
 use ruma::{
 	MilliSecondsSinceUnixEpoch, OwnedEventId, UserId,
 	api::client::push::get_notifications::{self, v3::Notification},
@@ -20,8 +20,8 @@ use tuwunel_service::Services;
 
 use crate::Ruma;
 
-/// A page entry with the room and root of its thread, if it is in one.
-type Entry = (u64, Notification, Option<(ShortRoomId, OwnedEventId)>);
+/// A page entry with its room and the root of its thread, if it is in one.
+type Entry = (u64, Notification, (ShortRoomId, Option<OwnedEventId>));
 
 /// # `GET /_matrix/client/r0/notifications/`
 ///
@@ -77,14 +77,8 @@ pub(crate) async fn get_notifications_route(
 				.log_err()
 				.ok()?;
 
-			// Thread entries are read by `read_threads` below.
+			// Entries are read by `read_entries` below.
 			let thread = services.threads.get_thread_id(&event).await;
-			let read = thread.is_none()
-				&& services
-					.pusher
-					.last_notification_read(sender_user, event.room_id())
-					.await
-					.is_ok_and(|last_read| last_read.ge(&count));
 
 			let ts = notify
 				.ts
@@ -101,12 +95,12 @@ pub(crate) async fn get_notifications_route(
 				room_id: event.room_id().into(),
 				event: event.into_format(),
 				ts,
-				read,
+				read: false,
 				profile_tag: notify.tag,
 				actions: notify.actions,
 			};
 
-			Some((count, notification, thread.map(|root| (pdu_id.shortroomid, root))))
+			Some((count, notification, (pdu_id.shortroomid, thread)))
 		})
 		// One notification past the page shows whether another page follows.
 		.take(limit.saturating_add(1))
@@ -115,7 +109,7 @@ pub(crate) async fn get_notifications_route(
 
 	let more = notifications.len() > limit;
 	notifications.truncate(limit);
-	read_threads(&services, sender_user, &mut notifications).await;
+	read_entries(&services, sender_user, &mut notifications).await;
 
 	Ok(get_notifications::v3::Response {
 		next_token: notifications
@@ -128,38 +122,40 @@ pub(crate) async fn get_notifications_route(
 	})
 }
 
-/// Marks each thread entry read once `N` of the user's notifying events and `H`
-/// of their highlighting events in its thread are newer, `N` and `H` being the
-/// thread's sync counts, which hold the user's newest such events in the
-/// thread. One walk down the user's notifications finds them for the whole
-/// page, and stops once every thread has.
-async fn read_threads(services: &Services, user: &UserId, page: &mut [Entry]) {
-	// Per thread, for its notifying and its highlighting events: how many are
+/// Marks each entry read once `N` of the user's notifying events and `H` of
+/// their highlighting events in its thread, or in its room's main timeline, are
+/// newer, `N` and `H` being that timeline's sync counts, which hold the user's
+/// newest such events there. One walk down the user's notifications finds them
+/// for the whole page, and stops once every timeline has.
+async fn read_entries(services: &Services, user: &UserId, page: &mut [Entry]) {
+	// Per timeline, for its notifying and its highlighting events: how many are
 	// left to find, and the last one found.
-	let (mut threads, mut rooms, mut oldest) = (HashMap::new(), HashSet::new(), u64::MAX);
+	let (mut timelines, mut rooms, mut oldest) = (HashMap::new(), HashSet::new(), u64::MAX);
 	let mut counts = HashMap::new();
-	for (count, notification, thread) in page.iter() {
-		let Some((room, root)) = thread else {
-			continue;
-		};
+	for (count, notification, timeline) in page.iter() {
+		let room = &notification.room_id;
+		if !counts.contains_key(room) {
+			let (notifications, highlights, threads) = join3(
+				services.pusher.notification_count(user, room),
+				services.pusher.highlight_count(user, room),
+				services
+					.pusher
+					.thread_notification_counts(user, room),
+			)
+			.await;
 
-		if !counts.contains_key(&notification.room_id) {
-			let room_counts = services
-				.pusher
-				.thread_notification_counts(user, &notification.room_id)
-				.await;
-
-			counts.insert(notification.room_id.clone(), room_counts);
+			counts.insert(room.clone(), ((notifications, highlights), threads));
 		}
 
-		let unread = counts[&notification.room_id]
-			.get(root)
-			.copied()
-			.unwrap_or_default();
+		let (main, threads) = &counts[room];
+		let unread = match &timeline.1 {
+			| None => *main,
+			| Some(root) => threads.get(root).copied().unwrap_or_default(),
+		};
 
-		threads.insert(root.clone(), [(unread.0, u64::MAX), (unread.1, u64::MAX)]);
+		timelines.insert(timeline.clone(), [(unread.0, u64::MAX), (unread.1, u64::MAX)]);
 		if unread != (0, 0) {
-			rooms.insert(*room);
+			rooms.insert(timeline.0);
 			oldest = oldest.min(*count);
 		}
 	}
@@ -171,7 +167,7 @@ async fn read_threads(services: &Services, user: &UserId, page: &mut [Entry]) {
 		.ready_filter(|(_, notified)| rooms.contains(&notified.sroomid));
 
 	pin_mut!(rows);
-	let mut pending = threads
+	let mut pending = timelines
 		.values()
 		.flatten()
 		.filter(|(left, _)| *left > 0)
@@ -184,6 +180,8 @@ async fn read_threads(services: &Services, user: &UserId, page: &mut [Entry]) {
 			count: PduCount::Normal(count),
 		};
 
+		// Recounts skip redacted events, and a redacted reply names no thread, so
+		// it would count in its room's main timeline.
 		let Ok(pdu) = services
 			.timeline
 			.get_pdu_from_id(&pdu_id.into())
@@ -191,13 +189,16 @@ async fn read_threads(services: &Services, user: &UserId, page: &mut [Entry]) {
 		else {
 			continue;
 		};
+		if pdu.is_redacted() {
+			continue;
+		}
 
 		let counted = [
 			notified.actions.iter().any(Action::should_notify),
 			notified.actions.iter().any(Action::is_highlight),
 		];
-		let thread = services.threads.get_thread_id(&pdu).await;
-		let found = thread.and_then(|root| threads.get_mut(&root));
+		let timeline = (notified.sroomid, services.threads.get_thread_id(&pdu).await);
+		let found = timelines.get_mut(&timeline);
 		for ((left, last), counted) in found.into_iter().flatten().zip(counted) {
 			if counted && *left > 0 {
 				*left = left.saturating_sub(1);
@@ -207,11 +208,9 @@ async fn read_threads(services: &Services, user: &UserId, page: &mut [Entry]) {
 		}
 	}
 
-	for (count, notification, thread) in page.iter_mut() {
-		if let Some((_, root)) = thread {
-			notification.read = threads[root]
-				.iter()
-				.all(|(left, last)| *left == 0 && *count < *last);
-		}
+	for (count, notification, timeline) in page.iter_mut() {
+		notification.read = timelines[&*timeline]
+			.iter()
+			.all(|(left, last)| *left == 0 && *count < *last);
 	}
 }
