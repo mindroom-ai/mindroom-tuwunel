@@ -126,8 +126,9 @@ async fn should_show_user(
 /// deactivation also records a reason (or, in a migrated database, a mark),
 /// and reactivation replaces the empty password, so both together mark a
 /// deactivated account. Only local accounts get a reason. A mark counts for
-/// any account the migrated column lists, whatever its server; a migration
-/// fills it with the origin server's own accounts.
+/// any account the migrated column lists, whatever its server; the origin
+/// server filled that column with its own accounts, and the migration brings
+/// it along.
 async fn is_deactivated(services: &Services, user_id: &UserId) -> bool {
 	matches!(services.users.is_deactivated(user_id).await, Ok(true))
 		&& services
