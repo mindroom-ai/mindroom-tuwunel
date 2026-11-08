@@ -1214,12 +1214,31 @@ notifying and `H` of their highlighting events in the same timeline follow it.
 One walk down the user's notification rows, to the oldest entry of a timeline
 with unread events, serves the whole page and stops once every such timeline
 has found them; rows of other rooms are skipped without loading their events.
-Counting rows rather than relations of the root counts finished stream edits
-like the replies they finish. The walk skips redacted events, as the recount
-does; a redacted reply names no thread and would otherwise count in the main
-timeline. An event redacted since the last recount still counts in `N` but not
-in the walk, so an earlier entry can show unread until the next receipt, as
-the count does. File: `src/api/client/push/notifications.rs`; test in
+A notifying event that lands between the count reads and the walk can show the
+oldest unread entry of its timeline read until the next poll, for main entries
+as for thread entries. Counting notification rows rather than a root's
+relations counts finished stream edits like the replies they finish. The walk
+skips redacted events, as the recount does; a redacted reply names no thread
+and would otherwise count in the main timeline. An event redacted since the
+last recount still counts in `N` but not in the walk, so an earlier entry can
+show unread until the next receipt, as the count does. File:
+`src/api/client/push/notifications.rs`; test in
+`src/mindroom-tests/tests/notifications_thread_read.rs`.
+
+### An event related to a redacted thread event stays in that thread
+
+An event that relates to a thread event without a thread relation, such as a
+poll end or a reaction, belongs to that event's thread. Redaction strips the
+thread event's `m.relates_to`, so once it was redacted the related event fell
+into the main timeline while its push counts stayed in the thread. The next
+receipt's recount then counted it in the main timeline, `/notifications` took
+it for a main entry and showed the oldest counted main entry read, and a
+thread receipt on it, or on the redaction, was refused. The thread lookup now
+reads a redacted event's relation from its retained original
+(`save_unredacted_events`, kept for `redaction_retention_seconds`), so the
+counts, the recounts, `/notifications` and receipt checks keep the thread.
+Without a retained original the event falls into the main timeline as before.
+Upstream has the same gap. File: `src/service/rooms/threads/mod.rs`; test in
 `src/mindroom-tests/tests/notifications_thread_read.rs`.
 
 ### The user directory leaves out deactivated accounts
