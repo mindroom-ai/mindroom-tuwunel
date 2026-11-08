@@ -333,7 +333,10 @@ fn older_receipt_leaves_newer_main_entries_unread() -> Result {
 
 			let flags = read_flags(&router).await;
 			let events = [&first, &read, &root, &reply, &last];
-			let got: Vec<_> = events.iter().map(|event| flag(&flags, event)).collect();
+			let got: Vec<_> = events
+				.iter()
+				.map(|event| flag(&flags, event))
+				.collect();
 			let expected = [Some(true), Some(true), Some(false), Some(false), Some(false)];
 			assert_eq!(got, expected, "{case}: {flags:?}");
 			assert_eq!(room_counts(&router, &room).await, (2, 0), "{case}: sync");

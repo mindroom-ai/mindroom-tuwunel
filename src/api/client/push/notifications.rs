@@ -134,7 +134,9 @@ async fn read_entries(services: &Services, user: &UserId, page: &mut [Entry]) {
 			let (notifications, highlights, threads) = join3(
 				services.pusher.notification_count(user, room),
 				services.pusher.highlight_count(user, room),
-				services.pusher.thread_notification_counts(user, room),
+				services
+					.pusher
+					.thread_notification_counts(user, room),
 			)
 			.await;
 
