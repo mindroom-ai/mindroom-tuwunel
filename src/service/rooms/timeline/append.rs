@@ -346,6 +346,13 @@ async fn append_pdu_effects(
 					.user_can_redact(redacts_id, pdu.sender(), pdu.room_id(), false)
 					.await?
 			{
+				// Read before the redaction takes events out of their timeline.
+				let counts = self
+					.services
+					.pusher
+					.redaction_counts(pdu.room_id(), redacts_id)
+					.await;
+
 				self.redact_pdu(redacts_id, pdu, shortroomid, state_lock)
 					.await?;
 
@@ -359,6 +366,13 @@ async fn append_pdu_effects(
 				for edit in &edits {
 					self.redact_pdu(edit, pdu, shortroomid, state_lock)
 						.await?;
+				}
+
+				if let Some(counts) = counts {
+					self.services
+						.pusher
+						.drop_redacted_counts(counts)
+						.await;
 				}
 			}
 		},

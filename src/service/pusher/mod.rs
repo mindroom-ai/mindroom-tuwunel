@@ -43,6 +43,7 @@ use url::Url;
 use self::badge::SentBadges;
 pub use self::{
 	append::Notified,
+	notification::RedactionCounts,
 	suppressed::{SuppressedPushes, SuppressedRooms},
 };
 

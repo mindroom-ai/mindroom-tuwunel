@@ -1219,17 +1219,55 @@ oldest unread entry of its timeline read until the next poll, for main entries
 as for thread entries. Counting notification rows rather than a root's
 relations counts finished stream edits like the replies they finish. The walk
 skips redacted events, as the recount does; a redacted reply names no thread
-and would otherwise count in the main timeline. An event redacted since the
-last recount still counts in `N` but not in the walk, so an earlier entry can
-show unread until the next receipt, as the count does. An event related to a
-thread event by another relation, such as a poll end or a reaction, belongs to
-the main timeline once that thread event is redacted, because redaction strips
-its `m.relates_to`; MSC3771 clients such as matrix-js-sdk file it there too, and
-read it with `"main"` receipts. Its counts were made in the thread. Until a
-main or unthreaded receipt recounts the main timeline, the walk finds it among
-the main events while the main count does not hold it, so the oldest counted
-main entry can show read. File: `src/api/client/push/notifications.rs`; test
-in `src/mindroom-tests/tests/notifications_thread_read.rs`.
+and would otherwise count in the main timeline. A redaction takes its event out
+of `N` (see "A redaction takes away the counts its events held"); where that
+gives up, the event still counts in `N` but not in the walk, so an earlier
+entry can show unread until the next receipt, as the count does. An event
+related to a thread event by another relation, such as a poll end or a
+reaction, belongs to the main timeline once that thread event is redacted,
+because redaction strips its `m.relates_to`; MSC3771 clients such as
+matrix-js-sdk file it there too, and read it with `"main"` receipts. Its counts
+were made in the thread, and the redaction takes them from the thread without
+adding them to the main count. Until a main or unthreaded receipt reads past
+the oldest counted main entry, or the user's own main-timeline message reads
+the main timeline, the walk finds the moved event among the main events while
+the main count does not hold it, so that entry can show read. File:
+`src/api/client/push/notifications.rs`; test in
+`src/mindroom-tests/tests/notifications_thread_read.rs`.
+
+### A redaction takes away the counts its events held
+
+A redacted notifying event kept its place in the unread counts until the next
+receipt in its timeline, and an event that a redaction moved out of a thread,
+such as the end of a redacted poll, kept counting in that thread. A thread
+whose notifying replies were all redacted kept its count for good: a thread
+receipt on its root changes nothing, one on the poll end or the redaction is
+refused because both now belong to the main timeline, and MindRoom Chat sends
+no thread receipt for a thread without replies. The room badge then counted
+messages that the Inbox showed read. Synapse deletes a redacted event's push
+actions when it stores the redaction, so its counts drop with it.
+
+Before a redaction is applied, each local member's counts in the target's
+timeline are now matched to the events holding them: they hold the member's
+newest notifying and highlighting events there, as `/notifications` reads them,
+so a scan from the room's newest event down to the target finds them. After
+the target and its edits are redacted, each count drops by the events found
+that left the timeline: the redacted ones, and those whose thread ran through
+the target, which now belong to the main timeline and are not added to its
+count. Only a receipt can change the counts meanwhile, because the room's next
+event waits for the redaction; a count a receipt changed is kept. A dropped
+count is stamped like a receipt's, so sync can send a zero, and the push badge
+is refreshed. An event the member had already read takes nothing.
+
+Cost: up to three point reads per local member for its counts, then at most
+4,097 PDUs from the newest down, each with a thread lookup, as a receipt's
+recount does, and in the target's timeline one notification-row read for each
+member whose counts are not all found yet. The scan stops at the target or once
+every member's counts are found. Past 4,097 PDUs the counts stay as they were. It
+runs while the redaction is appended, so the room's next event waits for it.
+Files: `src/service/pusher/notification.rs`,
+`src/service/rooms/timeline/append.rs`; test in
+`src/mindroom-tests/tests/notifications_thread_read.rs`.
 
 ### The user directory leaves out deactivated accounts
 

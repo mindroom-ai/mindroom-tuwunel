@@ -1,12 +1,20 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+	collections::{BTreeMap, BTreeSet},
+	pin::pin,
+	sync::Arc,
+};
 
 use futures::{StreamExt, future::join3, stream::select};
-use ruma::{EventId, OwnedEventId, RoomId, UserId, events::receipt::ReceiptThread};
+use ruma::{
+	EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UserId,
+	events::receipt::ReceiptThread,
+};
 use tuwunel_core::{
 	Result, implement,
 	matrix::{event::Event, pdu::PduCount},
 	trace,
 	utils::{
+		result::LogErr,
 		stream::{BroadbandExt, ReadyExt, TryIgnore},
 		u64_from_u8,
 	},
@@ -117,18 +125,7 @@ pub async fn reset_notification_counts_for_thread(
 				(snapshot.0.min(after.0), snapshot.1.min(after.1))
 			},
 		};
-		let key = notification_key(user_id, room_id, root.as_deref());
-		if root.is_some() && left == (0, 0) {
-			self.db.userroomid_notificationcount.remove(&key);
-			self.db.userroomid_highlightcount.remove(&key);
-		} else {
-			self.db
-				.userroomid_notificationcount
-				.raw_put(&key, left.0);
-			self.db
-				.userroomid_highlightcount
-				.raw_put(&key, left.1);
-		}
+		self.put_counts(user_id, room_id, root.as_deref(), left);
 		// A stamp takes its sequence number only for its own write, after the
 		// counts it covers, so a receipt's recount holds no sequence number:
 		// syncs wait on it only while a send holding its own sequence number
@@ -195,6 +192,193 @@ fn notification_key(user: &UserId, room: &RoomId, root: Option<&EventId>) -> Key
 		| None => serialize_key((user, room)),
 	}
 	.expect("notification key")
+}
+
+/// Stores one context's counts; a thread without any keeps no row.
+#[implement(super::Service)]
+fn put_counts(&self, user: &UserId, room: &RoomId, root: Option<&EventId>, counts: (u64, u64)) {
+	let key = notification_key(user, room, root);
+	if root.is_some() && counts == (0, 0) {
+		self.db.userroomid_notificationcount.remove(&key);
+		self.db.userroomid_highlightcount.remove(&key);
+	} else {
+		self.db
+			.userroomid_notificationcount
+			.raw_put(&key, counts.0);
+		self.db
+			.userroomid_highlightcount
+			.raw_put(&key, counts.1);
+	}
+}
+
+/// What a redaction can take from local users' counts in its target's timeline.
+pub struct RedactionCounts {
+	room_id: OwnedRoomId,
+	root: Option<OwnedEventId>,
+	users: Vec<Held>,
+}
+
+/// One user's counts and read stamp as read, what is left of the counts to
+/// find, and the events found holding them: `(notification, highlight)` each.
+struct Held {
+	user_id: OwnedUserId,
+	before: (u64, u64, u64),
+	left: (u64, u64),
+	events: Vec<(OwnedEventId, (bool, bool))>,
+}
+
+/// Before `target` is redacted, finds which of it and the later events hold
+/// local users' counts in its timeline; only those can leave it, as the target,
+/// its edits, or events whose thread runs through it. Counts hold a user's
+/// newest notifying and highlighting events, as `/notifications` reads them, so
+/// the scan runs newest first. It stops at the target or once every user's
+/// counts are found, and past `RECOUNT_LIMIT` events gives up, leaving them.
+#[implement(super::Service)]
+pub async fn redaction_counts(
+	&self,
+	room_id: &RoomId,
+	target: &EventId,
+) -> Option<RedactionCounts> {
+	let timeline = &self.services.timeline;
+	let PduCount::Normal(oldest) = timeline.get_pdu_count(target).await.ok()? else {
+		return None;
+	};
+	let target = timeline
+		.get_pdu(target)
+		.await
+		.ok()
+		.filter(|pdu| !pdu.is_redacted())?;
+	let root = self.services.threads.get_thread_id(&target).await;
+
+	let local: Vec<OwnedUserId> = self
+		.services
+		.state_cache
+		.active_local_users_in_room(room_id)
+		.map(ToOwned::to_owned)
+		.collect()
+		.await;
+	let mut users = Vec::new();
+	for user_id in local {
+		let before = self
+			.notification_state(&user_id, room_id, root.as_deref())
+			.await;
+		let left = (before.0, before.1);
+		if left != (0, 0) {
+			users.push(Held {
+				user_id,
+				before,
+				left,
+				events: Vec::new(),
+			});
+		}
+	}
+
+	let pdus = timeline
+		.pdus_rev(None, room_id, None)
+		.take(RECOUNT_LIMIT.saturating_add(1));
+	let mut pdus = pin!(pdus);
+	while users.iter().any(|user| user.left != (0, 0)) {
+		let (count, pdu) = pdus.next().await?.ok()?;
+		if count < PduCount::Normal(oldest) {
+			break;
+		}
+		if pdu.is_redacted() || self.services.threads.get_thread_id(&pdu).await != root {
+			continue;
+		}
+		for user in users
+			.iter_mut()
+			.filter(|user| user.left != (0, 0))
+		{
+			let key = (&user.user_id, count.into_unsigned());
+			let row: Result<super::Notified> = self
+				.db
+				.useridcount_notification
+				.qry(&key)
+				.await
+				.deserialized();
+			let (notify, highlight) = match row {
+				| Ok(row) => super::append::counted(&row.actions),
+				| Err(error) if error.is_not_found() => continue,
+				| Err(_) => return None,
+			};
+			let held = (notify && user.left.0 > 0, highlight && user.left.1 > 0);
+			user.left.0 = user.left.0.saturating_sub(held.0.into());
+			user.left.1 = user.left.1.saturating_sub(held.1.into());
+			if held.0 || held.1 {
+				user.events
+					.push((pdu.event_id().to_owned(), held));
+			}
+		}
+	}
+
+	(!users.is_empty()).then(|| RedactionCounts { room_id: room_id.to_owned(), root, users })
+}
+
+/// After a redaction, takes from each user's counts the events found holding
+/// them that left the timeline: those redacted, and those whose thread ran
+/// through a redacted event, which now belong to the main timeline. Only a
+/// receipt can change the counts meanwhile, as the room's events wait for the
+/// redaction; a user whose counts it changed keeps them, as a raced receipt does.
+#[implement(super::Service)]
+pub async fn drop_redacted_counts(&self, counts: RedactionCounts) {
+	let RedactionCounts { room_id, root, users } = counts;
+	let held: BTreeSet<&EventId> = users
+		.iter()
+		.flat_map(|user| &user.events)
+		.map(|(event_id, _)| &**event_id)
+		.collect();
+	let mut gone = BTreeSet::new();
+	for event_id in held {
+		if let Ok(pdu) = self.services.timeline.get_pdu(event_id).await
+			&& (pdu.is_redacted() || self.services.threads.get_thread_id(&pdu).await != root)
+		{
+			gone.insert(event_id.to_owned());
+		}
+	}
+
+	for Held { user_id, before, events, .. } in users {
+		let dropped = events
+			.iter()
+			.filter(|(event_id, _)| gone.contains(event_id))
+			.fold((0_u64, 0_u64), |(notify, highlight), (_, held)| {
+				(notify.saturating_add(held.0.into()), highlight.saturating_add(held.1.into()))
+			});
+		if dropped == (0, 0) {
+			continue;
+		}
+
+		let _lock = self
+			.notification_increment_mutex
+			.lock(&(room_id.clone(), user_id.clone()))
+			.await;
+		if self
+			.notification_state(&user_id, &room_id, root.as_deref())
+			.await
+			!= before
+		{
+			continue;
+		}
+		let left = (before.0.saturating_sub(dropped.0), before.1.saturating_sub(dropped.1));
+		self.put_counts(&user_id, &room_id, root.as_deref(), left);
+		// A newer stamp lets sync send a count that dropped to zero.
+		match &root {
+			| Some(root) => self
+				.db
+				.roomuserid_lastnotificationread
+				.put((&room_id, &user_id, root), *self.services.globals.next_count()),
+			| None => self
+				.db
+				.roomuserid_lastnotificationread
+				.put((&room_id, &user_id), *self.services.globals.next_count()),
+		}
+		// As after a receipt, only a delivery corrects the gateway's badge.
+		self.services
+			.sending
+			.refresh_push_badge(&user_id)
+			.await
+			.log_err()
+			.ok();
+	}
 }
 
 #[implement(super::Service)]

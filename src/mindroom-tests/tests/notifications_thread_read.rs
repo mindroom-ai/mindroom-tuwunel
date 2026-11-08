@@ -479,6 +479,89 @@ fn main_receipt_after_thread_redaction_reads_main() -> Result {
 	})
 }
 
+/// A redaction takes away right away the counts its event held, and those of
+/// an event that leaves the thread with it, such as a poll end: a deleted
+/// thread reply, a poll start with its end, and a main-timeline mention. The
+/// room's sync counts and its unread Inbox entries then agree without another
+/// receipt. Redacting a reply already read leaves a later reply counted, also
+/// behind a later main-timeline message.
+#[test]
+fn redaction_drops_its_counts() -> Result {
+	let harness = Harness::new("mindroom_notifications_redaction_counts", [QUIET.to_owned()])?;
+
+	harness.with_services(async |services| {
+		let (router, _guard) = serve(services).await?;
+
+		for case in ["reply", "poll", "read", "mention"] {
+			let room = create_room(&router).await;
+			let path = format!("/rooms/{room}/join");
+			request(&router, Method::POST, &path, HELPER_TOKEN, json!({})).await;
+			let txn = |name: &str| format!("counts-{case}-{name}");
+			let root = send(&router, &room, HELPER_TOKEN, &txn("root"), text("Question")).await;
+			let (target, expected) = match case {
+				| "reply" => {
+					let reply = thread_reply(&root);
+					let reply = send(&router, &room, HELPER_TOKEN, &txn("reply"), reply).await;
+					(reply, [(1, 0), (0, 0)])
+				},
+				| "poll" => {
+					let kind = "org.matrix.msc3381.poll.start";
+					let path = format!("/rooms/{room}/send/{kind}/{}", txn("start"));
+					let start = request(&router, Method::PUT, &path, HELPER_TOKEN, poll(&root));
+					let start = event_id(&start.await);
+					let end = json!({
+						"org.matrix.msc3381.poll.end": {},
+						"body": "Ended",
+						"m.relates_to": {"rel_type": "m.reference", "event_id": start},
+					});
+					let kind = "org.matrix.msc3381.poll.end";
+					let path = format!("/rooms/{room}/send/{kind}/{}", txn("end"));
+					request(&router, Method::PUT, &path, HELPER_TOKEN, end).await;
+					assert_eq!(thread_counts(&router, &room, &root).await, (2, 0), "{case}");
+					(start, [(1, 0), (0, 0)])
+				},
+				| "read" => {
+					let reply = thread_reply(&root);
+					let read = send(&router, &room, HELPER_TOKEN, &txn("read"), reply).await;
+					receipt(&router, &room, "m.read", &read, json!({"thread_id": root})).await;
+					send(&router, &room, HELPER_TOKEN, &txn("later"), thread_reply(&root)).await;
+					send(&router, &room, HELPER_TOKEN, &txn("main"), text("Main")).await;
+					(read, [(2, 0), (1, 0)])
+				},
+				| _ => {
+					let mention = json!({
+						"msgtype": "m.text",
+						"body": "Reader?",
+						"m.mentions": {"user_ids": ["@reader:localhost"]},
+					});
+					let txn = txn("mention");
+					let mention = send(&router, &room, HELPER_TOKEN, &txn, mention).await;
+					assert_eq!(room_counts(&router, &room).await, (2, 1), "{case}");
+					(mention, [(1, 0), (0, 0)])
+				},
+			};
+			let since = sync(&router, None).await["next_batch"].clone();
+			let path = format!("/rooms/{room}/redact/{target}/{}", txn("redact"));
+			request(&router, Method::PUT, &path, HELPER_TOKEN, json!({})).await;
+
+			let round = sync(&router, since.as_str()).await;
+			let joined = &round["rooms"]["join"][room.as_str()];
+			let [main, thread] = expected;
+			assert_eq!(counts(&joined["unread_notifications"]), main, "{case}: main {round}");
+			let threads = &joined["unread_thread_notifications"];
+			assert_eq!(counts(&threads[root.as_str()]), thread, "{case}: thread {round}");
+			if case == "mention" {
+				let highlights = &joined["unread_notifications"]["highlight_count"];
+				assert_eq!(highlights, 0, "{case}: the zero is sent {round}");
+			}
+			let unread = unread_entries(&router, &room).await;
+			assert_eq!(unread, main.0 + thread.0, "{case}: Inbox");
+		}
+
+		Ok(())
+	})
+}
+
 async fn serve(services: Arc<Services>) -> Result<(Router, Guard)> {
 	for (user, token) in [
 		(user_id!("@reader:localhost"), READER_TOKEN),
@@ -503,7 +586,7 @@ async fn serve(services: Arc<Services>) -> Result<(Router, Guard)> {
 /// The reader's sync `(notification, highlight)` counts for the main timeline
 /// of `room`.
 async fn room_counts(router: &Router, room: &RoomId) -> (u64, u64) {
-	let sync = sync(router).await;
+	let sync = sync(router, None).await;
 
 	counts(&sync["rooms"]["join"][room.as_str()]["unread_notifications"])
 }
@@ -517,16 +600,20 @@ async fn thread_count(router: &Router, room: &RoomId, root: &OwnedEventId) -> u6
 /// The reader's sync `(notification, highlight)` counts for the thread of
 /// `root`; a thread left out of `unread_thread_notifications` has none.
 async fn thread_counts(router: &Router, room: &RoomId, root: &OwnedEventId) -> (u64, u64) {
-	let sync = sync(router).await;
+	let sync = sync(router, None).await;
 
 	counts(&sync["rooms"]["join"][room.as_str()]["unread_thread_notifications"][root.as_str()])
 }
 
-/// A sync with the thread counts apart from the main timeline's.
-async fn sync(router: &Router) -> Value {
+/// A sync with the thread counts apart from the main timeline's, from `since`
+/// when given.
+async fn sync(router: &Router, since: Option<&str>) -> Value {
 	let filter = r#"{"room":{"timeline":{"unread_thread_notifications":true}}}"#;
 	let filter: String = url::form_urlencoded::byte_serialize(filter.as_bytes()).collect();
-	let path = format!("/sync?timeout=0&filter={filter}");
+	let since = since
+		.map(|since| format!("&since={since}"))
+		.unwrap_or_default();
+	let path = format!("/sync?timeout=0&filter={filter}{since}");
 
 	request(router, Method::GET, &path, READER_TOKEN, Value::Null).await
 }
@@ -543,6 +630,21 @@ async fn read_flags(router: &Router) -> Vec<(String, bool)> {
 		request(router, Method::GET, "/notifications", READER_TOKEN, Value::Null).await;
 
 	entries(&response)
+}
+
+/// How many of the reader's `/notifications` entries in `room` are unread.
+async fn unread_entries(router: &Router, room: &RoomId) -> u64 {
+	let response =
+		request(router, Method::GET, "/notifications", READER_TOKEN, Value::Null).await;
+	let unread = response["notifications"]
+		.as_array()
+		.expect("notifications")
+		.iter()
+		.filter(|notification| notification["room_id"] == room.as_str())
+		.filter(|notification| notification["read"] == false)
+		.count();
+
+	u64::try_from(unread).expect("entry count")
 }
 
 /// The flags fetched one entry per page, following `next_token`.
