@@ -1239,9 +1239,14 @@ Behavior:
   a real password, or for an LDAP-origin account while LDAP is enabled, so
   never to a passwordless SSO account. This fork hardens the rest of the
   advertisement: `m.login.sso` only for SSO-origin accounts (never for a
-  password account, even on a device an identity provider issued) and only
-  when the exact IdP is unambiguous (the device's own IdP or the single
-  configured provider), JWT UIAA rejected for SSO-origin users and no longer
+  password account, even on a device an identity provider issued), bound to
+  the device's own IdP; else, for a device without one (a legacy SSO
+  redirect and `m.login.token` sign-in), to a configured provider whose
+  exact id the account has a finished sign-in link to, the default provider
+  when it is one of them; else to the single configured provider. Without
+  any, a passwordless SSO account is offered no flow at all (the linked
+  provider binding is tested in `src/main/tests/uiaa_sso_linked_provider.rs`).
+  JWT UIAA rejected for SSO-origin users and no longer
   advertised (its fallback/web page is not implemented), and legacy SSO-origin
   account metadata repaired on the fly before the flows are chosen.
 - Reactivates a deactivated local SSO account on re-login, but only when the
