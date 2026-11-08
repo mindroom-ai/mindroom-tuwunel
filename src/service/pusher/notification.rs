@@ -129,8 +129,10 @@ pub async fn reset_notification_counts_for_thread(
 				.userroomid_highlightcount
 				.raw_put(&key, left.1);
 		}
-		// Each stamp's permit spans only its write, so syncs never wait on the
-		// recount; a stamp is published after the counts it covers.
+		// A stamp takes its sequence number only for its own write, after the
+		// counts it covers, so a receipt's recount holds none: syncs wait on it
+		// only while a send holding its own sequence number waits for this
+		// lock. Own sends and joins recount while they hold their event's.
 		if let ReceiptThread::Thread(root) = thread {
 			self.db
 				.roomuserid_lastnotificationread

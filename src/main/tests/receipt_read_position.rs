@@ -24,7 +24,7 @@ fn read_markers_preserve_later_notifications() -> Result {
 		let reader = Client { services, base, token: READER_TOKEN };
 		let sender = Client { services, base, token: SENDER_TOKEN };
 		let mut failures = Vec::new();
-		for case in 0..6 {
+		for case in 0..7 {
 			let room = sender
 				.create_room(&json!({"preset": "public_chat"}))
 				.await?;
@@ -45,7 +45,7 @@ fn read_markers_preserve_later_notifications() -> Result {
 				| 2 => (json!({"m.read": events[3], "m.read.private": events[4]}), 1),
 				| 3 => (json!({"m.read": events[4], "m.read.private": events[3]}), 1),
 				| 4 => (json!({"m.fully_read": events[3]}), 6),
-				| _ => {
+				| 5 => {
 					reader
 						.post(
 							&format!("rooms/{room}/receipt/m.read.private/{}", events[4]),
@@ -53,6 +53,22 @@ fn read_markers_preserve_later_notifications() -> Result {
 						)
 						.await?;
 					(json!({"m.read": events[3], "m.read.private": events[3]}), 1)
+				},
+				| _ => {
+					// More than a recount budget of events separates the older
+					// field from the furthest: a recount through the older one
+					// reads the room through the present, so only a single
+					// recount through the furthest keeps the two after it.
+					seed(services, &events[5], 4097, None).await?;
+					let furthest = sender
+						.message(&room, "marker-furthest", None)
+						.await?;
+					for i in 0..2 {
+						sender
+							.message(&room, &format!("marker-after-{i}"), None)
+							.await?;
+					}
+					(json!({"m.read": events[3], "m.read.private": furthest}), 2)
 				},
 			};
 			reader
@@ -221,6 +237,63 @@ fn read_threads_leave_no_rows() -> Result {
 			(0, 0, 0),
 			"unthreaded receipt on the newest event"
 		);
+		Ok(())
+	})
+}
+
+/// A sync sends a zero count only in a round whose window holds the read
+/// stamp, so a receipt publishes its stamp after every count it covers. Syncs
+/// racing an unthreaded receipt over 4,097 unread threads in a quiet room,
+/// where no later round lists the room again, must end on the server's counts.
+#[test]
+fn syncs_racing_a_receipt_end_at_its_counts() -> Result {
+	boot("syncs-racing-receipt", ["log_enable=false"], async |services, base| {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		let user = register(services, "racingreader", READER_TOKEN).await?;
+		register(services, "racingsender", SENDER_TOKEN).await?;
+		let reader = Client { services, base, token: READER_TOKEN };
+		let sender = Client { services, base, token: SENDER_TOKEN };
+		let room = sender
+			.create_room(&json!({"preset": "public_chat"}))
+			.await?;
+		reader
+			.post(&format!("rooms/{room}/join"), &json!({}))
+			.await?;
+		for i in 0..4097 {
+			let root: OwnedEventId = format!("$unread{i}:localhost").try_into()?;
+			services.db["userroomid_notificationcount"].put((&user, &room, &root), 1_u64);
+		}
+		let newest = sender
+			.message(&room, "racing-newest", None)
+			.await?;
+		let mut view = (None, 0);
+		let mut since = apply(&mut view, &reader.sync(None).await?, &room)?;
+		assert_eq!(view, (Some(1), 4097), "view before the receipt");
+
+		let done = AtomicBool::new(false);
+		let receipt = async {
+			let receipt = reader.receipt(&room, &newest, None).await;
+			done.store(true, Ordering::Release);
+			receipt
+		};
+		let syncs = async {
+			// One more round after the receipt answers, for a stamp no
+			// earlier round reached.
+			loop {
+				let last = done.load(Ordering::Acquire);
+				since = apply(&mut view, &reader.sync(Some(&since)).await?, &room)?;
+				if last {
+					return Ok::<_, tuwunel_core::Error>(());
+				}
+			}
+		};
+		let (receipt, syncs) = futures::join!(receipt, syncs);
+		receipt.and(syncs)?;
+
+		let counts = Counts { services, user: &user, room: &room };
+		assert_eq!(counts.get().await, json!([0, {}]), "server after the receipt");
+		assert_eq!(view, (Some(0), 0), "client view after the receipt");
 		Ok(())
 	})
 }
@@ -450,6 +523,51 @@ impl Counts<'_> {
 
 		json!([main, threads])
 	}
+}
+
+/// One non-blocking sync with MSC3773 thread counts, from `since` when given.
+#[implement(Client, params = "<'_>")]
+async fn sync(&self, since: Option<&str>) -> Result<Value> {
+	let filter = r#"{"room":{"timeline":{"unread_thread_notifications":true}}}"#;
+	let mut query = vec![("timeout", "0"), ("filter", filter)];
+	query.extend(since.map(|since| ("since", since)));
+
+	let response = self
+		.services
+		.client
+		.clients
+		.default
+		.get(self.url("sync"))
+		.query(&query)
+		.bearer_auth(self.token)
+		.send()
+		.await?
+		.error_for_status()?
+		.json()
+		.await?;
+
+	Ok(response)
+}
+
+/// Apply one sync round to a client's `(main count, unread threads)` view of
+/// `room`, as MSC3773 clients do: a listed room lists every unread thread, and
+/// a room left out keeps its counts. Returns the round's `next_batch`.
+fn apply(view: &mut (Option<u64>, usize), response: &Value, room: &RoomId) -> Result<String> {
+	if let Some(joined) = response["rooms"]["join"].get(room.as_str()) {
+		if let Some(main) = joined["unread_notifications"]["notification_count"].as_u64() {
+			view.0 = Some(main);
+		}
+		view.1 = joined["unread_thread_notifications"]
+			.as_object()
+			.map_or(0, |threads| {
+				threads
+					.values()
+					.filter(|thread| thread["notification_count"].as_u64() > Some(0))
+					.count()
+			});
+	}
+
+	Ok(field(response, "next_batch")?.to_owned())
 }
 
 /// Send a message, in the thread under `root` when given.
