@@ -2,15 +2,15 @@
 
 This document describes the current MindRoom fork behavior on top of upstream
 `tuwunel`. The fork is rebased directly onto upstream commits; see
-`docs/rebase-*.md` for the per-rebase log. As of the 2026-10-11 rebase the base
-is the upstream `v1.9.4` release (`f473d9a4a`). Earlier changes merged upstream
-and dropped from the fork include the room-creation default power-level
-override and the SSO grant-cookie path hardening (2026-07-07 rebase), and the
-drained/zero one-time-key counts fix and public MatrixRTC transport discovery
-(2026-07-21 rebase, upstream `164b8da61`/`007033cd5` and `a1776c368`). The
-Sliding Sync `num_live` correction was dropped at v1.9.0 because upstream now
-contains the same implementation and tests (`6acc3a7d1`, `942dd66e3`, and
-`a508c7331`).
+`docs/rebase-*.md` for the per-rebase log. As of the 2026-11-08 rebase the base
+is upstream `main` at `8c6c4a210`, 294 commits past the `v1.9.4` release
+(`f473d9a4a`). Earlier changes merged upstream and dropped from the fork
+include the room-creation default power-level override and the SSO grant-cookie
+path hardening (2026-07-07 rebase), and the drained/zero one-time-key counts
+fix and public MatrixRTC transport discovery (2026-07-21 rebase, upstream
+`164b8da61`/`007033cd5` and `a1776c368`). The Sliding Sync `num_live`
+correction was dropped at v1.9.0 because upstream now contains the same
+implementation and tests (`6acc3a7d1`, `942dd66e3`, and `a508c7331`).
 
 At v1.9.1, test database isolation, `/messages` pagination bounds and token
 validation, and quiet-room full-state sync are supplied by upstream. Their
@@ -70,6 +70,22 @@ callback now uses upstream's Continue page, which trusts only the
 fork's `sso_trusted_redirect_hosts` option is gone.
 See the [v1.9.4 rebase record](docs/rebase-v1.9.4-2026-10-11.md).
 
+On upstream `main` (`8c6c4a210`), upstream contains 13 more of the fork's
+fixes: the former-member state, `/context` and summary reads (#26, #53, #70,
+#71) and the alias listing the fork carried as a backport (#113), the
+send_join and knock storage checks (#57, #74, #87), refresh-token rotation
+under the device lock (#54, #85, upstream PR #629), the sliding sync fallback
+key wakeups (#106), same-millisecond room ids (#107) and join positions across
+profile updates (#144). Their commits, tests and entries are dropped, and
+upstream's policy is kept where it differs. Upstream also moved the Matrix
+types into the `tuwunel_matrix` crate, split the API into one crate per
+surface (`src/api/server` is now `src/api/federation`), made `/sync` v3 a
+directory module and grouped the configuration into sections. Moved options
+keep their old names as legacy keys; the fork's `mindroom_*` options stay
+top-level, and `bundle_edit_relations` is now `rooms.relations.bundle_edits`,
+still on by default in the fork.
+See the [upstream main rebase record](docs/rebase-upstream-main-2026-11-08.md).
+
 ## How To Inspect
 - Fork commits: `git log --reverse --oneline <upstream-base>..HEAD`
 - Files changed in the fork: `git diff --stat <upstream-base>..HEAD`
@@ -82,11 +98,12 @@ verification needs in the test environment instead of carrying extra patches.
 The history keeps the v1.9.1 ownership layout of eight commits (shared test
 infrastructure, five runtime features with their tests and compatibility
 changes, CI, and docs), followed by the squash-merged fork PRs that upstream
-does not contain, in merge order (#15 to #105), with the v1.9.3 and upstream
-main rebase records after #64 and this rebase's documentation last. No upstream
-backports are carried.
-See the [current ownership and rebase procedure](docs/rebase-v1.9.4-2026-10-11.md).
-Earlier rebase records remain historical snapshots.
+does not contain, in merge order (#15 to #156), with the v1.9.3 and 2026-10-06
+upstream main rebase records after #64, the v1.9.4 record after #105, and this
+rebase's documentation last. No upstream backports are carried. See the
+[current ownership and rebase
+procedure](docs/rebase-upstream-main-2026-11-08.md). Earlier rebase records
+remain historical snapshots.
 
 ## Runtime Changes
 
@@ -119,7 +136,7 @@ once and reads at most 8 MiB from each, alias answers and signing-key
 documents (from the origin or from a notary for one server) are read up to
 1 MiB, and profiles up to four times the 64 KiB profile limit.
 A larger answer is dropped while it is read, and no limit exceeds
-`max_response_size`. Upstream has the same bug. Files:
+`network.http.max_response_size`. Upstream has the same bug. Files:
 `src/service/federation/{execute.rs,feds.rs}`,
 `src/api/client/room/summary.rs`, `src/service/rooms/alias/mod.rs`,
 `src/service/server_keys/request.rs`, `src/service/profile/{mod.rs,remote.rs}`;
@@ -272,7 +289,7 @@ is not checked, because a receipt can arrive before its event or from a server
 other than the event's; a receipt for an event this server does not have yet
 replaces the user's receipt for that thread like any other. Upstream has the
 same bug. Files:
-`src/api/server/send.rs`, `src/api/client/read_marker/mod.rs`; test in
+`src/api/federation/send.rs`, `src/api/client/read_marker/mod.rs`; test in
 `src/main/tests/federation_receipt_edu.rs`.
 
 ### A receipt recounts only the unread events after its event
@@ -437,7 +454,7 @@ user had once joined could send that join again after the user left, was
 kicked or was banned, and read the room's current state each time. A join this
 server already has is now answered only while its user is still joined, as a
 retry of a join that still stands, and refused otherwise. New joins are
-unchanged. Upstream has the same bug. File: `src/api/server/send_join.rs`;
+unchanged. Upstream has the same bug. File: `src/api/federation/send_join.rs`;
 test in `src/main/tests/federation_membership_refusal.rs`.
 
 ### A restricted join refused here is not authorised by a local user
@@ -514,22 +531,24 @@ Synapse requires. Upstream has the same bug. File:
 
 ### Auth chain fetch walks are bounded
 
-Fetching the missing auth events of an incoming event walked the remote server's
-auth chain one event at a time and kept every fetched event in memory until the
-walk ended, with no limit on the number of events and only the federation
-response limit (256 MiB by default) on each one. A walk now gives up and drops
-what it fetched once it holds `max_fetch_prev_events` events (default 1024) and
-would fetch another. The walks for one event's auth events, or for the events of
-one `/state_ids` answer, keep what they fetched until all of them end, so they
-also share one limit of `max_fetch_prev_events` times 64 KiB (64 MiB by default)
-on the events they fetch; a walk whose fetched event would pass it gives up the
-same way. A walk keeps each fetched event as canonical JSON without its
-`unsigned` field, which the outlier path removes before its own size check, and
-parses it again only to authorize it; an event that is then still larger than
-the 65,535 byte PDU limit is a failed fetch. The fetcher rejects an event
-response larger than four times that limit before parsing it, which leaves room
-for the `unsigned` data a server serves with the event. Upstream has the same
-bug. Files: `src/service/rooms/event_handler/fetch_auth.rs`,
+Fetching the missing auth events of an incoming event walked the remote
+server's auth chain one event at a time and kept every fetched event in memory
+until the walk ended, with no limit on the number of events and only the
+federation response limit (256 MiB by default) on each one. A walk now gives up
+and drops what it fetched once it holds
+`federation.history.max_fetch_prev_events` events (default 1024) and would
+fetch another. The walks for one event's auth events, or for the events of one
+`/state_ids` answer, keep what they fetched until all of them end, so they also
+share one limit of `federation.history.max_fetch_prev_events` times 64 KiB (64
+MiB by default) on the events they fetch; a walk whose fetched event would pass
+it gives up the same way. A walk keeps each fetched event as canonical JSON
+without its `unsigned` field, which the outlier path removes before its own
+size check, and parses it again only to authorize it; an event that is then
+still larger than the 65,535 byte PDU limit is a failed fetch. The fetcher
+rejects an event response larger than four times that limit before parsing it,
+which leaves room for the `unsigned` data a server serves with the event.
+Upstream has the same bug. Files:
+`src/service/rooms/event_handler/fetch_auth.rs`,
 `src/service/fetcher/validate.rs`; test in
 `src/main/tests/auth_chain_fetch_budget.rs`.
 
@@ -545,16 +564,17 @@ federation response limit first. Upstream has the same bug. Files:
 
 The walk over an incoming event's missing prev events queued a fetch for every
 prev event of each event it walked, up to 20 each, but counted only the walked
-events against `max_fetch_prev_events`. Every queued event is fetched in the
-end, so one incoming event could start about 20 times that many fetches. The
-walk now counts every event it queues, and runs at most 32 of their fetches at
-once (see the next entry). The `/get_missing_events` batch
+events against `federation.history.max_fetch_prev_events`. Every queued event
+is fetched in the end, so one incoming event could start about 20 times that
+many fetches. The walk now counts every event it queues, and runs at most 32 of
+their fetches at once (see the next entry). The `/get_missing_events` batch
 fetched before the walk asks for 10 events but stored every event the remote
 server answered with; it now stores at most 10. Each auth chain fetch started
 for the incoming event, for its own auth events, for each prev event the walk
 fetches and for each event of that batch, also had its own limit of
-`max_fetch_prev_events` times 64 KiB; they now share one. Upstream has the same
-bugs. Files: `src/service/rooms/event_handler/fetch_prev.rs`,
+`federation.history.max_fetch_prev_events` times 64 KiB; they now share one.
+Upstream has the same bugs. Files:
+`src/service/rooms/event_handler/fetch_prev.rs`,
 `src/service/rooms/event_handler/fetch_auth.rs`,
 `src/service/rooms/event_handler/handle_incoming_pdu.rs`; tests in
 `src/main/tests/auth_chain_fetch_budget.rs`.
@@ -562,38 +582,38 @@ bugs. Files: `src/service/rooms/event_handler/fetch_prev.rs`,
 ### A prev event walk runs a few fetches at once
 
 The walk over an incoming event's missing prev events started every fetch it
-queued at once, up to `max_fetch_prev_events` (default 1024). The fetcher runs
-at most 256 fetches for all rooms together, so one walk over a wide gap whose
-server answered slowly could take all of them, and fetches for every other
-room waited behind it. A walk now runs at most 32 of its fetches at once, more
-than the 20 prev events one event may name, and starts the rest as those
-finish, so a wide gap still fills completely. Upstream has the same bug. File:
-`src/service/rooms/event_handler/fetch_prev.rs`; test in
-`src/main/tests/auth_chain_fetch_budget.rs`.
+queued at once, up to `federation.history.max_fetch_prev_events` (default
+1024). The fetcher runs at most 256 fetches for all rooms together, so one walk
+over a wide gap whose server answered slowly could take all of them, and
+fetches for every other room waited behind it. A walk now runs at most 32 of
+its fetches at once, more than the 20 prev events one event may name, and
+starts the rest as those finish, so a wide gap still fills completely. Upstream
+has the same bug. File: `src/service/rooms/event_handler/fetch_prev.rs`; test
+in `src/main/tests/auth_chain_fetch_budget.rs`.
 
 ### Federation bodies and incoming PDUs are parsed after their checks
 
 A federation request's body was parsed into a JSON tree before the request was
 authenticated, and the signature check copied that tree and then waited for the
 origin's signing key, which is fetched from the origin when it is not cached. A
-body can be up to `max_request_size` (24 MiB by default) and its tree many times
-that, so a slow key answer kept two such trees per request until the request
-timed out, and a handled request kept its tree until the handler finished,
-although no federation handler reads it. The PDUs of a `/send` transaction, an
-invite's event and the create event in its stripped state, and the events of
-`send_join`, `send_leave` and `send_knock` were parsed at any length, since the
-64 KiB PDU limit is checked only later, and a transaction parsed all of its PDUs
-before any of them waited for its room's turn. The origin's key is now resolved
-before the body is parsed, and the signature check uses that key rather than
-looking it up again, which would fetch a key document too large to store a
-second time. A federation request drops the parsed body once its typed request
-is built, and an incoming PDU longer than four times the PDU limit, the limit
-the fetcher already applies to fetched events, is refused before it is parsed.
-A transaction keeps each PDU's JSON raw and parses it again when its room's turn
-comes. Upstream has the same bug. Files:
+body can be up to `max_request_size` (24 MiB by default) and its tree many
+times that, so a slow key answer kept two such trees per request until the
+request timed out, and a handled request kept its tree until the handler
+finished, although no federation handler reads it. The PDUs of a `/send`
+transaction, an invite's event and the create event in its stripped state, and
+the events of `send_join`, `send_leave` and `send_knock` were parsed at any
+length, since the 64 KiB PDU limit is checked only later, and a transaction
+parsed all of its PDUs before any of them waited for its room's turn. The
+origin's key is now resolved before the body is parsed, and the signature check
+uses that key rather than looking it up again, which would fetch a key document
+too large to store a second time. A federation request drops the parsed body
+once its typed request is built, and an incoming PDU longer than four times the
+PDU limit, the limit the fetcher already applies to fetched events, is refused
+before it is parsed. A transaction keeps each PDU's JSON raw and parses it
+again when its room's turn comes. Upstream has the same bug. Files:
 `src/api/router/{args.rs,auth.rs,auth/dispatch.rs,auth/server.rs}`,
-`src/api/server/{send.rs,invite.rs,send_join.rs,send_leave.rs,send_knock.rs}`,
-`src/core/matrix/{pdu.rs,pdu/format/check.rs}`,
+`src/api/federation/{send.rs,invite.rs,send_join.rs,send_leave.rs,send_knock.rs}`,
+`src/matrix/{pdu.rs,pdu/format/check.rs}`,
 `src/service/rooms/event_handler/parse_incoming_pdu.rs`,
 `src/service/membership/stripped_state.rs`,
 `src/service/fetcher/{validate.rs,transport.rs}`; tests in
@@ -625,12 +645,12 @@ at an event with `/state_ids`. Both answers were read under the generic
 federation response limit (256 MiB by default), and each event of a
 missing-events answer was parsed in full before anything checked its size,
 although the request asks for only 10 events. A missing-events answer is now
-read up to the size of one `/event` answer for each event asked for (about
-2.5 MiB for 10), and an event in it larger than four times the PDU size limit
-is dropped before it is parsed. A `/state_ids` answer is read up to 64 MiB,
-the ids of over a million events. A larger answer is dropped while it is read,
-and neither limit exceeds `max_response_size`. Upstream has the same bug.
-Files: `src/service/fetcher/{mod.rs,transport.rs,validate.rs}`,
+read up to the size of one `/event` answer for each event asked for (about 2.5
+MiB for 10), and an event in it larger than four times the PDU size limit is
+dropped before it is parsed. A `/state_ids` answer is read up to 64 MiB, the
+ids of over a million events. A larger answer is dropped while it is read, and
+neither limit exceeds `network.http.max_response_size`. Upstream has the same
+bug. Files: `src/service/fetcher/{mod.rs,transport.rs,validate.rs}`,
 `src/service/rooms/event_handler/fetch_prev.rs`; test in
 `src/main/tests/federation_event_response_limit.rs`.
 
@@ -729,12 +749,13 @@ Simplified sliding sync sent other users' read receipts and typing for every
 room in the window: rooms the user has left or been removed from, which a room
 subscription keeps there, and rooms they are invited to or have knocked on.
 Typing now follows the required-state rule, so only joined rooms, and
-world-readable rooms peeked without a membership, carry it, as v3 `/sync`
-sends ephemeral events only for joined rooms. Receipts follow the same rule,
-except that a room the user left or was removed from keeps the receipts sent
-before their departure, as its timeline does; upstream delivers those on the
-departure sync. The user's own private read receipt and room account data are
-unchanged. Upstream has the same bug. Files:
+world-readable rooms peeked without a membership, carry it, as v3 `/sync` sends
+ephemeral events only for joined rooms. Receipts follow the same rule, except
+that a room the user left or was removed from keeps the receipts sent before
+their departure, the leave or ban that ended their last join, as its timeline
+does; upstream delivers those on the departure sync. A user who never joined,
+such as one who rejected an invite, gets none. The user's own private read
+receipt and room account data are unchanged. Upstream has the same bug. Files:
 `src/api/client/sync/v5/{range.rs,rooms.rs,extensions/typing.rs}`; test in
 `src/main/tests/sync_v5_departed_ephemeral.rs`.
 
@@ -752,11 +773,15 @@ ban that ended the user's last join, found by the walk that bounds their
 history (see "A withdrawn knock does not move a former member's departure"). A
 walk past 16 membership events fails the read; a legacy `/sync` left room then
 still comes, with only the user's own membership as its state, where upstream
-would fall back to the state at the withdrawal. While a knock is pending the
-user may not read the state, as upstream decides. Upstream has the same bug.
-Files: `src/service/rooms/state_accessor/user_can.rs`,
-`src/api/client/sync/v3/left.rs`; test in
-`src/main/tests/knock_withdrawal_history.rs`.
+would fall back to the state at the withdrawal. A leave or ban with no recorded
+state snapshot, as a state reset or a backfill can leave, ends the walk as the
+departure, the bound upstream gives every former member; any other member event
+without one fails the read. Sliding sync stops a left room's receipts at the
+same departure. While a knock is pending the user may not read the state, as
+upstream decides. Upstream has the same bug. Files:
+`src/service/rooms/state_accessor/user_can.rs`,
+`src/api/client/sync/v3/left.rs`; tests in
+`src/main/tests/{knock_withdrawal_history.rs,sync_v5_departed_ephemeral.rs}`.
 
 ### Bundled aggregations follow the requester's visibility
 
@@ -1129,7 +1154,7 @@ Behavior:
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
 - `src/core/config/mod.rs`, `src/core/config/check.rs`
-- `src/core/matrix/event.rs`, `src/core/matrix/event/relation.rs`
+- `src/matrix/event.rs`, `src/matrix/event/relation.rs`
 - `src/database/map/remove.rs`
 - `src/service/edit_purge/mod.rs`, `src/service/mod.rs`, `src/service/services.rs`
 - `src/service/edit_purge/sweep.rs`, `src/service/edit_purge/tests/sweep.rs`,
@@ -1208,18 +1233,19 @@ Behavior:
   `delete-range`, `delete-all-from-user` and `delete-all-from-server`, and the
   purge's and sweep's owner-checked `delete_owned_by`. Media whose deletion
   failed stays indexed and downloadable until a retry succeeds.
-- **Turns on upstream's edit bundling by default** (`bundle_edit_relations`,
-  MSC3925; upstream ships it off). The purge deletes superseded edits, so
-  without the bundle a history endpoint (`/messages`, `/context`, `/event`, ...)
-  would serve an original with its stale pre-edit body and no way for the client
-  to find the surviving edit. Upstream bundles the newest surviving edit onto
-  the original at `unsigned.m.relations.m.replace` via its `relatesto_typed`
-  typed index; the purge composes with that index (it tolerates the dangling
-  rows the purge leaves behind and always selects the surviving edit), and
-  upstream's startup `rebuild_relatesto_typed` migration indexes pre-existing
-  edits. `edit_purge::purge_cycle` is `pub` so operators/tests can trigger a
-  cycle; a composition test drives a real purge and asserts the survivor is
-  still bundled and that a dangling newest index row is skipped.
+- **Turns on upstream's edit bundling by default**
+  (`rooms.relations.bundle_edits`, MSC3925; upstream ships it off). The purge
+  deletes superseded edits, so without the bundle a history endpoint
+  (`/messages`, `/context`, `/event`, ...) would serve an original with its
+  stale pre-edit body and no way for the client to find the surviving edit.
+  Upstream bundles the newest surviving edit onto the original at
+  `unsigned.m.relations.m.replace` via its `relatesto_typed` typed index; the
+  purge composes with that index (it tolerates the dangling rows the purge
+  leaves behind and always selects the surviving edit), and upstream's startup
+  `rebuild_relatesto_typed` migration indexes pre-existing edits.
+  `edit_purge::purge_cycle` is `pub` so operators/tests can trigger a cycle; a
+  composition test drives a real purge and asserts the survivor is still
+  bundled and that a dangling newest index row is skipped.
 
 ### 2) `auth/sso: SSO-origin UIAA hardening and self-reactivation`
 Files:
@@ -1347,7 +1373,7 @@ Behavior:
   or unthreaded receipt. Clients therefore name the terminal edit or a later
   event: another receipt on an event the user already acknowledged, such as
   the reply's first event read mid-stream, clears nothing.
-- The `push_everything` debug mode honors the same suppression.
+- The `push.everything` debug mode honors the same suppression.
 - Keeps upstream's recipient-based membership-notification target flag. The
   real gateway fixture checks an invite addressed to someone other than its
   sender, alongside terminal-stream notification behavior.
@@ -1399,11 +1425,11 @@ Behavior:
 - Computes `v<base_version>-mindroom.<n>` tags on `main`, creates/reuses the
   matching GitHub Release, publishes Linux `x86_64`/`aarch64` binaries, and
   dispatches container publication. Runs the fork's own GitHub-hosted checks.
-- Pins CI rustfmt to `nightly-2026-10-04`, which passes upstream `v1.9.4`
-  unchanged; upstream CI floats `nightly`. The locked Fenix formatter in
-  `flake.lock` (nightly-2026-08-05) reports nine upstream files, so the
-  development shell's `cargo fmt` must not be used to reformat. Keep the two CI
-  formatter commands aligned.
+- Pins CI rustfmt to `nightly-2026-10-04`, which passes upstream `main`
+  (`8c6c4a210`) unchanged; upstream CI floats `nightly`. The locked Fenix
+  formatter in `flake.lock` (nightly-2026-08-05) reports ten upstream files, so
+  the development shell's `cargo fmt` must not be used to reformat. Keep the
+  two CI formatter commands aligned.
 - Runs tests with `TMPDIR` set to the CI runner's temporary directory. This
   environment setting remains in the CI owner after dropping the full-state
   sync fix now supplied by upstream.
@@ -1459,7 +1485,7 @@ mindroom_edit_purge_interval_secs = 3600
 mindroom_edit_purge_batch_size = 1000
 mindroom_edit_purge_scan_limit = 100000
 mindroom_edit_purge_dry_run = false
-# bundle_edit_relations defaults to true in the fork; set false only to opt out.
+# rooms.relations.bundle_edits defaults to true in the fork; set false only to opt out.
 ```
 
 ### OpenID audience binding
@@ -1536,10 +1562,10 @@ threads with their titles and real last replies without opening each one:
   title.
 
 Both are full client events without `room_id`, like `latest_event`. With
-`bundle_edit_relations` on, each carries its newest valid `m.replace` edit
-(same sender and type, not redacted) that the requester may see; a rejected
-newer edit falls back to an earlier valid one. `latest_event`, `count` and
-`current_user_participated` are unchanged. The fields reach `/messages`,
+`rooms.relations.bundle_edits` on, each carries its newest valid `m.replace`
+edit (same sender and type, not redacted) that the requester may see; a
+rejected newer edit falls back to an earlier valid one. `latest_event`, `count`
+and `current_user_participated` are unchanged. The fields reach `/messages`,
 `/context`, `/event`, `/relations`, `/threads` and the v3 and sliding sync
 timelines through the shared bundler. Encrypted rooms receive neither field.
 
