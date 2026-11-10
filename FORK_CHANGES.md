@@ -743,6 +743,16 @@ Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,
 in `src/main/tests/sso_assigned_account.rs`, `src/service/users/tests.rs`
 and `src/core/config/tests.rs`.
 
+### The SSO grant cookie uses the `__Host-` prefix
+
+The cookie that carries an SSO sign-in from the redirect to the callback is
+now `__Host-tuwunel_grant_session`, set with `Secure`, `Path=/` and no
+`Domain`, so other hosts under the same domain cannot set it. The callback
+reads only that name, and the removal cookie carries the same attributes. A
+sign-in started before the upgrade fails at its callback once and succeeds
+when retried. Upstream names the cookie `tuwunel_grant_session` and scopes it
+to the callback path. File: `src/api/client/session/sso.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every

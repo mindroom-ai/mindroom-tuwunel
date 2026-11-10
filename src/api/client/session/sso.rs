@@ -95,7 +95,10 @@ struct GrantCookie<'a> {
 	redirect_uri: Cow<'a, str>,
 }
 
-static GRANT_SESSION_COOKIE: &str = "tuwunel_grant_session";
+/// Browsers accept a `__Host-` cookie only when it is set by this host with
+/// `Secure`, `Path=/` and no `Domain`, so the set and the removal cookie both
+/// carry those attributes.
+static GRANT_SESSION_COOKIE: &str = "__Host-tuwunel_grant_session";
 
 static CONFIRM_HTML: &str = const_format!(
 	r#"
@@ -305,7 +308,7 @@ fn grant_session_cookie(value: &GrantCookie<'_>, provider: &Provider) -> Result<
 
 	// CookieJar percent-decodes the value on read; encode it so the form survives.
 	let cookie = Cookie::build((GRANT_SESSION_COOKIE, to_form_string(value)?))
-		.path(grant_session_cookie_path(provider.callback_url.as_ref()))
+		.path("/")
 		.max_age(max_age)
 		.same_site(SameSite::None)
 		.secure(true)
@@ -317,12 +320,13 @@ fn grant_session_cookie(value: &GrantCookie<'_>, provider: &Provider) -> Result<
 	Ok(cookie)
 }
 
-/// Path attribute for the grant-session cookie. The set and removal cookies
-/// must use the same value: a cookie is only replaced (and thus removed) when
-/// its name, domain and path all match (RFC 6265 5.3), and a Set-Cookie
-/// without an explicit path defaults to the request-URI's directory.
-fn grant_session_cookie_path(callback_url: Option<&Url>) -> &str {
-	callback_url.map(Url::path).unwrap_or("/")
+fn grant_session_removal_cookie() -> String {
+	Cookie::build((GRANT_SESSION_COOKIE, EMPTY))
+		.path("/")
+		.secure(true)
+		.removal()
+		.build()
+		.to_string()
 }
 
 #[tracing::instrument(
@@ -420,12 +424,7 @@ pub(crate) async fn sso_callback_route(
 	let (user_id, session) =
 		complete_sso_session(&services, &provider, session, userinfo).await?;
 
-	let cookie = Cookie::build((GRANT_SESSION_COOKIE, EMPTY))
-		.path(grant_session_cookie_path(provider.callback_url.as_ref()))
-		.removal()
-		.build()
-		.to_string()
-		.into();
+	let cookie = grant_session_removal_cookie().into();
 
 	if let Some(redirect_url) = session
 		.redirect_url
@@ -1313,42 +1312,54 @@ mod tests {
 	}
 
 	#[test]
-	fn grant_session_cookie_path_uses_the_callback_path() {
-		let callback = Url::parse(
-			"https://matrix.example/_matrix/client/unstable/login/sso/callback/tuwunel_abc",
-		)
-		.expect("valid URL");
-
-		assert_eq!(
-			grant_session_cookie_path(Some(&callback)),
-			"/_matrix/client/unstable/login/sso/callback/tuwunel_abc"
-		);
-		assert_eq!(grant_session_cookie_path(None), "/");
-	}
-
-	#[test]
-	fn grant_session_removal_cookie_path_matches_the_set_cookie_path() {
+	fn grant_session_cookie_is_host_prefixed() {
 		let provider = authentik_provider();
 		let grant = grant_cookie(&provider, "https://client.example/return");
 		let set_cookie = grant_session_cookie(&grant, &provider).expect("grant session cookie");
 		let set = Cookie::parse_encoded(set_cookie.as_str()).expect("valid set cookie");
-		let removal = Cookie::build((GRANT_SESSION_COOKIE, EMPTY))
-			.path(grant_session_cookie_path(provider.callback_url.as_ref()))
-			.removal()
-			.build();
 
-		assert_eq!(set.path(), removal.path());
+		assert_eq!(set.name(), "__Host-tuwunel_grant_session");
+		assert_eq!((set.path(), set.domain()), (Some("/"), None));
 		assert_eq!(
 			(set.secure(), set.http_only(), set.same_site()),
 			(Some(true), Some(true), Some(SameSite::None))
 		);
+		assert_eq!(set.max_age().map(|age| age.whole_seconds()), Some(300));
+	}
 
-		assert!(
-			removal
-				.to_string()
-				.contains("Path=/_matrix/client/unstable/login/sso/callback/tuwunel_abc"),
-			"unexpected removal cookie: {removal}"
+	#[test]
+	fn grant_session_removal_cookie_matches_the_set_cookie() {
+		let provider = authentik_provider();
+		let grant = grant_cookie(&provider, "https://client.example/return");
+		let set_cookie = grant_session_cookie(&grant, &provider).expect("grant session cookie");
+		let set = Cookie::parse_encoded(set_cookie.as_str()).expect("valid set cookie");
+		let removal = grant_session_removal_cookie();
+		let removal = Cookie::parse(removal.as_str()).expect("valid removal cookie");
+
+		assert_eq!(
+			(removal.name(), removal.path(), removal.domain()),
+			(set.name(), set.path(), set.domain())
 		);
+		assert_eq!(removal.secure(), Some(true), "a __Host- cookie is only set when Secure");
+		assert_eq!(removal.value(), EMPTY);
+		assert_eq!(removal.max_age().map(|age| age.whole_seconds()), Some(0));
+	}
+
+	#[test]
+	fn grant_session_cookie_without_the_prefix_is_refused() {
+		let provider = authentik_provider();
+		let grant = grant_cookie(&provider, "https://client.example/return");
+		let session = Session {
+			cookie_nonce: Some(NONCE.to_owned()),
+			..Default::default()
+		};
+
+		let value = Cookie::new("tuwunel_grant_session", to_form_string(&grant).expect("serialize"));
+		let header = HeaderValue::from_str(&value.encoded().to_string()).expect("valid header");
+		let cookies = CookieJar::from_headers(&HeaderMap::from_iter([(COOKIE, header)]));
+
+		validate_session_cookie(&cookies, &provider, &session, STATE)
+			.expect_err("an unprefixed grant cookie is refused");
 	}
 
 	fn authentik_provider() -> Provider {
