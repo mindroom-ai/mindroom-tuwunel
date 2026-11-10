@@ -180,6 +180,7 @@ fn apple_userinfo_from_claim_values(
 		email_verified,
 		avatar_url: None,
 		picture: None,
+		hd: None,
 	}
 }
 

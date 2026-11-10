@@ -72,7 +72,7 @@ use ruma::{
 	OwnedMxcUri, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId,
 	api::client::discovery::discover_support::ContactRole,
 };
-use serde::{Deserialize, de::IgnoredAny};
+use serde::{Deserialize, Serialize, de::IgnoredAny};
 use smallstr::SmallString;
 use tuwunel_macros::config_example_generator;
 use url::Url;
@@ -1973,6 +1973,28 @@ pub struct IdentityProvider {
 	#[serde(default)]
 	pub assigned_accounts: BTreeMap<String, OwnedUserId>,
 
+	/// Rules for who may register through this provider, and the rooms their
+	/// new accounts join. Each rule is a set of claims, all of which must hold,
+	/// and optional rooms:
+	/// `[{ claims = { hd = "school.example" }, rooms = ["#students:example.com"] }]`.
+	/// The claims are `sub`, `preferred_username`, `username`, `nickname`,
+	/// `login`, `name`, `given_name`, `family_name`, `email`, and `hd` (Google's
+	/// hosted domain). Values match exactly, except that `email` and `hd` ignore
+	/// ASCII case, and `email` counts only when the provider verified it.
+	///
+	/// With no rules, registration works as before. With rules, a sign-in that
+	/// would create an account is refused unless it meets a rule; existing
+	/// accounts sign in as usual. A new account joins the rooms of every rule
+	/// it meets, after the account is made: when a room's join rule needs it,
+	/// the room's highest-powered local member invites the account first. A
+	/// failed join never fails the sign-in. Rooms are room IDs or local room
+	/// aliases. The rules are read at each sign-in, so a reload applies to the
+	/// next one.
+	///
+	/// default: []
+	#[serde(default)]
+	pub registration_rules: Vec<RegistrationRule>,
+
 	/// Setting this option to false will inhibit unique ID's from being
 	/// generated as a last-resort when determining a UserId from a provider's
 	/// claims. In the case of untrusted providers, when all provided claims
@@ -2094,6 +2116,34 @@ pub struct IdentityProvider {
 	/// default: false
 	#[serde(default)]
 	pub forward_action_prompt: bool,
+}
+
+/// The claims an identity provider's registration rule may name.
+pub const REGISTRATION_RULE_CLAIMS: &[&str] = &[
+	"sub",
+	"preferred_username",
+	"username",
+	"nickname",
+	"login",
+	"name",
+	"given_name",
+	"family_name",
+	"email",
+	"hd",
+];
+
+/// One of an identity provider's registration rules: claims that must all
+/// hold, and the rooms a new account that meets them joins.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistrationRule {
+	/// Claim names (see [`REGISTRATION_RULE_CLAIMS`]) and the values they
+	/// must have.
+	pub claims: BTreeMap<String, String>,
+
+	/// Room IDs or local room aliases a new account meeting the rule joins.
+	#[serde(default)]
+	pub rooms: Vec<OwnedRoomOrAliasId>,
 }
 
 impl IdentityProvider {

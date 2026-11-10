@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use tuwunel_core::utils::deserialize_lenient_bool;
 
@@ -47,6 +49,10 @@ pub struct UserInfo {
 
 	/// URL to pfp (google)
 	pub picture: Option<String>,
+
+	/// Google's hosted-domain claim: the Workspace domain of the account,
+	/// absent for consumer accounts.
+	pub hd: Option<String>,
 }
 
 impl UserInfo {
@@ -60,5 +66,119 @@ impl UserInfo {
 		self.email
 			.as_deref()
 			.filter(|_| self.email_verified.unwrap_or(trusted))
+	}
+
+	/// Whether every claim of a registration rule holds. An empty rule and an
+	/// unknown claim name never hold. `email` counts only when the provider
+	/// vouches for it, and `email` and `hd` ignore ASCII case; the others are
+	/// exact.
+	#[must_use]
+	pub fn meets(&self, claims: &BTreeMap<String, String>, trusted: bool) -> bool {
+		let exact = |have: Option<&str>, want: &str| have == Some(want);
+		let folded = |have: Option<&str>, want: &str| {
+			have.is_some_and(|have| have.eq_ignore_ascii_case(want))
+		};
+
+		!claims.is_empty()
+			&& claims
+				.iter()
+				.all(|(claim, want)| match claim.as_str() {
+					| "sub" => exact(Some(&self.sub), want),
+					| "preferred_username" => exact(self.preferred_username.as_deref(), want),
+					| "username" => exact(self.username.as_deref(), want),
+					| "nickname" => exact(self.nickname.as_deref(), want),
+					| "login" => exact(self.login.as_deref(), want),
+					| "name" => exact(self.name.as_deref(), want),
+					| "given_name" => exact(self.given_name.as_deref(), want),
+					| "family_name" => exact(self.family_name.as_deref(), want),
+					| "email" => folded(self.verified_email(trusted), want),
+					| "hd" => folded(self.hd.as_deref(), want),
+					| _ => false,
+				})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::collections::BTreeMap;
+
+	use super::UserInfo;
+
+	fn claims(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+		pairs
+			.iter()
+			.map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+			.collect()
+	}
+
+	#[test]
+	fn meets_hd_ignoring_case() {
+		let user = UserInfo {
+			hd: Some("EXAMPLE.com".into()),
+			..Default::default()
+		};
+
+		assert!(user.meets(&claims(&[("hd", "example.com")]), false));
+		assert!(!user.meets(&claims(&[("hd", "other.example")]), false));
+		assert!(!UserInfo::default().meets(&claims(&[("hd", "example.com")]), false));
+	}
+
+	#[test]
+	fn meets_email_only_when_verified() {
+		let rule = claims(&[("email", "alice@school.example")]);
+		let user = |email_verified| UserInfo {
+			email: Some("Alice@School.example".into()),
+			email_verified,
+			..Default::default()
+		};
+
+		assert!(user(Some(true)).meets(&rule, false));
+		assert!(!user(Some(false)).meets(&rule, false));
+		assert!(!user(Some(false)).meets(&rule, true));
+		assert!(!user(None).meets(&rule, false));
+		assert!(user(None).meets(&rule, true));
+	}
+
+	#[test]
+	fn meets_never_matches_empty_claims() {
+		let user = UserInfo { sub: "1".into(), ..Default::default() };
+
+		assert!(!user.meets(&BTreeMap::new(), true));
+	}
+
+	#[test]
+	fn meets_needs_every_claim() {
+		let rule = claims(&[("hd", "example.com"), ("email", "alice@example.com")]);
+		let user = UserInfo {
+			hd: Some("example.com".into()),
+			email: Some("alice@example.com".into()),
+			email_verified: Some(true),
+			..Default::default()
+		};
+
+		assert!(user.meets(&rule, false));
+		assert!(!UserInfo { hd: None, ..user.clone() }.meets(&rule, false));
+		assert!(!UserInfo { email_verified: Some(false), ..user }.meets(&rule, false));
+	}
+
+	#[test]
+	fn meets_other_claims_exactly() {
+		let user = UserInfo {
+			sub: "42".into(),
+			name: Some("Alice".into()),
+			..Default::default()
+		};
+
+		assert!(user.meets(&claims(&[("name", "Alice")]), false));
+		assert!(!user.meets(&claims(&[("name", "alice")]), false));
+		assert!(user.meets(&claims(&[("sub", "42")]), false));
+	}
+
+	#[test]
+	fn meets_fails_on_unknown_claim() {
+		let user = UserInfo { sub: "1".into(), ..Default::default() };
+
+		assert!(!user.meets(&claims(&[("groups", "x")]), false));
+		assert!(!user.meets(&claims(&[("sub", "1"), ("groups", "x")]), false));
 	}
 }
