@@ -76,10 +76,13 @@ mod tests {
 				.expect("SSO response should include grant cookie")
 				.to_str()
 				.expect("Set-Cookie header should be UTF-8");
+			let attributes: Vec<_> = set_cookie.split("; ").collect();
 			assert!(
-				set_cookie.contains("Path=/_matrix/client/"),
-				"Matrix client callback should use the hardened shared client cookie path: \
-				 {set_cookie}",
+				set_cookie.starts_with("__Host-tuwunel_grant_session=")
+					&& attributes.contains(&"Secure")
+					&& attributes.contains(&"Path=/")
+					&& !set_cookie.contains("Domain="),
+				"grant cookie should be a host-only __Host- cookie: {set_cookie}",
 			);
 
 			Ok(())

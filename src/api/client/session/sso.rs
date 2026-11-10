@@ -1359,8 +1359,10 @@ mod tests {
 		let header = HeaderValue::from_str(&value.encoded().to_string()).expect("valid header");
 		let cookies = CookieJar::from_headers(&HeaderMap::from_iter([(COOKIE, header)]));
 
-		validate_session_cookie(&cookies, &provider, &session, STATE)
+		let error = validate_session_cookie(&cookies, &provider, &session, STATE)
 			.expect_err("an unprefixed grant cookie is refused");
+
+		assert!(error.to_string().contains("Missing cookie"), "unexpected error: {error}");
 	}
 
 	fn authentik_provider() -> Provider {
