@@ -6,8 +6,9 @@ This document describes the current MindRoom fork behavior on top of upstream
 is upstream `main` at `8c6c4a210`, 294 commits past the `v1.9.4` release
 (`f473d9a4a`). Earlier changes merged upstream and dropped from the fork
 include the room-creation default power-level override and the SSO grant-cookie
-path hardening (2026-07-07 rebase), and the drained/zero one-time-key counts
-fix and public MatrixRTC transport discovery (2026-07-21 rebase, upstream
+path hardening (2026-07-07 rebase; the cookie's name and path now differ
+again), and the drained/zero one-time-key counts fix and public MatrixRTC
+transport discovery (2026-07-21 rebase, upstream
 `164b8da61`/`007033cd5` and `a1776c368`). The Sliding Sync `num_live`
 correction was dropped at v1.9.0 because upstream now contains the same
 implementation and tests (`6acc3a7d1`, `942dd66e3`, and `a508c7331`).
@@ -743,6 +744,19 @@ Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,
 in `src/main/tests/sso_assigned_account.rs`, `src/service/users/tests.rs`
 and `src/core/config/tests.rs`.
 
+### The SSO grant cookie uses the `__Host-` prefix
+
+The cookie that carries an SSO sign-in from the redirect to the callback is
+now `__Host-tuwunel_grant_session`, set with `Secure`, `Path=/` and no
+`Domain`, so other hosts under the same domain cannot set it. The callback
+reads only that name, and the removal cookie has the same name, `Path=/` and
+`Secure`. Every provider now shares one cookie, so of two sign-ins started
+at once in one browser only the later one completes. A sign-in started
+before the upgrade fails at its callback once and succeeds when retried.
+Upstream names the cookie `tuwunel_grant_session` and scopes it to the
+callback path. File: `src/api/client/session/sso.rs`; tests in that file
+and `src/mindroom-tests/tests/sso_redirect.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every
@@ -1313,8 +1327,8 @@ Design note — why deactivation takes a reason (vs Synapse/upstream):
   `src/service/users/sso.rs` above `DeactivationReason`.
 
 Note: the SSO grant-cookie path hardening this fork originally carried (matching
-set and removal cookie paths) was merged upstream, so it is no longer a fork
-delta.
+set and removal cookie paths) was merged upstream. The fork now differs on that
+cookie again: see "The SSO grant cookie uses the `__Host-` prefix" above.
 
 ### 3) `auth/apple: native iOS Apple login exchange`
 Files:
