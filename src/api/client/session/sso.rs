@@ -1324,7 +1324,7 @@ mod tests {
 			(set.secure(), set.http_only(), set.same_site()),
 			(Some(true), Some(true), Some(SameSite::None))
 		);
-		assert_eq!(set.max_age().map(|age| age.whole_seconds()), Some(300));
+		assert_eq!(set.max_age(), Duration::from_secs(300).try_into().ok());
 	}
 
 	#[test]
@@ -1342,7 +1342,7 @@ mod tests {
 		);
 		assert_eq!(removal.secure(), Some(true), "a __Host- cookie is only set when Secure");
 		assert_eq!(removal.value(), EMPTY);
-		assert_eq!(removal.max_age().map(|age| age.whole_seconds()), Some(0));
+		assert_eq!(removal.max_age(), Duration::ZERO.try_into().ok());
 	}
 
 	#[test]
