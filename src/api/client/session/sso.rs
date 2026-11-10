@@ -1324,7 +1324,7 @@ mod tests {
 			(set.secure(), set.http_only(), set.same_site()),
 			(Some(true), Some(true), Some(SameSite::None))
 		);
-		assert_eq!(set.max_age(), Duration::from_secs(300).try_into().ok());
+		assert_eq!(set.max_age(), Duration::from_mins(5).try_into().ok());
 	}
 
 	#[test]
