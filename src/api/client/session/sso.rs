@@ -1354,7 +1354,8 @@ mod tests {
 			..Default::default()
 		};
 
-		let value = Cookie::new("tuwunel_grant_session", to_form_string(&grant).expect("serialize"));
+		let value =
+			Cookie::new("tuwunel_grant_session", to_form_string(&grant).expect("serialize"));
 		let header = HeaderValue::from_str(&value.encoded().to_string()).expect("valid header");
 		let cookies = CookieJar::from_headers(&HeaderMap::from_iter([(COOKIE, header)]));
 
