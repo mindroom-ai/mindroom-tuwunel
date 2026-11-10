@@ -749,11 +749,13 @@ and `src/core/config/tests.rs`.
 The cookie that carries an SSO sign-in from the redirect to the callback is
 now `__Host-tuwunel_grant_session`, set with `Secure`, `Path=/` and no
 `Domain`, so other hosts under the same domain cannot set it. The callback
-reads only that name, and the removal cookie carries the same attributes.
-Every provider now shares one cookie, so of two sign-ins started at once in
-one browser only the later one completes. A sign-in started before the
-upgrade fails at its callback once and succeeds when retried. Upstream names the cookie `tuwunel_grant_session` and scopes it
-to the callback path. File: `src/api/client/session/sso.rs`.
+reads only that name, and the removal cookie has the same name, `Path=/` and
+`Secure`. Every provider now shares one cookie, so of two sign-ins started
+at once in one browser only the later one completes. A sign-in started
+before the upgrade fails at its callback once and succeeds when retried.
+Upstream names the cookie `tuwunel_grant_session` and scopes it to the
+callback path. File: `src/api/client/session/sso.rs`; tests in that file
+and `src/mindroom-tests/tests/sso_redirect.rs`.
 
 ### Sliding sync receipts and typing only for joined rooms
 
