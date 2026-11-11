@@ -845,15 +845,20 @@ invite and gets the invite refusal. The upgrade route refuses an external
 requester with the create refusal at its entry, as it names the server user the
 creator of an upgraded admin room, whose create event the central check passes.
 The `user_can_invite` probe goes through the same builder, so an external
-account is never chosen to authorise someone else's restricted join.
-After a room upgrade, external members cannot join the
-replacement room by following the tombstone: the upgrade moves only the creator
-and the sender (`move_member`), so someone in the new room invites them.
+account is never chosen to authorise someone else's restricted join. An
+external account is never a server admin: `user_is_admin` is false for it even
+in the admin room (so the admin API and admin commands refuse it, and
+`user_is_last_admin` ignores it), and the admin grant (`make_user_admin`)
+refuses it with "This account may not be a server admin.", so admin routes that
+act as the server user cannot carry it out of its rooms. After a room upgrade,
+external members cannot join the replacement room by following the tombstone:
+the upgrade moves only the creator and the sender (`move_member`), so someone in
+the new room invites them.
 Upstream has no such accounts.
 Files: `src/core/config/mod.rs`, `tuwunel-example.toml`,
 `src/database/maps.rs`, `src/service/users/{mod.rs,sso.rs,register.rs}`,
 `src/service/rooms/timeline/create.rs`, `src/service/rooms/alias/mod.rs`,
-`src/api/client/room/upgrade.rs`,
+`src/api/client/room/upgrade.rs`, `src/service/admin/{mod.rs,grant.rs}`,
 `src/service/membership/{join.rs,invite.rs,join_with_invite.rs}`,
 `src/api/client/{session/sso.rs,room/create.rs,user_directory.rs}`,
 `src/api/client/session/sso/native_apple.rs`,

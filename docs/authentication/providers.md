@@ -418,7 +418,10 @@ rule with `external = true` marks the accounts it creates as external:
 - Their user directory searches find only people they share a room with, even
   with `directory.users.show_all_local` (`show_all_local_users_in_user_directory`).
 - They are not made the server's admin as its first account, and they join none
-  of `auto_join_rooms`.
+  of `auto_join_rooms`. An external account is never a server admin:
+  `user_is_admin` is false for it even in the admin room, and the admin grant
+  refuses it, so admin routes that act as the server user cannot carry it out of
+  its rooms.
 
 An account meeting several rules is external when any of them is. Admins can
 still join an external account to a room by inviting it first, as the admin

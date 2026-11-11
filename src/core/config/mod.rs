@@ -2010,7 +2010,10 @@ pub struct IdentityProvider {
 	/// the user directory only people it shares a room with. Admins still join
 	/// it to a room by inviting it first, as the admin join API does;
 	/// `force-join-room` is refused. Do not list rooms whose members gain
-	/// privileges by membership. The mark is set when the account is created;
+	/// privileges by membership. An external account is never a server admin:
+	/// `user_is_admin` is false for it even in the admin room, and the admin
+	/// grant refuses it, so admin routes that act as the server user cannot
+	/// carry it out of its rooms. The mark is set when the account is created;
 	/// later sign-ins and rule changes neither set nor clear it.
 	///
 	/// default: []

@@ -225,8 +225,8 @@ struct Membership {
 }
 
 /// Refuse what an external account may not author: a room's create event, an
-/// invite (a third-party invite too), and its own join to a room it is neither joined to nor invited to.
-/// Every local event is built here, so the state endpoint, room upgrades and
+/// invite (a third-party invite too), and its own join to a room it is neither
+/// joined to nor invited to. Every local event is built here, so the state endpoint, room upgrades and
 /// remote invites meet the refusals `createRoom`, `/invite` and `/join` do.
 /// Only those event types read the account's mark.
 #[implement(super::Service)]

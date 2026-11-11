@@ -92,6 +92,8 @@ const NO_ROOMS: &str = "This account may not create rooms.";
 
 const NO_ALIASES: &str = "This account may not create room aliases.";
 
+const NO_ADMIN: &str = "This account may not be a server admin.";
+
 const NO_INVITES: &str = "This account may not invite others.";
 
 /// The rooms the rules name, and two that external accounts are kept out of,
@@ -590,8 +592,9 @@ fn external_account_creates_no_room_alias() -> Result {
 }
 
 /// An external account upgrades no room, not even the admin room, whose
-/// replacement the server user would create: the route refuses it before
-/// anything else, so the old room gets no tombstone.
+/// replacement the server user would create. The guest is not in the admin
+/// room, so the 403 with the create text proves the entry check runs before
+/// the power check; the old room gets no tombstone.
 #[test]
 fn external_account_upgrades_no_admin_room() -> Result {
 	run("sso-registration-rules-external-upgrade", async |services, base| {
@@ -622,6 +625,63 @@ fn external_account_upgrades_no_admin_room() -> Result {
 
 		Ok(())
 	})
+}
+
+/// An external account an admin invites into the admin room and that joins it
+/// is still no admin, so the admin API refuses it, and granting it admin is
+/// refused.
+#[test]
+fn external_account_is_never_a_server_admin() -> Result {
+	let options = ["registration.grant_admin_to_first_user=false"];
+
+	run_with(
+		"sso-registration-rules-external-admin-never",
+		&options,
+		async |services, base| {
+			make_rooms(services, base).await?;
+			let creator = creator(services, base);
+			let (guest_id, guest) = sign_in_with(services, base, "guest", GUEST_TOKEN).await?;
+
+			services
+				.admin
+				.make_user_admin(&creator_id(services)?)
+				.await?;
+
+			let admin_room = services.admin.get_admin_room().await?;
+
+			creator
+				.post_url(
+					&creator.url(&format!("rooms/{admin_room}/invite")),
+					&json!({ "user_id": guest_id }),
+				)
+				.await?;
+			guest
+				.post(&format!("join/{admin_room}"), &json!({}))
+				.await?;
+
+			assert_eq!(
+				membership_of(services, &guest_id, &admin_room).await,
+				Some(MembershipState::Join)
+			);
+			assert!(!services.admin.user_is_admin(&guest_id).await, "the guest is no admin");
+
+			let reply = guest
+				.admin_api(Method::GET, &format!("v1/users/{guest_id}/admin"), &json!({}), 403)
+				.await?;
+
+			assert!(reply.contains("Only server administrators"), "{reply}");
+
+			let grant = services
+				.admin
+				.make_user_admin(&guest_id)
+				.await
+				.expect_err("the grant is refused");
+
+			assert!(grant.to_string().contains(NO_ADMIN), "{grant}");
+
+			Ok(())
+		},
+	)
 }
 
 /// A joined external account sends no third-party invite, even in a room
