@@ -715,8 +715,7 @@ async fn complete_sso_session(
 		};
 
 		let created = !services.users.exists(&user_id).await;
-		let mut rooms = Vec::new();
-		if created {
+		let rooms = if created {
 			let origin = match provider.registration {
 				| true => "sso",
 				// Present in LDAP is an existing user to provision, not a new registration.
@@ -727,9 +726,10 @@ async fn complete_sso_session(
 					))),
 			};
 
-			rooms =
-				register_user(services, provider, &session, &userinfo, &user_id, origin).await?;
-		}
+			register_user(services, provider, &session, &userinfo, &user_id, origin).await?
+		} else {
+			Vec::new()
+		};
 
 		// An account a first sign-in takes by name is held from here until its link
 		// is stored (creating it takes the same lock), so no assignment links it

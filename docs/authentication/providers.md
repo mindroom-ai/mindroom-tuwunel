@@ -407,7 +407,10 @@ rule with `external = true` marks the accounts it creates as external:
   endpoint, an admin command. Leaving, knocking and accepting an invite work as
   usual; an approved knock is an invite. The rule's own rooms invite the account
   first, whatever their join rule.
-- They create no rooms, upgrades included, and invite no one.
+- They create no rooms, upgrades included, no room aliases, and invite no one.
+  After a room upgrade they cannot join the replacement room by following the
+  tombstone; someone in the new room invites them (the upgrade moves only the
+  room's creator and the upgrading sender).
 - Their user directory searches find only people they share a room with, even
   with `directory.users.show_all_local` (`show_all_local_users_in_user_directory`).
 - They are not made the server's admin as its first account, and they join none

@@ -35,7 +35,7 @@ use tuwunel_core::{
 	err,
 	result::NotFound,
 	ruma::{
-		OwnedRoomId, OwnedRoomOrAliasId, OwnedUserId, RoomId, UserId,
+		OwnedRoomId, OwnedRoomOrAliasId, OwnedUserId, RoomAliasId, RoomId, UserId,
 		events::room::member::MembershipState,
 	},
 };
@@ -89,6 +89,8 @@ const REASON: &str = "Automatically joining this room upon registration";
 const UNINVITED: &str = "This account may join a room only when invited.";
 
 const NO_ROOMS: &str = "This account may not create rooms.";
+
+const NO_ALIASES: &str = "This account may not create room aliases.";
 
 const NO_INVITES: &str = "This account may not invite others.";
 
@@ -551,6 +553,39 @@ fn external_account_creates_and_invites_nothing() -> Result {
 			.await?;
 
 		forbidden(upgrade, NO_ROOMS).await
+	})
+}
+
+/// An external account creates no room alias, while a staff account's same
+/// call succeeds.
+#[test]
+fn external_account_creates_no_room_alias() -> Result {
+	run("sso-registration-rules-external-alias", async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let (_, guest) = sign_in_with(services, base, "guest", GUEST_TOKEN).await?;
+		let (_, amy) = sign_in_with(services, base, "amy", AMY_TOKEN).await?;
+		let target = json!({ "room_id": rooms.class });
+
+		let squat = guest
+			.request(Method::PUT, &guest.url("directory/room/%23squat:localhost"), &target)
+			.await?;
+
+		forbidden(squat, NO_ALIASES).await?;
+		assert!(
+			services
+				.alias
+				.resolve_local_alias(&RoomAliasId::parse("#squat:localhost")?)
+				.await
+				.is_err(),
+			"the alias was not created"
+		);
+
+		let staff = amy
+			.request(Method::PUT, &amy.url("directory/room/%23staffalias:localhost"), &target)
+			.await?;
+
+		assert!(staff.status().is_success(), "staff creates an alias: {}", staff.status());
+		Ok(())
 	})
 }
 

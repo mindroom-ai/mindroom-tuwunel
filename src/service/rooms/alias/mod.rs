@@ -46,9 +46,10 @@ impl crate::Service for Service {
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
 }
 
-/// Refuses a user's alias creation when `allow_room_alias_creation` is off.
+/// Refuses a user's alias creation when `allow_room_alias_creation` is off, and
+/// always for an external account.
 ///
-/// Appservices and server admins are exempt. Callers run it before creating
+/// Appservices and server admins are exempt from the setting. Callers run it before creating
 /// anything, so a refusal leaves no room or alias behind.
 #[implement(Service)]
 #[tracing::instrument(skip(self, appservice_info), level = "trace")]
@@ -57,6 +58,11 @@ pub async fn creation_check(
 	user_id: &UserId,
 	appservice_info: Option<&RegistrationInfo>,
 ) -> Result {
+	self.services
+		.users
+		.external_alias_check(user_id)
+		.await?;
+
 	if self.services.config.rooms.allow_alias_creation
 		|| appservice_info.is_some()
 		|| self.services.admin.user_is_admin(user_id).await

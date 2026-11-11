@@ -2003,8 +2003,9 @@ pub struct IdentityProvider {
 	///
 	/// A new account meeting a rule with `external = true` is external: it
 	/// joins only rooms it is invited to (its rules' rooms invite it first,
-	/// whatever their join rule), creates no rooms, invites no one, and finds
-	/// in the user directory only people it shares a room with. Admins still
+	/// whatever their join rule), creates no rooms or room aliases, invites no
+	/// one, and finds in the user directory only people it shares a room
+	/// with. Admins still
 	/// join it to a room by inviting it first, as the admin join API does;
 	/// `force-join-room` is refused. Do not list rooms whose members gain
 	/// privileges by membership. The mark is set when the account is created;
@@ -2165,8 +2166,9 @@ pub struct RegistrationRule {
 	pub rooms: Vec<OwnedRoomOrAliasId>,
 
 	/// Whether a new account meeting the rule is external: it joins only
-	/// rooms it is invited to, creates no rooms, invites no one, and finds in
-	/// the user directory only people it shares a room with. The mark is set
+	/// rooms it is invited to, creates no rooms or room aliases, invites no
+	/// one, and finds in the user directory only people it shares a room
+	/// with. The mark is set
 	/// when the account is created and kept; later sign-ins and rule changes
 	/// neither set nor clear it.
 	#[serde(default)]

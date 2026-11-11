@@ -127,6 +127,14 @@ impl Service {
 			.ok_or_else(|| err!(Request(Forbidden("This account may not create rooms."))))
 	}
 
+	/// Refuse an external account's room alias creation.
+	pub async fn external_alias_check(&self, user_id: &UserId) -> Result {
+		self.is_external(user_id)
+			.await
+			.is_false()
+			.ok_or_else(|| err!(Request(Forbidden("This account may not create room aliases."))))
+	}
+
 	/// Refuse an external account's invite.
 	pub async fn external_invite_check(&self, user_id: &UserId) -> Result {
 		self.is_external(user_id)

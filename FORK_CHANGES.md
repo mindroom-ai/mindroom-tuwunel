@@ -797,7 +797,8 @@ chained sign-ins, sign-in works as before. Upstream has no such option.
 Files: `src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
 `src/service/oauth/user_info.rs`,
 `src/service/membership/{mod.rs,join_with_invite.rs}`,
-`src/api/client/session/sso.rs`, `docs/authentication/providers.md`; tests in
+`src/api/client/session/sso.rs`, `src/api/client/session/sso/native_apple.rs`,
+`docs/authentication/providers.md`; tests in
 `src/main/tests/sso_registration_rules.rs`,
 `src/service/oauth/user_info.rs` and `src/core/config/tests.rs`.
 
@@ -835,11 +836,20 @@ API invite it first; `force-join-room`, which joins without one, is refused.
 An external requester's user directory search keeps only users it shares a
 joined room with, whatever `directory.users.show_all_local` says. Such a
 rule should not list rooms whose members gain privileges by membership: the
-rule invites the account there. Upstream has no such accounts. Files: `src/core/config/mod.rs`, `tuwunel-example.toml`,
+rule invites the account there. An external account also creates no room
+alias: `alias::creation_check`, which `PUT /directory/room/{alias}` and
+`createRoom`'s `room_alias_name` call, refuses it with "This account may not
+create room aliases." (`users::external_alias_check`); server-internal alias
+creation is unaffected. After a room upgrade, external members cannot join the
+replacement room by following the tombstone: the upgrade moves only the creator
+and the sender (`move_member`), so someone in the new room invites them.
+Upstream has no such accounts.
+Files: `src/core/config/mod.rs`, `tuwunel-example.toml`,
 `src/database/maps.rs`, `src/service/users/{mod.rs,sso.rs,register.rs}`,
-`src/service/rooms/timeline/create.rs`,
+`src/service/rooms/timeline/create.rs`, `src/service/rooms/alias/mod.rs`,
 `src/service/membership/{join.rs,invite.rs,join_with_invite.rs}`,
 `src/api/client/{session/sso.rs,room/create.rs,user_directory.rs}`,
+`src/api/client/session/sso/native_apple.rs`,
 `docs/authentication/providers.md`; tests in
 `src/main/tests/sso_registration_rules.rs`.
 
@@ -1644,6 +1654,10 @@ native_client_ids = ["chat.mindroom.app"]
   `m.login.password` and `m.login.sso` in UIAA (upstream's rule since v1.9.3);
   before v1.9.3 the fork offered such accounts SSO only.
 - Native Apple login requires the app bundle ID in `native_client_ids`.
+- An image without registration rules ignores `registration_rules` (only the
+  rule's own fields are `deny_unknown_fields`, so the config still loads) and
+  the stored external mark, so downgrading lifts the confinement of external
+  accounts.
 - A client that lost its crypto store but kept its access token receives 403
   `M_FORBIDDEN` on `/keys/upload` until it logs in again (device identity keys
   are immutable per device id).
