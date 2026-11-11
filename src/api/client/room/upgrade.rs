@@ -76,6 +76,14 @@ pub(crate) async fn upgrade_room_route(
 	body: Ruma<v3::Request>,
 ) -> Result<v3::Response> {
 	let sender_user = body.sender_user();
+
+	// The new room's creator may be the server user, whose create event the
+	// central check passes, so an external account is refused here, first.
+	services
+		.users
+		.external_create_check(sender_user)
+		.await?;
+
 	let new_version = &body.new_version;
 	let version_rules = room_version::rules(new_version)?;
 

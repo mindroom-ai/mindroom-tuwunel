@@ -36,7 +36,7 @@ use tuwunel_core::{
 	result::NotFound,
 	ruma::{
 		OwnedRoomId, OwnedRoomOrAliasId, OwnedUserId, RoomAliasId, RoomId, UserId,
-		events::room::member::MembershipState,
+		events::{StateEventType, room::member::MembershipState},
 	},
 };
 use tuwunel_service::{
@@ -589,6 +589,79 @@ fn external_account_creates_no_room_alias() -> Result {
 	})
 }
 
+/// An external account upgrades no room, not even the admin room, whose
+/// replacement the server user would create: the route refuses it before
+/// anything else, so the old room gets no tombstone.
+#[test]
+fn external_account_upgrades_no_admin_room() -> Result {
+	run("sso-registration-rules-external-upgrade", async |services, base| {
+		make_rooms(services, base).await?;
+		let (_, guest) = sign_in_with(services, base, "guest", GUEST_TOKEN).await?;
+		let admin_room = services.admin.get_admin_room().await?;
+		let version = services
+			.state
+			.get_room_version(&admin_room)
+			.await?;
+
+		let upgrade = guest
+			.post_url(
+				&guest.url(&format!("rooms/{admin_room}/upgrade")),
+				&json!({ "new_version": version }),
+			)
+			.await?;
+
+		forbidden(upgrade, NO_ROOMS).await?;
+		assert!(
+			services
+				.state_accessor
+				.room_state_get(&admin_room, &StateEventType::RoomTombstone, "")
+				.await
+				.is_err(),
+			"the admin room has no tombstone"
+		);
+
+		Ok(())
+	})
+}
+
+/// A joined external account sends no third-party invite, even in a room
+/// whose power levels would let it.
+#[test]
+fn external_account_sends_no_third_party_invite() -> Result {
+	run("sso-registration-rules-external-third-party", async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let creator = creator(services, base);
+		let (guest_id, guest) = sign_in_with(services, base, "guest", GUEST_TOKEN).await?;
+
+		assert_eq!(
+			membership_of(services, &guest_id, &rooms.class).await,
+			Some(MembershipState::Join)
+		);
+
+		let power_levels = format!("rooms/{}/state/m.room.power_levels", rooms.class);
+		let mut levels = creator.get(&power_levels).await?;
+
+		levels["invite"] = json!(0);
+		levels["events"]["m.room.third_party_invite"] = json!(0);
+		creator.put(&power_levels, &levels).await?;
+
+		let invite = guest
+			.request(
+				Method::PUT,
+				&guest
+					.url(&format!("rooms/{}/state/m.room.third_party_invite/token", rooms.class)),
+				&json!({
+					"display_name": "Alice",
+					"key_validity_url": "https://school.example/validity",
+					"public_key": "dGVzdA",
+				}),
+			)
+			.await?;
+
+		forbidden(invite, NO_INVITES).await
+	})
+}
+
 /// An external account's directory search finds only people it shares a
 /// room with, although the server shows every local user to others.
 #[test]
@@ -698,6 +771,7 @@ fn external_account_skips_registration_extras() -> Result {
 
 		assert_eq!(membership_of(services, &guest_id, &rooms.public).await, None);
 		assert!(!services.admin.user_is_admin(&guest_id).await, "the guest is no admin");
+		assert!(services.admin.user_is_admin(&amy_id).await, "the grant went to amy instead");
 		assert_eq!(
 			membership_of(services, &amy_id, &rooms.public).await,
 			Some(MembershipState::Join)

@@ -225,7 +225,7 @@ struct Membership {
 }
 
 /// Refuse what an external account may not author: a room's create event, an
-/// invite, and its own join to a room it is neither joined to nor invited to.
+/// invite (a third-party invite too), and its own join to a room it is neither joined to nor invited to.
 /// Every local event is built here, so the state endpoint, room upgrades and
 /// remote invites meet the refusals `createRoom`, `/invite` and `/join` do.
 /// Only those event types read the account's mark.
@@ -242,6 +242,7 @@ async fn external_sender_check(
 
 	match event_type {
 		| TimelineEventType::RoomCreate => users.external_create_check(sender).await,
+		| TimelineEventType::RoomThirdPartyInvite => users.external_invite_check(sender).await,
 		| TimelineEventType::RoomMember => {
 			// Content without a membership is left to the auth rules, which refuse it.
 			let Ok(Membership { membership }) = content.deserialize_as_unchecked() else {

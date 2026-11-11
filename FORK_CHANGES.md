@@ -840,13 +840,20 @@ rule invites the account there. An external account also creates no room
 alias: `alias::creation_check`, which `PUT /directory/room/{alias}` and
 `createRoom`'s `room_alias_name` call, refuses it with "This account may not
 create room aliases." (`users::external_alias_check`); server-internal alias
-creation is unaffected. After a room upgrade, external members cannot join the
+creation is unaffected. A third-party invite (`m.room.third_party_invite`) is an
+invite and gets the invite refusal. The upgrade route refuses an external
+requester with the create refusal at its entry, as it names the server user the
+creator of an upgraded admin room, whose create event the central check passes.
+The `user_can_invite` probe goes through the same builder, so an external
+account is never chosen to authorise someone else's restricted join.
+After a room upgrade, external members cannot join the
 replacement room by following the tombstone: the upgrade moves only the creator
 and the sender (`move_member`), so someone in the new room invites them.
 Upstream has no such accounts.
 Files: `src/core/config/mod.rs`, `tuwunel-example.toml`,
 `src/database/maps.rs`, `src/service/users/{mod.rs,sso.rs,register.rs}`,
 `src/service/rooms/timeline/create.rs`, `src/service/rooms/alias/mod.rs`,
+`src/api/client/room/upgrade.rs`,
 `src/service/membership/{join.rs,invite.rs,join_with_invite.rs}`,
 `src/api/client/{session/sso.rs,room/create.rs,user_directory.rs}`,
 `src/api/client/session/sso/native_apple.rs`,

@@ -393,8 +393,10 @@ room that rightly names it, and new accounts are invited there. The admin room
 is never joined this way, by alias or ID: its members are server admins. Nor is
 a room an upgrade replaced (one with an `m.room.tombstone`), such as an old
 admin room. A skipped room, like a room this server is not in or any other
-failed join, is logged and never fails the sign-in. A reload applies to the
-next sign-in.
+failed join, is logged and never fails the sign-in. The rooms are joined only on
+the sign-in that creates the account: if that sign-in fails after the account
+exists, later sign-ins join nothing and an admin invites. A reload applies to
+the next sign-in.
 
 #### External accounts
 
@@ -407,7 +409,9 @@ rule with `external = true` marks the accounts it creates as external:
   endpoint, an admin command. Leaving, knocking and accepting an invite work as
   usual; an approved knock is an invite. The rule's own rooms invite the account
   first, whatever their join rule.
-- They create no rooms, upgrades included, no room aliases, and invite no one.
+- They create no rooms, upgrades included (the upgrade route refuses them
+  before anything happens), no room aliases, and invite no one, third-party
+  invites (`m.room.third_party_invite`) included.
   After a room upgrade they cannot join the replacement room by following the
   tombstone; someone in the new room invites them (the upgrade moves only the
   room's creator and the upgrading sender).

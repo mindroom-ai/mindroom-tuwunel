@@ -51,8 +51,19 @@ pub struct UserInfo {
 	pub picture: Option<String>,
 
 	/// Google's hosted-domain claim: the Workspace domain of the account,
-	/// absent for consumer accounts.
+	/// absent for consumer accounts; any claim that is not a string is absent.
+	#[serde(default, deserialize_with = "lenient_string")]
 	pub hd: Option<String>,
+}
+
+fn lenient_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+	D: serde::Deserializer<'de>,
+{
+	Ok(match serde_json::Value::deserialize(deserializer)? {
+		| serde_json::Value::String(string) => Some(string),
+		| _ => None,
+	})
 }
 
 impl UserInfo {
@@ -109,6 +120,18 @@ mod tests {
 			.iter()
 			.map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
 			.collect()
+	}
+
+	#[test]
+	fn non_string_hd_is_absent() {
+		let user: UserInfo = serde_json::from_str(r#"{"sub": "1", "hd": true}"#).unwrap();
+
+		assert_eq!(user.hd, None);
+
+		let user: UserInfo =
+			serde_json::from_str(r#"{"sub": "1", "hd": "example.com"}"#).unwrap();
+
+		assert_eq!(user.hd.as_deref(), Some("example.com"));
 	}
 
 	#[test]

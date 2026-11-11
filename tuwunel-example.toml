@@ -2432,23 +2432,25 @@
 # highest-powered active local member that may invite. That is never the
 # server's own user or an appservice (bridge) account, which have no
 # password, nor a locked, suspended or external account, so a room whose
-# only possible inviter is such an account is skipped. Rooms are
-# room IDs or local room aliases. Any local user may point an alias
+# only possible inviter is such an account is skipped. Rooms are room IDs
+# or local room aliases. Any local user may point an alias
 # nothing holds at any room, so an alias is used only when the room it
 # resolves to names it in its own `m.room.canonical_alias`; room IDs are
 # the robust choice. Whoever first creates a room with an alias a rule
 # names that no room has yet owns a room that rightly names it, and new
 # accounts are invited there. The admin room, and any room an upgrade
 # replaced, are never joined this way. A skipped room, like any failed
-# join, never fails the sign-in. The rules are read at each sign-in, so a
-# reload applies to the next one.
+# join, never fails the sign-in. The rooms are joined only on the sign-in
+# that creates the account: if it fails after the account exists, later
+# sign-ins join nothing, and an admin invites. The rules are read at each
+# sign-in, so a reload applies to the next one.
 #
 # A new account meeting a rule with `external = true` is external: it
 # joins only rooms it is invited to (its rules' rooms invite it first,
-# whatever their join rule), creates no rooms or room aliases, invites no
-# one, and finds in the user directory only people it shares a room
-# with. Admins still
-# join it to a room by inviting it first, as the admin join API does;
+# whatever their join rule), creates no rooms or room aliases, upgrades
+# no rooms, invites no one (third-party invites included), and finds in
+# the user directory only people it shares a room with. Admins still join
+# it to a room by inviting it first, as the admin join API does;
 # `force-join-room` is refused. Do not list rooms whose members gain
 # privileges by membership. The mark is set when the account is created;
 # later sign-ins and rule changes neither set nor clear it.
