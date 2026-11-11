@@ -429,9 +429,12 @@ join API (`POST /_synapse/admin/v1/join/{room}`) does; the `force-join-room`
 admin command, which joins without an invite, is refused. **Do not list rooms
 whose members gain privileges by membership** in a rule with `external = true`,
 such as a room whose bots or integrations serve everyone in it: the rule invites
-the account there like into any other room it lists. The mark belongs to the
-account and is set when the rule creates it: later sign-ins and rule changes
-neither set nor clear it.
+the account there like into any other room it lists. A client that joins a room
+on its own, without an invite (such as a room the server advertises for shared
+emoji), fails for an external account unless a rule invited it there. The mark
+belongs to the account and is set when the rule creates it: later sign-ins and
+rule changes neither set nor clear it. A failed read of the mark counts as
+external, so a storage fault never lifts the limits.
 
 ### How Tuwunel derives Matrix user IDs from claims
 

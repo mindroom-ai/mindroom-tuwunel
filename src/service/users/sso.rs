@@ -108,12 +108,15 @@ impl Service {
 	/// made it: it joins only rooms it is invited to, creates no rooms, invites
 	/// no one, and finds in the user directory only people it shares a room
 	/// with. The row's presence is the whole state; no client API writes it.
+	/// Only a missing row reads as not external: a failed read counts as
+	/// external, so a storage fault never lifts the limits.
 	pub async fn is_external(&self, user_id: &UserId) -> bool {
-		self.db
+		!self
+			.db
 			.userid_external
 			.exists(user_id)
 			.await
-			.is_ok()
+			.is_missing()
 	}
 
 	/// Mark the account external. Nothing clears the mark.

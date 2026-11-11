@@ -814,7 +814,11 @@ client API writes (`users::{is_external, set_external}`). `full_register`
 SSO identity closure, so no session or login token of an external account
 exists unmarked; it then skips the first-user admin grant and
 `auto_join_rooms`. An account meeting several rules is external when any is.
-The mark is never set or cleared later, by a sign-in or a rule change.
+The mark is never set or cleared later, by a sign-in or a rule change. Only a
+missing row reads as unmarked (`is_missing`): a failed read counts as external,
+so a storage fault never lifts the limits. A client that joins a room on its
+own, such as an advertised shared-emoji room, fails for an external account
+unless a rule invited it there.
 
 The refusals sit where every local event is built,
 `timeline::create_hash_and_sign_event`, and read the mark only for an
