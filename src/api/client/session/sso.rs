@@ -10,7 +10,7 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as b64};
 use const_str::format as const_format;
-use futures::{TryFutureExt, future::try_join};
+use futures::{FutureExt, TryFutureExt, future::try_join};
 use reqwest::header::{
 	CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HeaderValue, REFERRER_POLICY,
 	SET_COOKIE,
@@ -819,7 +819,9 @@ async fn complete_sso_session(
 
 	// Joined only once the sign-in stands, and outside the identity's and the
 	// account's locks, which slow joins would otherwise hold.
-	join_registration_rooms(services, &user_id, &rooms).await;
+	join_registration_rooms(services, &user_id, &rooms)
+		.boxed() // size firewall
+		.await;
 
 	Ok((user_id, session))
 }

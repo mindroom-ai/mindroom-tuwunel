@@ -772,16 +772,23 @@ a rule with no claims, a claim outside `sub`, `preferred_username`,
 `email` and `hd`, and an alias of another server. With rules, a sign-in
 that would create an account and meets none is refused with `M_FORBIDDEN`
 before the account is made, so no account or hold is left and the address
-can sign in once a rule lists it. A new account joins the rooms of every
-rule it meets, in order and each once, after its link is stored and the
-sign-in has passed its checks: for each room, resolved from its alias, a
-room this server is not in is skipped, and when the join rule would refuse
-the account uninvited, the room's highest-powered local member that may
-invite invites it first (`membership::join_with_invite`). A failed join is
-logged and never fails the sign-in. The rules are read from the live
-config, so a reload applies to the next sign-in. Without rules, and for
-existing accounts, assigned accounts and chained sign-ins, sign-in works as
-before. Upstream has no such option. Files:
+can sign in once a rule lists it; this includes provisioning an LDAP user
+through a provider with `registration = false`. A new account joins the
+rooms of every rule it meets, in order and each once, after its link is
+stored and the sign-in has passed its checks (`membership::join_with_invite`).
+For each room, resolved from its alias, a room this server is not in and the
+admin room are skipped, and so is an alias the room does not name in its own
+`m.room.canonical_alias`: any local user may point an alias nothing holds at
+any room, including an alias a rule names before its room exists, while only
+the room's members with power set that state. Room IDs are the robust choice.
+When the join rule would refuse the account uninvited, the room's
+highest-powered active local member that may invite invites it first; unlike
+`auto_join_rooms`, which joins as the user, this acts with the room's power,
+hence the alias and admin room checks. A failed join is logged and never
+fails the sign-in. The rules are read from the live config, so a reload
+applies to the next sign-in. Without rules, and for existing accounts,
+assigned accounts and chained sign-ins, sign-in works as before. Upstream
+has no such option. Files:
 `src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
 `src/service/oauth/user_info.rs`,
 `src/service/membership/{mod.rs,join_with_invite.rs}`,
@@ -1560,7 +1567,8 @@ assigned_accounts = { "alice@example.com" = "@alice:example.com" }
 ```toml
 [[global.identity_provider]]
 # Empty by default: registration works as before. With rules, only a sign-in
-# meeting one creates an account, which joins that rule's rooms.
+# meeting one creates an account, which joins that rule's rooms. An alias
+# counts only as its room's canonical alias; a room ID always does.
 registration_rules = [
   { claims = { hd = "example.com" }, rooms = ["#lobby:example.com"] },
   { claims = { email = "alice@school.example" }, rooms = ["#class:example.com"] },

@@ -5,6 +5,10 @@ mod fixture;
 
 #[path = "client/get.rs"]
 mod get;
+#[path = "client/membership.rs"]
+mod membership;
+#[path = "client/put.rs"]
+mod put;
 
 use std::{collections::HashMap, net::TcpListener, pin::pin, time::Duration};
 
@@ -50,14 +54,21 @@ const CLIENT: &str = "https://client.example/callback";
 
 const CREATOR_TOKEN: &str = "sso-registration-rules-creator-token";
 
+const AARON_TOKEN: &str = "sso-registration-rules-aaron-token";
+
+const MALLORY_TOKEN: &str = "sso-registration-rules-mallory-token";
+
 /// The provider's rules: a hosted domain for `#staff` and `#open`, one
-/// address for `#class`, an address the provider says is unverified, and a
-/// hosted domain whose first room this server never joined.
+/// address for `#class`, an address the provider says is unverified, a hosted
+/// domain whose first room this server never joined, one whose first alias
+/// no room has yet, and one naming the admin room.
 const RULES: &str = r##"[
 	{ claims = { hd = "example.com" }, rooms = ["#staff:localhost", "#open:localhost"] },
 	{ claims = { email = "guest@school.example" }, rooms = ["#class:localhost"] },
 	{ claims = { email = "guest2@school.example" }, rooms = ["#class:localhost"] },
-	{ claims = { hd = "far.example" }, rooms = ["!never:localhost", "#open:localhost"] }
+	{ claims = { hd = "far.example" }, rooms = ["!never:localhost", "#open:localhost"] },
+	{ claims = { hd = "late.example" }, rooms = ["#late:localhost", "#open:localhost"] },
+	{ claims = { hd = "admin.example" }, rooms = ["#admins:localhost"] }
 ]"##;
 
 const REFUSAL: &str =
@@ -74,18 +85,37 @@ struct Rooms {
 
 /// An identity meeting the hosted-domain rule gets an account joined to its
 /// rooms and no other: the invite-only room after an invite from its creator,
-/// the public one without, each with the registration reason.
+/// its most powerful member, rather than from a member at power 0 who may
+/// invite as well and comes first; the public one without an invite; each
+/// with the registration reason.
 #[test]
 fn hosted_domain_joins_its_rooms() -> Result {
 	run("sso-registration-rules-hd", async |services, base| {
 		let rooms = make_rooms(services, base).await?;
+		let creator = creator(services, base);
+		let aaron_id = register(services, "aaron", AARON_TOKEN).await?;
+		let aaron = Client { services, base, token: AARON_TOKEN };
+
+		creator
+			.admit(&rooms.staff, &aaron, &aaron_id)
+			.await?;
+
+		let power_levels = services
+			.state_accessor
+			.get_power_levels(&rooms.staff)
+			.await?;
+
+		assert!(power_levels.user_can_invite(&aaron_id), "aaron may invite");
+
 		let response = sign_in(base, "amy").await?;
 		let amy = signed_in(services, &response).await?;
-		let creator = creator(services, base);
 
-		assert_eq!(membership(services, &amy, &rooms.staff).await, Some(MembershipState::Join));
-		assert_eq!(membership(services, &amy, &rooms.open).await, Some(MembershipState::Join));
-		assert_eq!(membership(services, &amy, &rooms.class).await, None);
+		assert_eq!(
+			membership_of(services, &amy, &rooms.staff).await,
+			Some(MembershipState::Join)
+		);
+		assert_eq!(membership_of(services, &amy, &rooms.open).await, Some(MembershipState::Join));
+		assert_eq!(membership_of(services, &amy, &rooms.class).await, None);
 
 		let staff_invite = member_event(&creator, &rooms.staff, &amy, "invite").await?;
 		let staff_join = member_event(&creator, &rooms.staff, &amy, "join").await?;
@@ -114,9 +144,12 @@ fn verified_address_joins_its_room() -> Result {
 		let response = sign_in(base, "guest").await?;
 		let guest = signed_in(services, &response).await?;
 
-		assert_eq!(membership(services, &guest, &rooms.class).await, Some(MembershipState::Join));
-		assert_eq!(membership(services, &guest, &rooms.staff).await, None);
-		assert_eq!(membership(services, &guest, &rooms.open).await, None);
+		assert_eq!(
+			membership_of(services, &guest, &rooms.class).await,
+			Some(MembershipState::Join)
+		);
+		assert_eq!(membership_of(services, &guest, &rooms.staff).await, None);
+		assert_eq!(membership_of(services, &guest, &rooms.open).await, None);
 
 		Ok(())
 	})
@@ -142,7 +175,10 @@ fn unlisted_address_is_refused_until_listed() -> Result {
 		let other = signed_in(services, &response).await?;
 
 		assert_eq!(other, user_id(services, "other")?);
-		assert_eq!(membership(services, &other, &rooms.class).await, Some(MembershipState::Join));
+		assert_eq!(
+			membership_of(services, &other, &rooms.class).await,
+			Some(MembershipState::Join)
+		);
 
 		Ok(())
 	})
@@ -187,7 +223,82 @@ fn room_never_joined_is_skipped() -> Result {
 		let response = sign_in(base, "far").await?;
 		let far = signed_in(services, &response).await?;
 
-		assert_eq!(membership(services, &far, &rooms.open).await, Some(MembershipState::Join));
+		assert_eq!(membership_of(services, &far, &rooms.open).await, Some(MembershipState::Join));
+
+		Ok(())
+	})
+}
+
+/// A rule alias no room had, which a local account outside an invite-only
+/// room then points at it, brings the new account no invite there: the room
+/// does not name the alias as its own. The sign-in succeeds and the rule's
+/// next room is joined.
+#[test]
+fn claimed_alias_brings_no_invite() -> Result {
+	run("sso-registration-rules-claimed-alias", async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let mallory_id = register(services, "mallory", MALLORY_TOKEN).await?;
+		let mallory = Client { services, base, token: MALLORY_TOKEN };
+
+		mallory
+			.put("directory/room/%23late:localhost", &json!({ "room_id": rooms.staff }))
+			.await?;
+
+		assert_eq!(membership_of(services, &mallory_id, &rooms.staff).await, None);
+
+		let response = sign_in(base, "lena").await?;
+		let lena = signed_in(services, &response).await?;
+		let creator = creator(services, base);
+
+		assert_eq!(membership_of(services, &lena, &rooms.staff).await, None);
+		assert_eq!(member_event(&creator, &rooms.staff, &lena, "invite").await?, None);
+		assert_eq!(
+			membership_of(services, &lena, &rooms.open).await,
+			Some(MembershipState::Join)
+		);
+
+		Ok(())
+	})
+}
+
+/// A rule naming the admin room, by its alias or its ID, never makes the new
+/// account a member there or a server admin, though an active admin there
+/// may invite.
+#[test]
+fn admin_room_is_never_joined() -> Result {
+	let options = ["registration.grant_admin_to_first_user=false"];
+
+	run_with("sso-registration-rules-admin-room", &options, async |services, base| {
+		let admin = register(services, "creator", CREATOR_TOKEN).await?;
+
+		services.admin.make_user_admin(&admin).await?;
+
+		let admin_room = services.admin.get_admin_room().await?;
+		let power_levels = services
+			.state_accessor
+			.get_power_levels(&admin_room)
+			.await?;
+
+		assert_eq!(
+			membership_of(services, &admin, &admin_room).await,
+			Some(MembershipState::Join)
+		);
+		assert!(power_levels.user_can_invite(&admin), "the admin may invite");
+
+		update_rules(services, |rules| {
+			rules.push(RegistrationRule {
+				claims: [("hd".to_owned(), "admin-id.example".to_owned())].into(),
+				rooms: vec![admin_room.clone().into()],
+			});
+		})?;
+
+		for sub in ["ada", "adam"] {
+			let response = sign_in(base, sub).await?;
+			let user_id = signed_in(services, &response).await?;
+
+			assert_eq!(membership_of(services, &user_id, &admin_room).await, None, "{sub}");
+			assert!(!services.admin.user_is_admin(&user_id).await, "{sub} is no admin");
+		}
 
 		Ok(())
 	})
@@ -204,8 +315,11 @@ fn auto_accepted_invite_is_harmless() -> Result {
 		let response = sign_in(base, "amy").await?;
 		let amy = signed_in(services, &response).await?;
 
-		assert_eq!(membership(services, &amy, &rooms.staff).await, Some(MembershipState::Join));
-		assert_eq!(membership(services, &amy, &rooms.open).await, Some(MembershipState::Join));
+		assert_eq!(
+			membership_of(services, &amy, &rooms.staff).await,
+			Some(MembershipState::Join)
+		);
+		assert_eq!(membership_of(services, &amy, &rooms.open).await, Some(MembershipState::Join));
 
 		Ok(())
 	})
@@ -286,7 +400,7 @@ fn creator<'a>(services: &'a Services, base: &'a str) -> Client<'a> {
 	Client { services, base, token: CREATOR_TOKEN }
 }
 
-async fn membership(
+async fn membership_of(
 	services: &Services,
 	user_id: &UserId,
 	room_id: &RoomId,
@@ -446,6 +560,13 @@ fn claims(sub: &str) -> Value {
 			"email_verified": false,
 		}),
 		| "far" => json!({ "sub": sub, "email": "far@far.example", "hd": "far.example" }),
+		| "lena" => json!({ "sub": sub, "email": "lena@late.example", "hd": "late.example" }),
+		| "ada" => json!({ "sub": sub, "email": "ada@admin.example", "hd": "admin.example" }),
+		| "adam" => json!({
+			"sub": sub,
+			"email": "adam@admin-id.example",
+			"hd": "admin-id.example",
+		}),
 		| _ => json!({ "sub": sub, "email": format!("{sub}@elsewhere.example") }),
 	}
 }

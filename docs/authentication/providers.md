@@ -373,13 +373,21 @@ provider controls**, such as a verified `email`, `hd` or `sub`: people can set
 their own `name` or `preferred_username` at many providers.
 
 With rules, a sign-in that would create an account and meets none is refused,
-and no account is made. Existing accounts sign in as before, whatever the
-rules. A new account joins the rooms of every rule it meets, in order and each
-once. A room is a room ID or an alias on this server. When the room's join rule
-would refuse the account uninvited, the room's highest-powered local member
-that may invite invites it first, so such a room needs a local member with that
-power. A room this server is not in, or any other failed join, is logged and
-never fails the sign-in. A reload applies to the next sign-in.
+and no account is made. That includes provisioning an LDAP user through a
+provider with `registration = false`. Existing accounts sign in as before,
+whatever the rules. A new account joins the rooms of every rule it meets, in
+order and each once. When the room's join rule would refuse the account
+uninvited, the room's highest-powered active local member that may invite
+invites it first, so such a room needs a local member with that power.
+
+A room is a room ID or an alias on this server. **Prefer room IDs.** Any local
+user may point an alias that nothing holds at any room, so an alias is used only
+when it exists and the room it resolves to names it in its own
+`m.room.canonical_alias` (as its alias or an alternative), which only the room's
+members with power set; a room created with that alias name has it. The admin
+room is never joined this way, by alias or ID: its members are server admins.
+A skipped room, like a room this server is not in or any other failed join, is
+logged and never fails the sign-in. A reload applies to the next sign-in.
 
 ### How Tuwunel derives Matrix user IDs from claims
 

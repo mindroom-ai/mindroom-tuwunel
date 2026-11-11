@@ -1,6 +1,9 @@
 use ruma::{
-	OwnedRoomId, OwnedUserId, RoomId, RoomOrAliasId, UserId,
-	events::room::power_levels::UserPowerLevel,
+	OwnedRoomId, OwnedUserId, RoomAliasId, RoomId, RoomOrAliasId, UserId,
+	events::{
+		StateEventType,
+		room::{canonical_alias::RoomCanonicalAliasEventContent, power_levels::UserPowerLevel},
+	},
 };
 use tuwunel_core::{Err, Result, err, implement, utils::stream::ReadyExt};
 
@@ -12,10 +15,17 @@ const REASON: &str = "Automatically joining this room upon registration";
 /// Join a local user to a room this server is in, on the server's behalf.
 ///
 /// When the room's join rule would refuse the user uninvited, the room's
-/// highest-powered local member allowed to invite invites them first. A user
-/// already joined stays joined, so an invite another path accepted meanwhile
-/// does no harm. A room this server is not in is refused rather than joined
-/// over federation.
+/// highest-powered active local member allowed to invite invites them first.
+/// A user already joined stays joined, so an invite another path accepted
+/// meanwhile does no harm.
+///
+/// Refused, with nothing sent: a room this server is not in, rather than a
+/// join over federation; the admin room, whose members are server admins; and
+/// an alias the room it resolves to does not name in its own
+/// `m.room.canonical_alias`. Any local user may point a free alias at any
+/// room, while only a member with power in the room sets that state, so the
+/// invite this sends on the room's behalf goes only where the room's own
+/// members put the alias.
 #[implement(Service)]
 #[tracing::instrument(level = "debug", skip_all, fields(%user_id, %room))]
 pub async fn join_with_invite(
@@ -36,6 +46,16 @@ pub async fn join_with_invite(
 		.await
 	{
 		return Err!(Request(NotFound("This server is not in {room_id}.")));
+	}
+
+	if self.services.admin.is_admin_room(&room_id).await {
+		return Err!(Request(Forbidden("{room_id} is the admin room, never joined so.")));
+	}
+
+	if let Ok(alias) = <&RoomAliasId>::try_from(room)
+		&& !self.names_alias(&room_id, alias).await
+	{
+		return Err!(Request(Forbidden("{room_id} does not name {alias} as its own alias.")));
 	}
 
 	if self.join_needs_invite(&room_id, user_id).await {
@@ -59,8 +79,25 @@ pub async fn join_with_invite(
 	Ok(room_id)
 }
 
-/// The room's highest-powered local member other than `user_id` whose power
-/// allows inviting, picked as the admin grant picks its sender.
+/// Whether the room's `m.room.canonical_alias` names the alias, as its alias
+/// or one of its alternatives.
+#[implement(Service)]
+async fn names_alias(&self, room_id: &RoomId, alias: &RoomAliasId) -> bool {
+	self.services
+		.state_accessor
+		.room_state_get_content(room_id, &StateEventType::RoomCanonicalAlias, "")
+		.await
+		.is_ok_and(|content: RoomCanonicalAliasEventContent| {
+			content
+				.alias
+				.iter()
+				.chain(&content.alt_aliases)
+				.any(|named| named.as_str() == alias.as_str())
+		})
+}
+
+/// The room's highest-powered active local member other than `user_id` whose
+/// power allows inviting, picked as the admin grant picks its sender.
 #[implement(Service)]
 async fn inviter(&self, room_id: &RoomId, user_id: &UserId) -> Result<OwnedUserId> {
 	let power_levels = self
@@ -71,7 +108,7 @@ async fn inviter(&self, room_id: &RoomId, user_id: &UserId) -> Result<OwnedUserI
 
 	self.services
 		.state_cache
-		.local_users_in_room(room_id)
+		.active_local_users_in_room(room_id)
 		.ready_filter(|member| *member != user_id && power_levels.user_can_invite(member))
 		.ready_fold(None, |best: Option<(OwnedUserId, UserPowerLevel)>, member| {
 			let level = power_levels.for_user(member);
@@ -82,5 +119,7 @@ async fn inviter(&self, room_id: &RoomId, user_id: &UserId) -> Result<OwnedUserI
 		})
 		.await
 		.map(|(member, _)| member)
-		.ok_or_else(|| err!(Request(Forbidden("No local member of {room_id} may invite."))))
+		.ok_or_else(|| {
+			err!(Request(Forbidden("No active local member of {room_id} may invite.")))
+		})
 }

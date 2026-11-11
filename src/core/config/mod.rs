@@ -1983,13 +1983,17 @@ pub struct IdentityProvider {
 	/// ASCII case, and `email` counts only when the provider verified it.
 	///
 	/// With no rules, registration works as before. With rules, a sign-in that
-	/// would create an account is refused unless it meets a rule; existing
-	/// accounts sign in as usual. A new account joins the rooms of every rule
-	/// it meets, after the account is made: when a room's join rule needs it,
-	/// the account is first invited by the room's highest-powered local member
-	/// that may invite. A room this server is not in, like any failed join,
-	/// never fails the sign-in. Rooms are room IDs or local room aliases. The
-	/// rules are read at each sign-in, so a reload applies to the next one.
+	/// would create an account, LDAP provisioning included, is refused unless
+	/// it meets a rule; existing accounts sign in as usual. A new account joins
+	/// the rooms of every rule it meets, after the account is made: when a
+	/// room's join rule needs it, the account is first invited by the room's
+	/// highest-powered active local member that may invite. Rooms are room IDs
+	/// or local room aliases. Any local user may point an alias nothing holds
+	/// at any room, so an alias is used only when the room it resolves to names
+	/// it in its own `m.room.canonical_alias`; room IDs are the robust choice.
+	/// The admin room is never joined this way. A skipped room, like any failed
+	/// join, never fails the sign-in. The rules are read at each sign-in, so a
+	/// reload applies to the next one.
 	///
 	/// default: []
 	#[serde(default)]
