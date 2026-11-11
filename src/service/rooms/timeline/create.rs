@@ -10,11 +10,15 @@ use futures::{StreamExt, TryStreamExt};
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, MilliSecondsSinceUnixEpoch, OwnedRoomId, RoomId,
 	UserId,
-	events::{TimelineEventType, room::create::RoomCreateEventContent},
+	events::{
+		TimelineEventType,
+		room::{create::RoomCreateEventContent, member::MembershipState},
+	},
 	room_version_rules::RoomIdFormatVersion,
 	serde::Raw,
 	uint,
 };
+use serde::Deserialize;
 use serde_json::value::to_raw_value;
 use tuwunel_core::{
 	Err, Error, Result, err, implement,
@@ -25,7 +29,7 @@ use tuwunel_core::{
 };
 use tuwunel_matrix::{
 	event::Event,
-	pdu::{EventHash, PduBuilder, PduEvent, PrevEvents, check_rules},
+	pdu::{Content, EventHash, PduBuilder, PduEvent, PrevEvents, check_rules},
 	room::state::resolution::auth_check,
 	room_version,
 };
@@ -55,6 +59,9 @@ pub async fn create_hash_and_sign_event(
 		redacts,
 		timestamp,
 	} = pdu_builder;
+
+	self.external_sender_check(&event_type, state_key.as_deref(), &content, sender, room_id)
+		.await?;
 
 	let prev_events = self
 		.compute_prev_events(room_id, &event_type)
@@ -208,6 +215,48 @@ pub async fn create_hash_and_sign_event(
 	check_rules(&pdu_json, &version_rules.event_format)?;
 
 	Ok((pdu, pdu_json))
+}
+
+/// The one field of member content the external-account refusals read, which
+/// is all the auth rules need of it too.
+#[derive(Deserialize)]
+struct Membership {
+	membership: MembershipState,
+}
+
+/// Refuse what an external account may not author: a room's create event, an
+/// invite, and its own join to a room it is neither joined to nor invited to.
+/// Every local event is built here, so the state endpoint, room upgrades and
+/// remote invites meet the refusals `createRoom`, `/invite` and `/join` do.
+/// Only those event types read the account's mark.
+#[implement(super::Service)]
+async fn external_sender_check(
+	&self,
+	event_type: &TimelineEventType,
+	state_key: Option<&str>,
+	content: &Content,
+	sender: &UserId,
+	room_id: &RoomId,
+) -> Result {
+	let users = &self.services.users;
+
+	match event_type {
+		| TimelineEventType::RoomCreate => users.external_create_check(sender).await,
+		| TimelineEventType::RoomMember => {
+			// Content without a membership is left to the auth rules, which refuse it.
+			let Ok(Membership { membership }) = content.deserialize_as_unchecked() else {
+				return Ok(());
+			};
+
+			match membership {
+				| MembershipState::Invite => users.external_invite_check(sender).await,
+				| MembershipState::Join if state_key == Some(sender.as_str()) =>
+					users.external_join_check(sender, room_id).await,
+				| _ => Ok(()),
+			}
+		},
+		| _ => Ok(()),
+	}
 }
 
 #[implement(super::Service)]

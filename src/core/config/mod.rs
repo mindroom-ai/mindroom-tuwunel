@@ -1975,7 +1975,7 @@ pub struct IdentityProvider {
 
 	/// Rules for who may register through this provider, and the rooms their
 	/// new accounts join. Each rule is a set of claims, all of which must hold,
-	/// and optional rooms:
+	/// optional rooms, and an optional `external` flag:
 	/// `[{ claims = { hd = "school.example" }, rooms = ["#students:example.com"] }]`.
 	/// The claims are `sub`, `preferred_username`, `username`, `nickname`,
 	/// `login`, `name`, `given_name`, `family_name`, `email`, and `hd` (Google's
@@ -1987,13 +1987,28 @@ pub struct IdentityProvider {
 	/// it meets a rule; existing accounts sign in as usual. A new account joins
 	/// the rooms of every rule it meets, after the account is made: when a
 	/// room's join rule needs it, the account is first invited by the room's
-	/// highest-powered active local member that may invite. Rooms are room IDs
-	/// or local room aliases. Any local user may point an alias nothing holds
-	/// at any room, so an alias is used only when the room it resolves to names
-	/// it in its own `m.room.canonical_alias`; room IDs are the robust choice.
-	/// The admin room is never joined this way. A skipped room, like any failed
+	/// highest-powered active local member that may invite. That is never the
+	/// server's own user or an appservice (bridge) account, which have no
+	/// password, nor a locked, suspended or external account, so a room whose
+	/// only possible inviter is such an account is skipped. Rooms are
+	/// room IDs or local room aliases. Any local user may point an alias
+	/// nothing holds at any room, so an alias is used only when the room it
+	/// resolves to names it in its own `m.room.canonical_alias`; room IDs are
+	/// the robust choice. Whoever first creates a room with an alias a rule
+	/// names that no room has yet owns a room that rightly names it, and new
+	/// accounts are invited there. The admin room, and any room an upgrade
+	/// replaced, are never joined this way. A skipped room, like any failed
 	/// join, never fails the sign-in. The rules are read at each sign-in, so a
 	/// reload applies to the next one.
+	///
+	/// A new account meeting a rule with `external = true` is external: it
+	/// joins only rooms it is invited to (its rules' rooms invite it first,
+	/// whatever their join rule), creates no rooms, invites no one, and finds
+	/// in the user directory only people it shares a room with. Admins still
+	/// join it to a room by inviting it first, as the admin join API does;
+	/// `force-join-room` is refused. Do not list rooms whose members gain
+	/// privileges by membership. The mark is set when the account is created;
+	/// later sign-ins and rule changes neither set nor clear it.
 	///
 	/// default: []
 	#[serde(default)]
@@ -2148,6 +2163,14 @@ pub struct RegistrationRule {
 	/// Room IDs or local room aliases a new account meeting the rule joins.
 	#[serde(default)]
 	pub rooms: Vec<OwnedRoomOrAliasId>,
+
+	/// Whether a new account meeting the rule is external: it joins only
+	/// rooms it is invited to, creates no rooms, invites no one, and finds in
+	/// the user directory only people it shares a room with. The mark is set
+	/// when the account is created and kept; later sign-ins and rule changes
+	/// neither set nor clear it.
+	#[serde(default)]
+	pub external: bool,
 }
 
 impl IdentityProvider {

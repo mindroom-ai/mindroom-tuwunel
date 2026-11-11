@@ -1,8 +1,11 @@
 #![cfg(test)]
 
+mod admin;
 mod client;
 mod fixture;
 
+#[path = "client/admin_api.rs"]
+mod admin_api;
 #[path = "client/get.rs"]
 mod get;
 #[path = "client/membership.rs"]
@@ -21,7 +24,7 @@ use axum::{
 use axum_server::from_tcp;
 use futures::future::select;
 use reqwest::{
-	Response, StatusCode, Url,
+	Method, Response, StatusCode, Url,
 	header::{AUTHORIZATION, COOKIE, LOCATION, SET_COOKIE},
 	redirect::Policy,
 };
@@ -42,7 +45,7 @@ use tuwunel_service::{
 };
 
 use self::{
-	client::{Client, register},
+	client::{Client, poll_until, register},
 	fixture::boot,
 };
 
@@ -58,13 +61,20 @@ const AARON_TOKEN: &str = "sso-registration-rules-aaron-token";
 
 const MALLORY_TOKEN: &str = "sso-registration-rules-mallory-token";
 
+const GUEST_TOKEN: &str = "sso-registration-rules-guest-token";
+
+const AMY_TOKEN: &str = "sso-registration-rules-amy-token";
+
+const OUTSIDER_TOKEN: &str = "sso-registration-rules-outsider-token";
+
 /// The provider's rules: a hosted domain for `#staff` and `#open`, one
-/// address for `#class`, an address the provider says is unverified, a hosted
-/// domain whose first room this server never joined, one whose first alias
-/// no room has yet, and one naming the admin room.
+/// address for `#class` that makes its account external, an address the
+/// provider says is unverified, a hosted domain whose first room this server
+/// never joined, one whose first alias no room has yet, and one naming the
+/// admin room.
 const RULES: &str = r##"[
 	{ claims = { hd = "example.com" }, rooms = ["#staff:localhost", "#open:localhost"] },
-	{ claims = { email = "guest@school.example" }, rooms = ["#class:localhost"] },
+	{ claims = { email = "guest@school.example" }, rooms = ["#class:localhost"], external = true },
 	{ claims = { email = "guest2@school.example" }, rooms = ["#class:localhost"] },
 	{ claims = { hd = "far.example" }, rooms = ["!never:localhost", "#open:localhost"] },
 	{ claims = { hd = "late.example" }, rooms = ["#late:localhost", "#open:localhost"] },
@@ -76,11 +86,20 @@ const REFUSAL: &str =
 
 const REASON: &str = "Automatically joining this room upon registration";
 
-/// The rooms the rules name, made by one local account.
+const UNINVITED: &str = "This account may join a room only when invited.";
+
+const NO_ROOMS: &str = "This account may not create rooms.";
+
+const NO_INVITES: &str = "This account may not invite others.";
+
+/// The rooms the rules name, and two that external accounts are kept out of,
+/// made by one local account.
 struct Rooms {
 	staff: OwnedRoomId,
 	open: OwnedRoomId,
 	class: OwnedRoomId,
+	public: OwnedRoomId,
+	club: OwnedRoomId,
 }
 
 /// An identity meeting the hosted-domain rule gets an account joined to its
@@ -168,6 +187,7 @@ fn unlisted_address_is_refused_until_listed() -> Result {
 			rules.push(RegistrationRule {
 				claims: [("email".to_owned(), "other@school.example".to_owned())].into(),
 				rooms: vec![alias("#class:localhost")],
+				external: false,
 			});
 		})?;
 
@@ -289,6 +309,7 @@ fn admin_room_is_never_joined() -> Result {
 			rules.push(RegistrationRule {
 				claims: [("hd".to_owned(), "admin-id.example".to_owned())].into(),
 				rooms: vec![admin_room.clone().into()],
+				external: false,
 			});
 		})?;
 
@@ -299,6 +320,81 @@ fn admin_room_is_never_joined() -> Result {
 			assert_eq!(membership_of(services, &user_id, &admin_room).await, None, "{sub}");
 			assert!(!services.admin.user_is_admin(&user_id).await, "{sub} is no admin");
 		}
+
+		Ok(())
+	})
+}
+
+/// A rule room an upgrade replaced is skipped, even named by its ID: an old
+/// admin room must never be joined so.
+#[test]
+fn upgraded_room_is_skipped() -> Result {
+	run("sso-registration-rules-upgraded", async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let creator = creator(services, base);
+		let version = services
+			.state
+			.get_room_version(&rooms.open)
+			.await?;
+
+		creator
+			.post(&format!("rooms/{}/upgrade", rooms.open), &json!({ "new_version": version }))
+			.await?;
+
+		update_rules(services, |rules| {
+			rules.push(RegistrationRule {
+				claims: [("hd".to_owned(), "old.example".to_owned())].into(),
+				rooms: vec![rooms.open.clone().into(), alias("#class:localhost")],
+				external: false,
+			});
+		})?;
+
+		let response = sign_in(base, "olga").await?;
+		let olga = signed_in(services, &response).await?;
+
+		assert_eq!(membership_of(services, &olga, &rooms.open).await, None);
+		assert_eq!(
+			membership_of(services, &olga, &rooms.class).await,
+			Some(MembershipState::Join)
+		);
+
+		Ok(())
+	})
+}
+
+/// A locked member, however powerful, does not invite a new account; the
+/// next member that may invite does.
+#[test]
+fn locked_member_does_not_invite() -> Result {
+	run("sso-registration-rules-locked-inviter", async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let creator = creator(services, base);
+		let creator_id = creator_id(services)?;
+		let aaron_id = register(services, "aaron", AARON_TOKEN).await?;
+		let aaron = Client { services, base, token: AARON_TOKEN };
+
+		creator
+			.admit(&rooms.staff, &aaron, &aaron_id)
+			.await?;
+		services
+			.users
+			.set_locked(&creator_id, &creator_id);
+
+		let response = sign_in(base, "amy").await?;
+		let amy = signed_in(services, &response).await?;
+
+		services.users.clear_locked(&creator_id);
+
+		assert_eq!(
+			membership_of(services, &amy, &rooms.staff).await,
+			Some(MembershipState::Join)
+		);
+		assert_eq!(
+			member_event(&creator, &rooms.staff, &amy, "invite")
+				.await?
+				.map(|event| event["sender"].clone()),
+			Some(json!(aaron_id))
+		);
 
 		Ok(())
 	})
@@ -320,6 +416,355 @@ fn auto_accepted_invite_is_harmless() -> Result {
 			Some(MembershipState::Join)
 		);
 		assert_eq!(membership_of(services, &amy, &rooms.open).await, Some(MembershipState::Join));
+
+		Ok(())
+	})
+}
+
+/// An account a rule with `external` creates joins that rule's invite-only
+/// room, invited by its creator, and no room it is not invited to: not a
+/// public room until invited there, and not a room restricted to the members
+/// of a room it is in. A second sign-in finds it external still, as the
+/// database records it.
+#[test]
+fn external_account_joins_only_by_invite() -> Result {
+	run("sso-registration-rules-external-join", async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let creator = creator(services, base);
+		let (guest_id, guest) = sign_in_with(services, base, "guest", GUEST_TOKEN).await?;
+
+		assert_eq!(guest.get("joined_rooms").await?["joined_rooms"], json!([rooms.class]));
+		assert_eq!(
+			member_event(&creator, &rooms.class, &guest_id, "invite")
+				.await?
+				.map(|event| event["sender"].clone()),
+			Some(json!("@creator:localhost"))
+		);
+
+		let join_public = guest.url("join/%23public:localhost");
+
+		forbidden(guest.post_url(&join_public, &json!({})).await?, UNINVITED).await?;
+		assert_eq!(membership_of(services, &guest_id, &rooms.public).await, None);
+
+		let response = sign_in(base, "guest").await?;
+
+		assert_eq!(signed_in(services, &response).await?, guest_id);
+		assert!(services.users.is_external(&guest_id).await, "the guest is still external");
+		services.db["userid_external"]
+			.exists(guest_id.as_str())
+			.await?;
+		forbidden(guest.post_url(&join_public, &json!({})).await?, UNINVITED).await?;
+
+		creator
+			.act_on(&rooms.public, "invite", &guest_id)
+			.await?;
+		guest
+			.post("join/%23public:localhost", &json!({}))
+			.await?;
+
+		assert_eq!(
+			membership_of(services, &guest_id, &rooms.public).await,
+			Some(MembershipState::Join)
+		);
+
+		let join_club = guest.url("join/%23club:localhost");
+
+		forbidden(guest.post_url(&join_club, &json!({})).await?, UNINVITED).await?;
+		assert_eq!(membership_of(services, &guest_id, &rooms.club).await, None);
+
+		Ok(())
+	})
+}
+
+/// An external account creates no room, by `createRoom` or by upgrading a
+/// room it has the power to upgrade, and invites no one, by `/invite` or by
+/// a member event sent as state. Its own join sent as state is refused as
+/// `/join` refuses it.
+#[test]
+fn external_account_creates_and_invites_nothing() -> Result {
+	run("sso-registration-rules-external-create", async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let creator = creator(services, base);
+		let outsider_id = register(services, "outsider", OUTSIDER_TOKEN).await?;
+		let (guest_id, guest) = sign_in_with(services, base, "guest", GUEST_TOKEN).await?;
+		let state = |room_id: &RoomId, user_id: &UserId| {
+			guest.url(&format!("rooms/{room_id}/state/m.room.member/{user_id}"))
+		};
+
+		let create = guest
+			.post_url(&guest.url("createRoom"), &json!({ "preset": "private_chat" }))
+			.await?;
+
+		forbidden(create, NO_ROOMS).await?;
+
+		for invitee in [&creator_id(services)?, &outsider_id] {
+			let invite = guest
+				.post_url(
+					&guest.url(&format!("rooms/{}/invite", rooms.class)),
+					&json!({ "user_id": invitee }),
+				)
+				.await?;
+
+			forbidden(invite, NO_INVITES).await?;
+		}
+
+		let invite = guest
+			.request(
+				Method::PUT,
+				&state(&rooms.class, &outsider_id),
+				&json!({ "membership": "invite" }),
+			)
+			.await?;
+
+		forbidden(invite, NO_INVITES).await?;
+		assert_eq!(membership_of(services, &outsider_id, &rooms.class).await, None);
+
+		let join = guest
+			.request(
+				Method::PUT,
+				&state(&rooms.public, &guest_id),
+				&json!({ "membership": "join" }),
+			)
+			.await?;
+
+		forbidden(join, UNINVITED).await?;
+		assert_eq!(membership_of(services, &guest_id, &rooms.public).await, None);
+
+		let power_levels = format!("rooms/{}/state/m.room.power_levels", rooms.class);
+		let mut levels = creator.get(&power_levels).await?;
+
+		// Since room version 12 an upgrade needs more power than 100 by default.
+		let upgrader = levels["events"]["m.room.tombstone"].clone();
+
+		levels["users"][guest_id.as_str()] = upgrader;
+		creator.put(&power_levels, &levels).await?;
+
+		let version = services
+			.state
+			.get_room_version(&rooms.class)
+			.await?;
+		let upgrade = guest
+			.post_url(
+				&guest.url(&format!("rooms/{}/upgrade", rooms.class)),
+				&json!({ "new_version": version }),
+			)
+			.await?;
+
+		forbidden(upgrade, NO_ROOMS).await
+	})
+}
+
+/// An external account's directory search finds only people it shares a
+/// room with, although the server shows every local user to others.
+#[test]
+fn external_account_finds_only_people_it_shares_a_room_with() -> Result {
+	let options = ["directory.users.show_all_local=true"];
+
+	run_with("sso-registration-rules-external-directory", &options, async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let outsider_id = register(services, "outsider", OUTSIDER_TOKEN).await?;
+		let outsider = Client { services, base, token: OUTSIDER_TOKEN };
+
+		outsider.act(&rooms.open, "join").await?;
+
+		let (_, guest) = sign_in_with(services, base, "guest", GUEST_TOKEN).await?;
+		let (_, amy) = sign_in_with(services, base, "amy", AMY_TOKEN).await?;
+
+		assert_eq!(found(&guest, "creator").await?, [creator_id(services)?]);
+		assert_eq!(found(&guest, "outsider").await?, Vec::<OwnedUserId>::new());
+		assert_eq!(found(&amy, "outsider").await?, [outsider_id]);
+
+		Ok(())
+	})
+}
+
+/// An account meeting a rule with `external` and one without is external,
+/// and each rule room invites it first, even a public room that would admit
+/// anyone else.
+#[test]
+fn external_rule_invites_even_to_public_rooms() -> Result {
+	run("sso-registration-rules-external-public", async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let creator = creator(services, base);
+
+		update_rules(services, |rules| {
+			rules.push(RegistrationRule {
+				claims: [("hd".to_owned(), "visit.example".to_owned())].into(),
+				rooms: vec![alias("#open:localhost")],
+				external: false,
+			});
+			rules.push(RegistrationRule {
+				claims: [("email".to_owned(), "vera@visit.example".to_owned())].into(),
+				rooms: vec![alias("#public:localhost")],
+				external: true,
+			});
+		})?;
+
+		let response = sign_in(base, "vera").await?;
+		let vera = signed_in(services, &response).await?;
+
+		assert!(services.users.is_external(&vera).await, "vera is external");
+
+		for room_id in [&rooms.open, &rooms.public] {
+			assert_eq!(
+				membership_of(services, &vera, room_id).await,
+				Some(MembershipState::Join),
+				"{room_id}"
+			);
+			assert_eq!(
+				member_event(&creator, room_id, &vera, "invite")
+					.await?
+					.map(|event| event["sender"].clone()),
+				Some(json!("@creator:localhost")),
+				"{room_id}"
+			);
+		}
+
+		Ok(())
+	})
+}
+
+/// An account a rule without `external` creates joins a public room it is
+/// not invited to and creates rooms, as any account does.
+#[test]
+fn staff_account_is_unchanged() -> Result {
+	run("sso-registration-rules-staff", async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let (amy_id, amy) = sign_in_with(services, base, "amy", AMY_TOKEN).await?;
+
+		assert!(!services.users.is_external(&amy_id).await, "amy is not external");
+
+		amy.post("join/%23public:localhost", &json!({}))
+			.await?;
+
+		assert_eq!(
+			membership_of(services, &amy_id, &rooms.public).await,
+			Some(MembershipState::Join)
+		);
+
+		amy.create_room(&json!({ "preset": "private_chat" }))
+			.await?;
+
+		Ok(())
+	})
+}
+
+/// A new external account joins none of `auto_join_rooms` and, although it is
+/// the server's first account to sign in, is not made its admin; the next
+/// account of a rule without `external` joins them.
+#[test]
+fn external_account_skips_registration_extras() -> Result {
+	let options = [r##"registration.auto_join_rooms=["#public:localhost"]"##];
+
+	run_with("sso-registration-rules-external-extras", &options, async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let (guest_id, _) = sign_in_with(services, base, "guest", GUEST_TOKEN).await?;
+		let (amy_id, _) = sign_in_with(services, base, "amy", AMY_TOKEN).await?;
+
+		assert_eq!(membership_of(services, &guest_id, &rooms.public).await, None);
+		assert!(!services.admin.user_is_admin(&guest_id).await, "the guest is no admin");
+		assert_eq!(
+			membership_of(services, &amy_id, &rooms.public).await,
+			Some(MembershipState::Join)
+		);
+
+		Ok(())
+	})
+}
+
+/// The server's own flows that send an external account's member events
+/// still work: accepting an invite on its behalf, a display name change in
+/// the rooms it is in, and leaving.
+#[test]
+fn external_account_keeps_its_own_membership_flows() -> Result {
+	let options = ["rooms.invites.auto_accept=true"];
+
+	run_with("sso-registration-rules-external-flows", &options, async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let creator = creator(services, base);
+		let (guest_id, guest) = sign_in_with(services, base, "guest", GUEST_TOKEN).await?;
+
+		creator
+			.act_on(&rooms.public, "invite", &guest_id)
+			.await?;
+
+		let joined = poll_until(Duration::from_secs(10), async || {
+			membership_of(services, &guest_id, &rooms.public).await == Some(MembershipState::Join)
+		})
+		.await;
+
+		assert!(joined, "the invite to the public room is accepted");
+
+		guest
+			.put(&format!("profile/{guest_id}/displayname"), &json!({ "displayname": "Guest" }))
+			.await?;
+
+		let renamed = poll_until(Duration::from_secs(10), async || {
+			services
+				.state_accessor
+				.get_member(&rooms.class, &guest_id)
+				.await
+				.is_ok_and(|member| member.displayname.as_deref() == Some("Guest"))
+		})
+		.await;
+
+		assert!(renamed, "the member event in the class carries the new name");
+
+		guest.act(&rooms.class, "leave").await?;
+
+		assert_eq!(
+			membership_of(services, &guest_id, &rooms.class).await,
+			Some(MembershipState::Leave)
+		);
+
+		Ok(())
+	})
+}
+
+/// An admin joins an external account to a room by inviting it first, as
+/// the admin join API does, even where the join rule admits anyone; the
+/// `force-join-room` command, which joins without an invite, is refused,
+/// while it still joins an account that is not external.
+#[test]
+fn admins_join_external_accounts_by_invite() -> Result {
+	let options = ["registration.grant_admin_to_first_user=false"];
+
+	run_with("sso-registration-rules-external-admin", &options, async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let creator = creator(services, base);
+		let (guest_id, _) = sign_in_with(services, base, "guest", GUEST_TOKEN).await?;
+		let (amy_id, _) = sign_in_with(services, base, "amy", AMY_TOKEN).await?;
+
+		services
+			.admin
+			.make_user_admin(&creator_id(services)?)
+			.await?;
+
+		admin::refused(
+			services,
+			&format!("users force-join-room {guest_id} {}", rooms.public),
+			UNINVITED,
+		)
+		.await?;
+		admin::accepted(services, &format!("users force-join-room {amy_id} {}", rooms.public))
+			.await?;
+
+		let path = format!("v1/join/{}", rooms.open);
+
+		creator
+			.admin_api(Method::POST, &path, &json!({ "user_id": guest_id }), 200)
+			.await?;
+
+		assert_eq!(
+			membership_of(services, &guest_id, &rooms.open).await,
+			Some(MembershipState::Join)
+		);
+		assert_eq!(
+			member_event(&creator, &rooms.open, &guest_id, "invite")
+				.await?
+				.map(|event| event["sender"].clone()),
+			Some(json!("@creator:localhost"))
+		);
 
 		Ok(())
 	})
@@ -377,7 +822,8 @@ fn provider_options(issuer: &str) -> Vec<String> {
 	]
 }
 
-/// Make `#staff` and `#class`, both invite-only, and the public `#open`, as one
+/// Make `#staff` and `#class`, both invite-only, the public `#open` and
+/// `#public`, and `#club`, restricted to the members of `#public`, as one
 /// local account.
 async fn make_rooms(services: &Services, base: &str) -> Result<Rooms> {
 	register(services, "creator", CREATOR_TOKEN).await?;
@@ -389,15 +835,83 @@ async fn make_rooms(services: &Services, base: &str) -> Result<Rooms> {
 			.await
 	};
 
+	let public = room("public_chat", "public").await?;
+	let club = creator
+		.create_room(&json!({
+			"preset": "private_chat",
+			"room_alias_name": "club",
+			"initial_state": [{
+				"type": "m.room.join_rules",
+				"state_key": "",
+				"content": {
+					"join_rule": "restricted",
+					"allow": [{ "type": "m.room_membership", "room_id": public }],
+				},
+			}],
+		}))
+		.await?;
+
 	Ok(Rooms {
 		staff: room("private_chat", "staff").await?,
 		open: room("public_chat", "open").await?,
 		class: room("private_chat", "class").await?,
+		public,
+		club,
 	})
 }
 
 fn creator<'a>(services: &'a Services, base: &'a str) -> Client<'a> {
 	Client { services, base, token: CREATOR_TOKEN }
+}
+
+fn creator_id(services: &Services) -> Result<OwnedUserId> { user_id(services, "creator") }
+
+/// Sign in as `sub` and give the account a device holding `token`, for the
+/// client API.
+async fn sign_in_with<'a>(
+	services: &'a Services,
+	base: &'a str,
+	sub: &str,
+	token: &'a str,
+) -> Result<(OwnedUserId, Client<'a>)> {
+	let response = sign_in(base, sub).await?;
+	let user_id = signed_in(services, &response).await?;
+
+	services
+		.users
+		.create_device(&user_id, None, (Some(token), None), None, None, None)
+		.await?;
+
+	Ok((user_id, Client { services, base, token }))
+}
+
+/// The accounts a user directory search for `term` finds.
+async fn found(client: &Client<'_>, term: &str) -> Result<Vec<OwnedUserId>> {
+	let response = client
+		.post("user_directory/search", &json!({ "search_term": term }))
+		.await?;
+
+	response["results"]
+		.as_array()
+		.into_iter()
+		.flatten()
+		.map(|user| {
+			OwnedUserId::try_from(user["user_id"].as_str().unwrap_or_default())
+				.map_err(Into::into)
+		})
+		.collect()
+}
+
+/// Expect a refusal with `M_FORBIDDEN` and the text.
+async fn forbidden(response: Response, text: &str) -> Result {
+	assert_eq!(response.status(), StatusCode::FORBIDDEN, "refused: {text}");
+
+	let error: Value = response.json().await?;
+
+	assert_eq!(error["errcode"], "M_FORBIDDEN");
+	assert_eq!(error["error"], format!("M_FORBIDDEN: {text}"));
+
+	Ok(())
 }
 
 async fn membership_of(
@@ -438,14 +952,8 @@ async fn member_event(
 /// Sign in as `sub` and expect the refusal, linking the identity to nothing
 /// and leaving the account its address names absent.
 async fn refused(services: &Services, base: &str, sub: &str) -> Result {
-	let response = sign_in(base, sub).await?;
+	forbidden(sign_in(base, sub).await?, REFUSAL).await?;
 
-	assert_eq!(response.status(), StatusCode::FORBIDDEN, "{sub} is refused");
-
-	let error: Value = response.json().await?;
-
-	assert_eq!(error["errcode"], "M_FORBIDDEN");
-	assert_eq!(error["error"], format!("M_FORBIDDEN: {REFUSAL}"));
 	assert!(unlinked(services, sub).await?, "{sub} is linked to no account");
 
 	let creator = creator(services, base);
@@ -566,6 +1074,13 @@ fn claims(sub: &str) -> Value {
 			"sub": sub,
 			"email": "adam@admin-id.example",
 			"hd": "admin-id.example",
+		}),
+		| "olga" => json!({ "sub": sub, "email": "olga@old.example", "hd": "old.example" }),
+		| "vera" => json!({
+			"sub": sub,
+			"email": "vera@visit.example",
+			"email_verified": true,
+			"hd": "visit.example",
 		}),
 		| _ => json!({ "sub": sub, "email": format!("{sub}@elsewhere.example") }),
 	}

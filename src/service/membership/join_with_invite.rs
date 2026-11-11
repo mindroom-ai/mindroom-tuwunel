@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use ruma::{
 	OwnedRoomId, OwnedUserId, RoomAliasId, RoomId, RoomOrAliasId, UserId,
 	events::{
@@ -5,7 +6,13 @@ use ruma::{
 		room::{canonical_alias::RoomCanonicalAliasEventContent, power_levels::UserPowerLevel},
 	},
 };
-use tuwunel_core::{Err, Result, err, implement, utils::stream::ReadyExt};
+use tuwunel_core::{
+	Err, Result, err, implement,
+	utils::{
+		future::{BoolExt, ReadyBoolExt},
+		stream::ReadyExt,
+	},
+};
 
 use super::{Join, Service};
 
@@ -14,18 +21,18 @@ const REASON: &str = "Automatically joining this room upon registration";
 
 /// Join a local user to a room this server is in, on the server's behalf.
 ///
-/// When the room's join rule would refuse the user uninvited, the room's
-/// highest-powered active local member allowed to invite invites them first.
-/// A user already joined stays joined, so an invite another path accepted
-/// meanwhile does no harm.
+/// When the room's join rule would refuse the user uninvited, as every join
+/// rule refuses an external account, the room's highest-powered active local
+/// member allowed to invite invites them first. A user already joined stays
+/// joined, so an invite another path accepted meanwhile does no harm.
 ///
 /// Refused, with nothing sent: a room this server is not in, rather than a
-/// join over federation; the admin room, whose members are server admins; and
-/// an alias the room it resolves to does not name in its own
-/// `m.room.canonical_alias`. Any local user may point a free alias at any
-/// room, while only a member with power in the room sets that state, so the
-/// invite this sends on the room's behalf goes only where the room's own
-/// members put the alias.
+/// join over federation; the admin room, whose members are server admins; a
+/// room an upgrade replaced, such as an old admin room; and an alias the room
+/// it resolves to does not name in its own `m.room.canonical_alias`. Any
+/// local user may point a free alias at any room, while only a member with
+/// power in the room sets that state, so the invite this sends on the room's
+/// behalf goes only where the room's own members put the alias.
 #[implement(Service)]
 #[tracing::instrument(level = "debug", skip_all, fields(%user_id, %room))]
 pub async fn join_with_invite(
@@ -50,6 +57,18 @@ pub async fn join_with_invite(
 
 	if self.services.admin.is_admin_room(&room_id).await {
 		return Err!(Request(Forbidden("{room_id} is the admin room, never joined so.")));
+	}
+
+	if self
+		.services
+		.state_accessor
+		.room_state_get(&room_id, &StateEventType::RoomTombstone, "")
+		.await
+		.is_ok()
+	{
+		return Err!(Request(Forbidden(
+			"{room_id} was replaced by an upgrade, never joined so."
+		)));
 	}
 
 	if let Ok(alias) = <&RoomAliasId>::try_from(room)
@@ -89,15 +108,16 @@ async fn names_alias(&self, room_id: &RoomId, alias: &RoomAliasId) -> bool {
 		.await
 		.is_ok_and(|content: RoomCanonicalAliasEventContent| {
 			content
-				.alias
-				.iter()
-				.chain(&content.alt_aliases)
+				.aliases()
 				.any(|named| named.as_str() == alias.as_str())
 		})
 }
 
 /// The room's highest-powered active local member other than `user_id` whose
-/// power allows inviting, picked as the admin grant picks its sender.
+/// power allows inviting, picked as the admin grant picks its sender. Active
+/// members have a password or SSO sign-in, so the server's own user and
+/// appservice accounts are none; locked, suspended and external accounts may
+/// not invite either.
 #[implement(Service)]
 async fn inviter(&self, room_id: &RoomId, user_id: &UserId) -> Result<OwnedUserId> {
 	let power_levels = self
@@ -106,10 +126,18 @@ async fn inviter(&self, room_id: &RoomId, user_id: &UserId) -> Result<OwnedUserI
 		.get_power_levels(room_id)
 		.await?;
 
+	let users = &self.services.users;
+
 	self.services
 		.state_cache
 		.active_local_users_in_room(room_id)
 		.ready_filter(|member| *member != user_id && power_levels.user_can_invite(member))
+		.filter(|&member| {
+			users
+				.is_locked(member)
+				.is_false()
+				.and2(users.is_suspended(member).is_false(), users.is_external(member).is_false())
+		})
 		.ready_fold(None, |best: Option<(OwnedUserId, UserPowerLevel)>, member| {
 			let level = power_levels.for_user(member);
 			match best {

@@ -727,8 +727,8 @@ async fn complete_sso_session(
 					))),
 			};
 
-			rooms = registration_rooms(services, provider, &userinfo)?;
-			register_user(services, provider, &session, &userinfo, &user_id, origin).await?;
+			rooms =
+				register_user(services, provider, &session, &userinfo, &user_id, origin).await?;
 		}
 
 		// An account a first sign-in takes by name is held from here until its link
@@ -826,16 +826,24 @@ async fn complete_sso_session(
 	Ok((user_id, session))
 }
 
-/// The rooms a new account joins: those of every registration rule of the
-/// provider it meets, in order and each once. The rules are read from the live
-/// config, so a reload applies to the next sign-in; a provider a reload
-/// removed keeps the rules it was loaded with. A provider with rules refuses
-/// an account that meets none.
-fn registration_rooms(
+/// What the registration rules a new account meets give it.
+struct RegistrationTerms {
+	/// The rules' rooms, in order and each once.
+	rooms: Vec<OwnedRoomOrAliasId>,
+
+	/// Whether any of the rules makes the account external.
+	external: bool,
+}
+
+/// The terms of every registration rule of the provider a new account meets.
+/// The rules are read from the live config, so a reload applies to the next
+/// sign-in; a provider a reload removed keeps the rules it was loaded with. A
+/// provider with rules refuses an account that meets none.
+fn registration_terms(
 	services: &Services,
 	provider: &Provider,
 	userinfo: &UserInfo,
-) -> Result<Vec<OwnedRoomOrAliasId>> {
+) -> Result<RegistrationTerms> {
 	let rules = services
 		.oauth
 		.providers
@@ -859,11 +867,14 @@ fn registration_rooms(
 		)));
 	}
 
-	Ok(met
-		.into_iter()
-		.flat_map(|rule| rule.rooms.iter().cloned())
-		.unique()
-		.collect())
+	Ok(RegistrationTerms {
+		external: met.iter().any(|rule| rule.external),
+		rooms: met
+			.into_iter()
+			.flat_map(|rule| rule.rooms.iter().cloned())
+			.unique()
+			.collect(),
+	})
 }
 
 /// Join a new account to its registration rules' rooms. A failed join is
@@ -991,6 +1002,8 @@ async fn ldap_user_exists(services: &Services, user_id: &UserId) -> bool {
 			.is_ok_and(|dns| !dns.is_empty())
 }
 
+/// Create the account a sign-in maps to, once the provider's registration
+/// rules admit it, and return the rooms they give it.
 #[tracing::instrument(
 	name = "register",
 	level = INFO_SPAN_LEVEL,
@@ -1004,9 +1017,15 @@ async fn register_user(
 	userinfo: &UserInfo,
 	user_id: &UserId,
 	origin: &str,
-) -> Result {
-	debug_info!(%user_id, "Creating new user account...");
+) -> Result<Vec<OwnedRoomOrAliasId>> {
+	let terms = registration_terms(services, provider, userinfo)?;
 
+	debug_info!(%user_id, external = terms.external, "Creating new user account...");
+
+	// An external account is marked as it is created, before the session and
+	// its login token are committed, so no session of one exists unmarked. A
+	// refusal after this leaves the account, marked, without a link, as one
+	// whose name was taken meanwhile is left.
 	services
 		.users
 		.full_register(Register {
@@ -1015,6 +1034,7 @@ async fn register_user(
 			origin: Some(origin),
 			displayname: userinfo.name.as_deref(),
 			grant_first_user_admin: true,
+			external: terms.external,
 			..Default::default()
 		})
 		.await?;
@@ -1049,7 +1069,7 @@ async fn register_user(
 	info!("{notice}");
 	services.admin.notify(&notice).await;
 
-	Ok(())
+	Ok(terms.rooms)
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(user_id, avatar_url))]

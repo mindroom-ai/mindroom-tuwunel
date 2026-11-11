@@ -776,25 +776,72 @@ can sign in once a rule lists it; this includes provisioning an LDAP user
 through a provider with `registration = false`. A new account joins the
 rooms of every rule it meets, in order and each once, after its link is
 stored and the sign-in has passed its checks (`membership::join_with_invite`).
-For each room, resolved from its alias, a room this server is not in and the
-admin room are skipped, and so is an alias the room does not name in its own
-`m.room.canonical_alias`: any local user may point an alias nothing holds at
-any room, including an alias a rule names before its room exists, while only
-the room's members with power set that state. Room IDs are the robust choice.
-When the join rule would refuse the account uninvited, the room's
-highest-powered active local member that may invite invites it first; unlike
-`auto_join_rooms`, which joins as the user, this acts with the room's power,
-hence the alias and admin room checks. A failed join is logged and never
-fails the sign-in. The rules are read from the live config, so a reload
-applies to the next sign-in. Without rules, and for existing accounts,
-assigned accounts and chained sign-ins, sign-in works as before. Upstream
-has no such option. Files:
-`src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
+For each room, resolved from its alias, a room this server is not in, the
+admin room and a room an upgrade replaced (`m.room.tombstone`, so an old
+admin room too) are skipped, and so is an alias the room does not name in
+its own `m.room.canonical_alias`: any local user may point an alias nothing
+holds at any room, including an alias a rule names before its room exists,
+while only the room's members with power set that state. Whoever first
+creates a room with such a not-yet-held alias owns a room that rightly names
+it, and new accounts are invited there. Room IDs are the robust choice. When
+the join rule would refuse the account uninvited, the room's highest-powered
+active local member that may invite invites it first: never the server's own
+user or an appservice (bridge) account, which have no password, nor a
+locked, suspended or external account, so a room whose only possible inviter
+is such an account is skipped. Unlike `auto_join_rooms`, which joins as the
+user, this acts with the room's power, hence the alias, admin room and
+tombstone checks. A failed join is logged and never fails the sign-in. The
+rules are read from the live config, so a reload applies to the next
+sign-in. Without rules, and for existing accounts, assigned accounts and
+chained sign-ins, sign-in works as before. Upstream has no such option.
+Files: `src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
 `src/service/oauth/user_info.rs`,
 `src/service/membership/{mod.rs,join_with_invite.rs}`,
 `src/api/client/session/sso.rs`, `docs/authentication/providers.md`; tests in
 `src/main/tests/sso_registration_rules.rs`,
 `src/service/oauth/user_info.rs` and `src/core/config/tests.rs`.
+
+### SSO registration rules can create external accounts
+
+A `public` join rule lets any local account join, and a `restricted` one any
+account in a room it names, so join rules alone do not keep accounts made for
+people outside an organization out of its rooms: every public room, present
+and future, would be open to them. A registration rule with `external = true`
+marks the accounts it creates in a new map, `userid_external`, which no
+client API writes (`users::{is_external, set_external}`). `full_register`
+(`Register::external`) writes the mark right after `create_new`, inside the
+SSO identity closure, so no session or login token of an external account
+exists unmarked; it then skips the first-user admin grant and
+`auto_join_rooms`. An account meeting several rules is external when any is.
+The mark is never set or cleared later, by a sign-in or a rule change.
+
+The refusals sit where every local event is built,
+`timeline::create_hash_and_sign_event`, and read the mark only for an
+`m.room.create`, an invite, or a sender's own join, so other events pay
+nothing: an external sender's create event is refused with `M_FORBIDDEN`
+"This account may not create rooms." (`createRoom` and room upgrades), its
+invite with "This account may not invite others." (`/invite`, the state
+endpoint, remote invites), and its own join to a room it is neither joined
+to nor invited to with "This account may join a room only when invited."
+(the state endpoint as well as `/join`). A join it already has stands, so
+profile changes still reach its rooms, and leaving, knocking and accepting
+invites, auto-accept included, are unaffected. `membership::join` makes the
+same join check for every path, remote joins included, whose event comes
+from the resident server's template; appservices acting as the account are
+refused too. `createRoom` checks first, since it reports its create event's
+errors as `M_INVALID_PARAM`. `join_needs_invite` admits an external account
+by no join rule, so `join_with_invite` (the rule's rooms) and the admin join
+API invite it first; `force-join-room`, which joins without one, is refused.
+An external requester's user directory search keeps only users it shares a
+joined room with, whatever `directory.users.show_all_local` says. Such a
+rule should not list rooms whose members gain privileges by membership: the
+rule invites the account there. Upstream has no such accounts. Files: `src/core/config/mod.rs`, `tuwunel-example.toml`,
+`src/database/maps.rs`, `src/service/users/{mod.rs,sso.rs,register.rs}`,
+`src/service/rooms/timeline/create.rs`,
+`src/service/membership/{join.rs,invite.rs,join_with_invite.rs}`,
+`src/api/client/{session/sso.rs,room/create.rs,user_directory.rs}`,
+`docs/authentication/providers.md`; tests in
+`src/main/tests/sso_registration_rules.rs`.
 
 ### Sliding sync receipts and typing only for joined rooms
 
@@ -1571,7 +1618,8 @@ assigned_accounts = { "alice@example.com" = "@alice:example.com" }
 # counts only as its room's canonical alias; a room ID always does.
 registration_rules = [
   { claims = { hd = "example.com" }, rooms = ["#lobby:example.com"] },
-  { claims = { email = "alice@school.example" }, rooms = ["#class:example.com"] },
+  # external: joins only rooms it is invited to, creates and invites nothing.
+  { claims = { email = "alice@school.example" }, rooms = ["#class:example.com"], external = true },
 ]
 ```
 

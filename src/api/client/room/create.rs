@@ -1031,6 +1031,14 @@ async fn can_create_room_check(
 	services: &Services,
 	body: &Ruma<create_room::v3::Request>,
 ) -> Result {
+	// The event builder refuses an external account's create event too, but
+	// this route answers that event's errors as M_INVALID_PARAM, so it refuses
+	// first.
+	services
+		.users
+		.external_create_check(body.sender_user())
+		.await?;
+
 	if !services.config.rooms.allow_creation
 		&& body.appservice_info.is_none()
 		&& !services
