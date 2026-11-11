@@ -503,6 +503,7 @@ mod tests {
 			userid_claims: BTreeSet::new(),
 			trusted: false,
 			assigned_accounts: BTreeMap::new(),
+			registration_rules: Vec::new(),
 			unique_id_fallbacks: true,
 			registration: true,
 			base_path: None,

@@ -73,6 +73,7 @@ please refer to the section on [environment variables](#configuring-via-environm
 | `userid_claims` | all | Claims used to compute the Matrix localpart for new registrations. When empty, Tuwunel avoids generated IDs where possible. The special value `"unique"` forces generated IDs exclusively. The claim `"sub"` takes precedence over all others when listed. |
 | `trusted` | `false` | Inverts user matching: instead of registering a new account when claims conflict with existing users, Tuwunel finds the first matching user and grants access to it. **Only set this for providers you self-host and fully control. Never use with public providers (GitHub, GitLab, Google, etc.); it enables account takeover.** For migrated databases, prefer durable bulk adoption or individual association to temporarily enabling this option. A trusted provider's `email` claim is also bound to a new account when it sends no `email_verified` claim. |
 | `assigned_accounts` | `{}` | Assigns existing local accounts to people by the address in their `email` claim, matched ignoring ASCII case. A listed address's first sign-in gets that account or is refused, never another account. **Only for an app restricted to your own organization; whoever controls a listed address gets the account.** See [Assigning accounts created before the first sign-in](#assigning-accounts-created-before-the-first-sign-in). |
+| `registration_rules` | `[]` | Rules a sign-in must meet to create an account, each a set of claims and the rooms a new account meeting it joins. Empty, registration works as before. See [Letting only some people register](#letting-only-some-people-register). |
 | `unique_id_fallbacks` | `true` | When no claim maps cleanly to an available username, generate a unique random localpart as a fallback. Set to `false` on private servers where random usernames are undesirable — a misconfiguration will produce an error instead. |
 | `registration` | `true` | Whether this provider can create new Matrix accounts. Set to `false` to restrict the provider to existing users only. |
 
@@ -345,6 +346,40 @@ reason, looks like an account created without a password, and would be
 reactivated. Remove the entries once their people have signed in or the
 migration window ends. The configuration is the only record of the
 assignments; a reload applies to the next sign-in.
+
+### Letting only some people register
+
+A provider open to the public, such as a Google app whose consent screen is
+"External", lets any account it vouches for register. `registration_rules`
+lets only some of them create an account, and joins each new account to its
+rooms:
+
+```toml
+[[global.identity_provider]]
+# ...
+registration_rules = [
+  { claims = { hd = "example.com" }, rooms = ["#lobby:example.com"] },
+  { claims = { email = "alice@school.example" }, rooms = ["#class:example.com"] },
+]
+```
+
+A rule is met when every claim it names has its value. The claims are `sub`,
+`preferred_username`, `username`, `nickname`, `login`, `name`, `given_name`,
+`family_name`, `email` and `hd` (Google's Workspace domain, absent for consumer
+accounts). `email` and `hd` are compared ignoring ASCII case, the others
+exactly, and `email` counts only when the provider verified the address, as
+described under [User ID mapping](#user-id-mapping). **Name only claims the
+provider controls**, such as a verified `email`, `hd` or `sub`: people can set
+their own `name` or `preferred_username` at many providers.
+
+With rules, a sign-in that would create an account and meets none is refused,
+and no account is made. Existing accounts sign in as before, whatever the
+rules. A new account joins the rooms of every rule it meets, in order and each
+once. A room is a room ID or an alias on this server. When the room's join rule
+would refuse the account uninvited, the room's highest-powered local member
+that may invite invites it first, so such a room needs a local member with that
+power. A room this server is not in, or any other failed join, is logged and
+never fails the sign-in. A reload applies to the next sign-in.
 
 ### How Tuwunel derives Matrix user IDs from claims
 

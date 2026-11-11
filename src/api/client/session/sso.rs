@@ -16,7 +16,7 @@ use reqwest::header::{
 	SET_COOKIE,
 };
 use ruma::{
-	Mxc, OwnedMxcUri, OwnedUserId, ServerName, UserId,
+	Mxc, OwnedMxcUri, OwnedRoomOrAliasId, OwnedUserId, ServerName, UserId,
 	api::{
 		client::{
 			session::{
@@ -715,6 +715,7 @@ async fn complete_sso_session(
 		};
 
 		let created = !services.users.exists(&user_id).await;
+		let mut rooms = Vec::new();
 		if created {
 			let origin = match provider.registration {
 				| true => "sso",
@@ -726,6 +727,7 @@ async fn complete_sso_session(
 					))),
 			};
 
+			rooms = registration_rooms(services, provider, &userinfo)?;
 			register_user(services, provider, &session, &userinfo, &user_id, origin).await?;
 		}
 
@@ -750,15 +752,15 @@ async fn complete_sso_session(
 			);
 		}
 
-		Ok((session, (user_id, held)))
+		Ok((session, (user_id, held, rooms)))
 	};
 
 	// An assigned account without a password becomes an SSO account in the
 	// batch that links it, so no reader finds one without the other.
-	let (session, (user_id, held), old_sess_id) = services
+	let (session, (user_id, held, rooms), old_sess_id) = services
 		.oauth
 		.sessions
-		.commit_identity_session_with(&unique_id, complete_identity, |(user_id, held), txn| {
+		.commit_identity_session_with(&unique_id, complete_identity, |(user_id, held, _), txn| {
 			if held.as_ref().is_some_and(at!(1)) {
 				services
 					.users
@@ -815,7 +817,71 @@ async fn complete_sso_session(
 
 	services.users.locked_check(&user_id).await?;
 
+	// Joined only once the sign-in stands, and outside the identity's and the
+	// account's locks, which slow joins would otherwise hold.
+	join_registration_rooms(services, &user_id, &rooms).await;
+
 	Ok((user_id, session))
+}
+
+/// The rooms a new account joins: those of every registration rule of the
+/// provider it meets, in order and each once. The rules are read from the live
+/// config, so a reload applies to the next sign-in; a provider a reload
+/// removed keeps the rules it was loaded with. A provider with rules refuses
+/// an account that meets none.
+fn registration_rooms(
+	services: &Services,
+	provider: &Provider,
+	userinfo: &UserInfo,
+) -> Result<Vec<OwnedRoomOrAliasId>> {
+	let rules = services
+		.oauth
+		.providers
+		.find_config(provider.id())
+		.map_or(&provider.registration_rules, |config| &config.registration_rules);
+
+	let met = rules
+		.iter()
+		.filter(|rule| userinfo.meets(&rule.claims, provider.trusted))
+		.collect_vec();
+
+	if !rules.is_empty() && met.is_empty() {
+		info!(
+			provider = provider.id(),
+			sub = %userinfo.sub,
+			"Refused a new account that meets no registration rule."
+		);
+
+		return Err!(Request(Forbidden(
+			"This sign-in may not create an account here; ask an administrator to invite you."
+		)));
+	}
+
+	Ok(met
+		.into_iter()
+		.flat_map(|rule| rule.rooms.iter().cloned())
+		.unique()
+		.collect())
+}
+
+/// Join a new account to its registration rules' rooms. A failed join is
+/// logged and never fails the sign-in.
+async fn join_registration_rooms(
+	services: &Services,
+	user_id: &UserId,
+	rooms: &[OwnedRoomOrAliasId],
+) {
+	for room in rooms {
+		match services
+			.membership
+			.join_with_invite(user_id, room)
+			.await
+		{
+			| Ok(room_id) => info!(%user_id, %room_id, "Joined a registration rule's room."),
+			| Err(error) =>
+				warn!(%user_id, %room, %error, "Could not join a registration rule's room."),
+		}
+	}
 }
 
 /// Find the session an earlier release keyed on the presented GitHub `login`.

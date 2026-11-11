@@ -757,6 +757,38 @@ Upstream names the cookie `tuwunel_grant_session` and scopes it to the
 callback path. File: `src/api/client/session/sso.rs`; tests in that file
 and `src/mindroom-tests/tests/sso_redirect.rs`.
 
+### SSO registration rules gate new accounts and join their rooms
+
+A provider with registration open let any identity it vouched for create an
+account, so a Google provider admitted every Google account, and
+`auto_join_rooms` joins a new account as itself, which an invite-only room
+refuses. A provider's `registration_rules` lists rules, each a set of claims
+and rooms. A rule is met when every claim it names has its value: `email`
+and `hd` (Google's hosted domain, a new `UserInfo` field) ignoring ASCII
+case, the other string claims exactly; `email` counts only when the
+provider verified it, as `verified_email` decides. The config check refuses
+a rule with no claims, a claim outside `sub`, `preferred_username`,
+`username`, `nickname`, `login`, `name`, `given_name`, `family_name`,
+`email` and `hd`, and an alias of another server. With rules, a sign-in
+that would create an account and meets none is refused with `M_FORBIDDEN`
+before the account is made, so no account or hold is left and the address
+can sign in once a rule lists it. A new account joins the rooms of every
+rule it meets, in order and each once, after its link is stored and the
+sign-in has passed its checks: for each room, resolved from its alias, a
+room this server is not in is skipped, and when the join rule would refuse
+the account uninvited, the room's highest-powered local member that may
+invite invites it first (`membership::join_with_invite`). A failed join is
+logged and never fails the sign-in. The rules are read from the live
+config, so a reload applies to the next sign-in. Without rules, and for
+existing accounts, assigned accounts and chained sign-ins, sign-in works as
+before. Upstream has no such option. Files:
+`src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
+`src/service/oauth/user_info.rs`,
+`src/service/membership/{mod.rs,join_with_invite.rs}`,
+`src/api/client/session/sso.rs`, `docs/authentication/providers.md`; tests in
+`src/main/tests/sso_registration_rules.rs`,
+`src/service/oauth/user_info.rs` and `src/core/config/tests.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every
@@ -1522,6 +1554,17 @@ mindroom_ephemeral_events_enabled = true
 # Empty by default; list only addresses your organization assigns, for
 # accounts created for those people, and remove entries once they signed in.
 assigned_accounts = { "alice@example.com" = "@alice:example.com" }
+```
+
+### Registration rules for SSO sign-ins
+```toml
+[[global.identity_provider]]
+# Empty by default: registration works as before. With rules, only a sign-in
+# meeting one creates an account, which joins that rule's rooms.
+registration_rules = [
+  { claims = { hd = "example.com" }, rooms = ["#lobby:example.com"] },
+  { claims = { email = "alice@school.example" }, rooms = ["#class:example.com"] },
+]
 ```
 
 ### Native Sign in with Apple
