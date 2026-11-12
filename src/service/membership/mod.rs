@@ -2,6 +2,7 @@ mod auto_accept;
 mod ban;
 mod invite;
 mod join;
+mod join_with_invite;
 mod kick;
 mod knock;
 mod leave;
