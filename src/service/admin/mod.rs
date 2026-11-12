@@ -20,7 +20,7 @@ use std::{
 use async_trait::async_trait;
 pub use context::Context;
 pub use create::create_admin_room;
-use futures::TryFutureExt;
+use futures::{StreamExt, TryFutureExt};
 use ruma::{
 	OwnedEventId, OwnedRoomAliasId, OwnedRoomId, OwnedUserId, RoomId, RoomOrAliasId, UserId,
 };
@@ -266,10 +266,16 @@ impl Service {
 		processor::handle_command(root, Arc::clone(self.services.get()), command).await
 	}
 
-	/// Checks whether a given user is an admin of this server
+	/// Checks whether a given user is an admin of this server. An external
+	/// account never is, even when it is in the admin room: admin routes act
+	/// as the server user and would carry it out of its rooms.
 	pub async fn user_is_admin(&self, user_id: &UserId) -> bool {
 		if user_id == self.services.globals.server_user {
 			return true;
+		}
+
+		if self.services.users.is_external(user_id).await {
+			return false;
 		}
 
 		let Ok(admin_room) = self.get_admin_room().await else {
@@ -288,10 +294,10 @@ impl Service {
 	/// password is configured. Deactivated accounts still joined to the admin
 	/// room are not counted either, since none of them can sign in to act. Nor
 	/// is a passwordless account, such as an appservice's user, since it stores
-	/// the same empty password as a deactivated one.
+	/// the same empty password as a deactivated one, nor an external account.
 	pub async fn user_is_last_admin(&self, user_id: &UserId) -> bool {
 		let server_user: &UserId = &self.services.globals.server_user;
-		if user_id == server_user {
+		if user_id == server_user || self.services.users.is_external(user_id).await {
 			return false;
 		}
 
@@ -312,7 +318,8 @@ impl Service {
 			.services
 			.state_cache
 			.active_local_users_in_room(&admin_room)
-			.ready_any(|member| member != user_id && member != server_user)
+			.ready_filter(|member| *member != user_id && *member != server_user)
+			.any(async |member| !self.services.users.is_external(member).await)
 			.await
 	}
 
