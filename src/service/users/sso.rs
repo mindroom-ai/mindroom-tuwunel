@@ -1,8 +1,8 @@
 use futures::StreamExt;
-use ruma::{OwnedUserId, UserId};
+use ruma::{OwnedUserId, RoomId, UserId};
 use tuwunel_core::{
-	Err, Error, Result, utils,
-	utils::{MutexMapGuard, result::NotFound},
+	Err, Error, Result, err, utils,
+	utils::{BoolExt, MutexMapGuard, result::NotFound},
 	warn,
 };
 use tuwunel_database::{Deserialized, Txn};
@@ -102,6 +102,72 @@ impl Service {
 			.await
 			.deserialized()
 			.ok()
+	}
+
+	/// Whether the account is external, as a registration rule with `external`
+	/// made it: it joins only rooms it is invited to, creates no rooms, invites
+	/// no one, and finds in the user directory only people it shares a room
+	/// with. The row's presence is the whole state; no client API writes it.
+	/// Only a missing row reads as not external: a failed read counts as
+	/// external, so a storage fault never lifts the limits.
+	pub async fn is_external(&self, user_id: &UserId) -> bool {
+		!self
+			.db
+			.userid_external
+			.exists(user_id)
+			.await
+			.is_missing()
+	}
+
+	/// Mark the account external. Nothing clears the mark.
+	pub fn set_external(&self, user_id: &UserId) { self.db.userid_external.insert(user_id, b""); }
+
+	/// Refuse an external account's room creation.
+	pub async fn external_create_check(&self, user_id: &UserId) -> Result {
+		self.is_external(user_id)
+			.await
+			.is_false()
+			.ok_or_else(|| err!(Request(Forbidden("This account may not create rooms."))))
+	}
+
+	/// Refuse an external account's room alias creation.
+	pub async fn external_alias_check(&self, user_id: &UserId) -> Result {
+		self.is_external(user_id)
+			.await
+			.is_false()
+			.ok_or_else(|| err!(Request(Forbidden("This account may not create room aliases."))))
+	}
+
+	/// Refuse making an external account a server admin.
+	pub async fn external_admin_check(&self, user_id: &UserId) -> Result {
+		self.is_external(user_id)
+			.await
+			.is_false()
+			.ok_or_else(|| err!(Request(Forbidden("This account may not be a server admin."))))
+	}
+
+	/// Refuse an external account's invite.
+	pub async fn external_invite_check(&self, user_id: &UserId) -> Result {
+		self.is_external(user_id)
+			.await
+			.is_false()
+			.ok_or_else(|| err!(Request(Forbidden("This account may not invite others."))))
+	}
+
+	/// Refuse an external account's join to a room it is neither joined to nor
+	/// invited to. A join it is already joined with stands, as a profile change
+	/// resends it, and an approved knock is an invite.
+	pub async fn external_join_check(&self, user_id: &UserId, room_id: &RoomId) -> Result {
+		let state_cache = &self.services.state_cache;
+
+		if !self.is_external(user_id).await
+			|| state_cache.is_joined(user_id, room_id).await
+			|| state_cache.is_invited(user_id, room_id).await
+		{
+			return Ok(());
+		}
+
+		Err!(Request(Forbidden("This account may join a room only when invited.")))
 	}
 
 	/// Compatibility repair for legacy SSO users whose origin was accidentally

@@ -17,11 +17,11 @@ use either::Either;
 use http::HeaderValue;
 use itertools::Itertools;
 use regex::RegexSet;
-use ruma::api::client::rtc::RtcTransport;
+use ruma::{RoomAliasId, api::client::rtc::RtcTransport};
 use url::Url;
 
 use super::{
-	DEPRECATED_KEYS, IdentityProvider, KNOWN_KEYS,
+	DEPRECATED_KEYS, IdentityProvider, KNOWN_KEYS, REGISTRATION_RULE_CLAIMS,
 	turn::{Provider, Turn},
 };
 use crate::{
@@ -992,6 +992,8 @@ fn check_identity_providers(config: &Config) -> Result {
 				"Identity provider №{i} lists an address twice, in different case."
 			));
 		}
+
+		check_registration_rules(config, i, provider)?;
 	}
 
 	if !config
@@ -1088,6 +1090,42 @@ fn check_identity_providers(config: &Config) -> Result {
 				 provider, then set `callback_url` to it and restart."
 			);
 		});
+
+	Ok(())
+}
+
+fn check_registration_rules(config: &Config, i: &str, provider: &IdentityProvider) -> Result {
+	for rule in &provider.registration_rules {
+		if rule.claims.is_empty() {
+			return Err!(Config(
+				"registration_rules",
+				"A rule on identity provider №{i} has no claims, so it would meet no one."
+			));
+		}
+
+		if let Some(claim) = rule
+			.claims
+			.keys()
+			.find(|claim| !REGISTRATION_RULE_CLAIMS.contains(&claim.as_str()))
+		{
+			return Err!(Config(
+				"registration_rules",
+				"A rule on identity provider №{i} names an unknown claim {claim}."
+			));
+		}
+
+		if let Some(alias) = rule
+			.rooms
+			.iter()
+			.filter_map(|room| <&RoomAliasId>::try_from(&**room).ok())
+			.find(|alias| alias.server_name() != config.server_name)
+		{
+			return Err!(Config(
+				"registration_rules",
+				"{alias} on identity provider №{i} is not a local room alias."
+			));
+		}
+	}
 
 	Ok(())
 }

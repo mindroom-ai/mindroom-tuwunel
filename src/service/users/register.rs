@@ -24,6 +24,10 @@ pub struct Register<'a> {
 	pub grant_first_user_admin: bool,
 	pub displayname: Option<&'a str>,
 	pub omit_displayname_suffix: bool,
+	/// Mark the account external as it is created (see
+	/// [`super::Service::is_external`]): it is then neither made the first
+	/// user's admin nor joined to `auto_join_rooms`.
+	pub external: bool,
 }
 
 /// Fully register a local user
@@ -43,6 +47,7 @@ pub async fn full_register(
 		grant_first_user_admin,
 		displayname,
 		omit_displayname_suffix,
+		external,
 	}: Register<'_>,
 ) -> Result {
 	let ref user_id = user_id
@@ -69,6 +74,12 @@ pub async fn full_register(
 		.users
 		.create_new(user_id, password, origin)
 		.await?;
+
+	// Marked before anything else acts as the account, so nothing below and no
+	// session finds it unmarked.
+	if external {
+		self.set_external(user_id);
+	}
 
 	let suffix = self
 		.services
@@ -110,6 +121,7 @@ pub async fn full_register(
 	// Note: the server user is generated first
 	if !is_guest
 		&& !is_appservice
+		&& !external
 		&& grant_first_user_admin
 		&& self
 			.services
@@ -133,7 +145,9 @@ pub async fn full_register(
 		warn!("Granting {user_id} admin privileges as the first user");
 	}
 
+	// An external account joins only where invited, which these rooms are not.
 	if is_appservice
+		|| external
 		|| (self
 			.services
 			.config
@@ -146,6 +160,15 @@ pub async fn full_register(
 		return Ok(());
 	}
 
+	self.join_auto_join_rooms(user_id).await;
+
+	Ok(())
+}
+
+/// Join a new account to each of `auto_join_rooms` this server is in. A
+/// failed join is logged and never fails the registration.
+#[implement(super::Service)]
+async fn join_auto_join_rooms(&self, user_id: &UserId) {
 	for room in &self
 		.services
 		.server
@@ -196,8 +219,6 @@ pub async fn full_register(
 			},
 		}
 	}
-
-	Ok(())
 }
 
 // The account already exists here, so an overlong name is shortened rather than refused.
