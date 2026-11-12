@@ -17,9 +17,10 @@ use either::Either;
 use http::HeaderValue;
 use itertools::Itertools;
 use regex::RegexSet;
+use ruma::RoomAliasId;
 use url::Url;
 
-use super::{DEPRECATED_KEYS, IdentityProvider, KNOWN_KEYS};
+use super::{DEPRECATED_KEYS, IdentityProvider, KNOWN_KEYS, REGISTRATION_RULE_CLAIMS};
 use crate::{
 	Config, Err, Result, debug, debug_info, err, error,
 	utils::{
@@ -874,6 +875,38 @@ fn check_identity_providers(config: &Config) -> Result {
 				"assigned_accounts",
 				"Identity provider №{i} lists an address twice, in different case."
 			));
+		}
+
+		for rule in &provider.registration_rules {
+			if rule.claims.is_empty() {
+				return Err!(Config(
+					"registration_rules",
+					"A rule on identity provider №{i} has no claims, so it would meet no one."
+				));
+			}
+
+			if let Some(claim) = rule
+				.claims
+				.keys()
+				.find(|claim| !REGISTRATION_RULE_CLAIMS.contains(&claim.as_str()))
+			{
+				return Err!(Config(
+					"registration_rules",
+					"A rule on identity provider №{i} names an unknown claim {claim}."
+				));
+			}
+
+			if let Some(alias) = rule
+				.rooms
+				.iter()
+				.filter_map(|room| <&RoomAliasId>::try_from(&**room).ok())
+				.find(|alias| alias.server_name() != config.server_name)
+			{
+				return Err!(Config(
+					"registration_rules",
+					"{alias} on identity provider №{i} is not a local room alias."
+				));
+			}
 		}
 	}
 

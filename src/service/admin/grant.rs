@@ -26,6 +26,11 @@ use crate::rooms::state::RoomMutexGuard;
 /// name.
 #[implement(super::Service)]
 pub async fn make_user_admin(&self, user_id: &UserId) -> Result {
+	self.services
+		.users
+		.external_admin_check(user_id)
+		.await?;
+
 	let is_local = self.services.globals.user_is_local(user_id);
 
 	if is_local && !self.services.users.exists(user_id).await {

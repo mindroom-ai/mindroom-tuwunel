@@ -757,6 +757,118 @@ Upstream names the cookie `tuwunel_grant_session` and scopes it to the
 callback path. File: `src/api/client/session/sso.rs`; tests in that file
 and `src/mindroom-tests/tests/sso_redirect.rs`.
 
+### SSO registration rules gate new accounts and join their rooms
+
+A provider with registration open let any identity it vouched for create an
+account, so a Google provider admitted every Google account, and
+`auto_join_rooms` joins a new account as itself, which an invite-only room
+refuses. A provider's `registration_rules` lists rules, each a set of claims
+and rooms. A rule is met when every claim it names has its value: `email`
+and `hd` (Google's hosted domain, a new `UserInfo` field) ignoring ASCII
+case, the other string claims exactly; `email` counts only when the
+provider verified it, as `verified_email` decides. The config check refuses
+a rule with no claims, a claim outside `sub`, `preferred_username`,
+`username`, `nickname`, `login`, `name`, `given_name`, `family_name`,
+`email` and `hd`, and an alias of another server. With rules, a sign-in
+that would create an account and meets none is refused with `M_FORBIDDEN`
+before the account is made, so no account or hold is left and the address
+can sign in once a rule lists it; this includes provisioning an LDAP user
+through a provider with `registration = false`. A new account joins the
+rooms of every rule it meets, in order and each once, after its link is
+stored and the sign-in has passed its checks (`membership::join_with_invite`).
+For each room, resolved from its alias, a room this server is not in, the
+admin room and a room an upgrade replaced (`m.room.tombstone`, so an old
+admin room too) are skipped, and so is an alias the room does not name in
+its own `m.room.canonical_alias`: any local user may point an alias nothing
+holds at any room, including an alias a rule names before its room exists,
+while only the room's members with power set that state. Whoever first
+creates a room with such a not-yet-held alias owns a room that rightly names
+it, and new accounts are invited there. Room IDs are the robust choice. When
+the join rule would refuse the account uninvited, the room's highest-powered
+active local member that may invite invites it first: never the server's own
+user or an appservice (bridge) account, which have no password, nor a
+locked, suspended or external account, so a room whose only possible inviter
+is such an account is skipped. Unlike `auto_join_rooms`, which joins as the
+user, this acts with the room's power, hence the alias, admin room and
+tombstone checks. A failed join is logged and never fails the sign-in. The
+rules are read from the live config, so a reload applies to the next
+sign-in. Without rules, and for existing accounts, assigned accounts and
+chained sign-ins, sign-in works as before. Upstream has no such option.
+Files: `src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
+`src/service/oauth/user_info.rs`,
+`src/service/membership/{mod.rs,join_with_invite.rs}`,
+`src/api/client/session/sso.rs`, `src/api/client/session/sso/native_apple.rs`,
+`docs/authentication/providers.md`; tests in
+`src/main/tests/sso_registration_rules.rs`,
+`src/service/oauth/user_info.rs` and `src/core/config/tests.rs`.
+
+### SSO registration rules can create external accounts
+
+A `public` join rule lets any local account join, and a `restricted` one any
+account in a room it names, so join rules alone do not keep accounts made for
+people outside an organization out of its rooms: every public room, present
+and future, would be open to them. A registration rule with `external = true`
+marks the accounts it creates in a new map, `userid_external`, which no
+client API writes (`users::{is_external, set_external}`). `full_register`
+(`Register::external`) writes the mark right after `create_new`, inside the
+SSO identity closure, so no session or login token of an external account
+exists unmarked; it then skips the first-user admin grant and
+`auto_join_rooms`. An account meeting several rules is external when any is.
+The mark is never set or cleared later, by a sign-in or a rule change. Only a
+missing row reads as unmarked (`is_missing`): a failed read counts as external,
+so a storage fault never lifts the limits. A client that joins a room on its
+own, such as an advertised shared-emoji room, fails for an external account
+unless a rule invited it there.
+
+The refusals sit where every local event is built,
+`timeline::create_hash_and_sign_event`, and read the mark only for an
+`m.room.create`, an invite, or a sender's own join, so other events pay
+nothing: an external sender's create event is refused with `M_FORBIDDEN`
+"This account may not create rooms." (`createRoom` and room upgrades), its
+invite with "This account may not invite others." (`/invite`, the state
+endpoint, remote invites), and its own join to a room it is neither joined
+to nor invited to with "This account may join a room only when invited."
+(the state endpoint as well as `/join`). A join it already has stands, so
+profile changes still reach its rooms, and leaving, knocking and accepting
+invites, auto-accept included, are unaffected. `membership::join` makes the
+same join check for every path, remote joins included, whose event comes
+from the resident server's template; appservices acting as the account are
+refused too. `createRoom` checks first, since it reports its create event's
+errors as `M_INVALID_PARAM`. `join_needs_invite` admits an external account
+by no join rule, so `join_with_invite` (the rule's rooms) and the admin join
+API invite it first; `force-join-room`, which joins without one, is refused.
+An external requester's user directory search keeps only users it shares a
+joined room with, whatever `directory.users.show_all_local` says. Such a
+rule should not list rooms whose members gain privileges by membership: the
+rule invites the account there. An external account also creates no room
+alias: `alias::creation_check`, which `PUT /directory/room/{alias}` and
+`createRoom`'s `room_alias_name` call, refuses it with "This account may not
+create room aliases." (`users::external_alias_check`); server-internal alias
+creation is unaffected. A third-party invite (`m.room.third_party_invite`) is an
+invite and gets the invite refusal. The upgrade route refuses an external
+requester with the create refusal at its entry, as it names the server user the
+creator of an upgraded admin room, whose create event the central check passes.
+The `user_can_invite` probe goes through the same builder, so an external
+account is never chosen to authorise someone else's restricted join. An
+external account is never a server admin: `user_is_admin` is false for it even
+in the admin room (so the admin API and admin commands refuse it, and
+`user_is_last_admin` ignores it), and the admin grant (`make_user_admin`)
+refuses it with "This account may not be a server admin.", so admin routes that
+act as the server user cannot carry it out of its rooms. After a room upgrade,
+external members cannot join the replacement room by following the tombstone:
+the upgrade moves only the creator and the sender (`move_member`), so someone in
+the new room invites them.
+Upstream has no such accounts.
+Files: `src/core/config/mod.rs`, `tuwunel-example.toml`,
+`src/database/maps.rs`, `src/service/users/{mod.rs,sso.rs,register.rs}`,
+`src/service/rooms/timeline/create.rs`, `src/service/rooms/alias/mod.rs`,
+`src/api/client/room/upgrade.rs`, `src/service/admin/{mod.rs,grant.rs}`,
+`src/service/membership/{join.rs,invite.rs,join_with_invite.rs}`,
+`src/api/client/{session/sso.rs,room/create.rs,user_directory.rs}`,
+`src/api/client/session/sso/native_apple.rs`,
+`docs/authentication/providers.md`; tests in
+`src/main/tests/sso_registration_rules.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every
@@ -1524,6 +1636,19 @@ mindroom_ephemeral_events_enabled = true
 assigned_accounts = { "alice@example.com" = "@alice:example.com" }
 ```
 
+### Registration rules for SSO sign-ins
+```toml
+[[global.identity_provider]]
+# Empty by default: registration works as before. With rules, only a sign-in
+# meeting one creates an account, which joins that rule's rooms. An alias
+# counts only as its room's canonical alias; a room ID always does.
+registration_rules = [
+  { claims = { hd = "example.com" }, rooms = ["#lobby:example.com"] },
+  # external: joins only rooms it is invited to, creates and invites nothing.
+  { claims = { email = "alice@school.example" }, rooms = ["#class:example.com"], external = true },
+]
+```
+
 ### Native Sign in with Apple
 ```toml
 [[global.identity_provider]]
@@ -1545,6 +1670,10 @@ native_client_ids = ["chat.mindroom.app"]
   `m.login.password` and `m.login.sso` in UIAA (upstream's rule since v1.9.3);
   before v1.9.3 the fork offered such accounts SSO only.
 - Native Apple login requires the app bundle ID in `native_client_ids`.
+- An image without registration rules ignores `registration_rules` (only the
+  rule's own fields are `deny_unknown_fields`, so the config still loads) and
+  the stored external mark, so downgrading lifts the confinement of external
+  accounts.
 - A client that lost its crypto store but kept its access token receives 403
   `M_FORBIDDEN` on `/keys/upload` until it logs in again (device identity keys
   are immutable per device id).

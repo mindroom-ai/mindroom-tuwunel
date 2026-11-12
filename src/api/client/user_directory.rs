@@ -27,12 +27,14 @@ const LIMIT_DEFAULT: usize = 10;
 /// share a room with the sender unless `directory.users.show_all_local` is
 /// enabled. Hides appservice senders and users in exclusive appservice user
 /// namespaces unless `directory.users.show_appservice` is enabled.
-/// Hides deactivated local accounts, whatever the other options say.
+/// Hides deactivated local accounts, whatever the other options say. An
+/// external sender finds only users it shares a room with.
 pub(crate) async fn search_users_route(
 	State(services): State<crate::State>,
 	body: Ruma<Request>,
 ) -> Result<Response> {
 	let sender_user = body.sender_user();
+	let sender_external = services.users.is_external(sender_user).await;
 	let limit = usize_from_ruma_bounded(body.limit, LIMIT_DEFAULT, LIMIT_MAX);
 
 	let search_term = body.search_term.to_lowercase();
@@ -48,7 +50,7 @@ pub(crate) async fn search_users_route(
 				.then_some((user_id, display_name))
 		})
 		.wide_filter_map(async |(user_id, display_name)| {
-			should_show_user(&services, sender_user, &user_id)
+			should_show_user(&services, sender_user, sender_external, &user_id)
 				.await
 				.then_async(async move || {
 					let avatar_url = services.profile.avatar_url(&user_id).await.ok();
@@ -76,6 +78,7 @@ fn matches_term(user_id: &UserId, display_name: Option<&str>, search_term: &str)
 async fn should_show_user(
 	services: &Services,
 	sender_user: &UserId,
+	sender_external: bool,
 	target_user: &UserId,
 ) -> bool {
 	let config = &services.server.config;
@@ -93,6 +96,14 @@ async fn should_show_user(
 		return false;
 	}
 
+	let user_sees_user = services
+		.state_cache
+		.user_sees_user(sender_user, target_user);
+
+	if sender_external {
+		return user_sees_user.await;
+	}
+
 	if config.directory.users.show_all_local {
 		return true;
 	}
@@ -108,10 +119,6 @@ async fn should_show_user(
 				.map(|rule| matches!(rule, JoinRule::Public))
 				.await
 		});
-
-	let user_sees_user = services
-		.state_cache
-		.user_sees_user(sender_user, target_user);
 
 	user_in_public_room.or(user_sees_user).await
 }

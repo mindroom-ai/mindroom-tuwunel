@@ -130,6 +130,14 @@ pub async fn join<'a>(
 		return Err!(Request(Forbidden("You are banned from the room.")));
 	}
 
+	// An external account joins only where invited, whoever asks. The event
+	// builder refuses its local join too, but a remote join's event is made
+	// from the resident server's template.
+	self.services
+		.users
+		.external_join_check(sender_user, room_id)
+		.await?;
+
 	match federation_lock {
 		| Some(federation_lock) if !self.is_local_join(room_id, &servers).await =>
 			self.join_remote(

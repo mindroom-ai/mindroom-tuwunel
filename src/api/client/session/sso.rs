@@ -10,13 +10,13 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as b64};
 use const_str::format as const_format;
-use futures::{TryFutureExt, future::try_join};
+use futures::{FutureExt, TryFutureExt, future::try_join};
 use reqwest::header::{
 	CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HeaderValue, REFERRER_POLICY,
 	SET_COOKIE,
 };
 use ruma::{
-	Mxc, OwnedMxcUri, OwnedUserId, ServerName, UserId,
+	Mxc, OwnedMxcUri, OwnedRoomOrAliasId, OwnedUserId, ServerName, UserId,
 	api::{
 		client::{
 			session::{
@@ -715,7 +715,7 @@ async fn complete_sso_session(
 		};
 
 		let created = !services.users.exists(&user_id).await;
-		if created {
+		let rooms = if created {
 			let origin = match provider.registration {
 				| true => "sso",
 				// Present in LDAP is an existing user to provision, not a new registration.
@@ -726,8 +726,10 @@ async fn complete_sso_session(
 					))),
 			};
 
-			register_user(services, provider, &session, &userinfo, &user_id, origin).await?;
-		}
+			register_user(services, provider, &session, &userinfo, &user_id, origin).await?
+		} else {
+			Vec::new()
+		};
 
 		// An account a first sign-in takes by name is held from here until its link
 		// is stored (creating it takes the same lock), so no assignment links it
@@ -750,15 +752,15 @@ async fn complete_sso_session(
 			);
 		}
 
-		Ok((session, (user_id, held)))
+		Ok((session, (user_id, held, rooms)))
 	};
 
 	// An assigned account without a password becomes an SSO account in the
 	// batch that links it, so no reader finds one without the other.
-	let (session, (user_id, held), old_sess_id) = services
+	let (session, (user_id, held, rooms), old_sess_id) = services
 		.oauth
 		.sessions
-		.commit_identity_session_with(&unique_id, complete_identity, |(user_id, held), txn| {
+		.commit_identity_session_with(&unique_id, complete_identity, |(user_id, held, _), txn| {
 			if held.as_ref().is_some_and(at!(1)) {
 				services
 					.users
@@ -815,7 +817,84 @@ async fn complete_sso_session(
 
 	services.users.locked_check(&user_id).await?;
 
+	// Joined only once the sign-in stands, and outside the identity's and the
+	// account's locks, which slow joins would otherwise hold.
+	join_registration_rooms(services, &user_id, &rooms)
+		.boxed() // size firewall
+		.await;
+
 	Ok((user_id, session))
+}
+
+/// What the registration rules a new account meets give it.
+struct RegistrationTerms {
+	/// The rules' rooms, in order and each once.
+	rooms: Vec<OwnedRoomOrAliasId>,
+
+	/// Whether any of the rules makes the account external.
+	external: bool,
+}
+
+/// The terms of every registration rule of the provider a new account meets.
+/// The rules are read from the live config, so a reload applies to the next
+/// sign-in; a provider a reload removed keeps the rules it was loaded with. A
+/// provider with rules refuses an account that meets none.
+fn registration_terms(
+	services: &Services,
+	provider: &Provider,
+	userinfo: &UserInfo,
+) -> Result<RegistrationTerms> {
+	let rules = services
+		.oauth
+		.providers
+		.find_config(provider.id())
+		.map_or(&provider.registration_rules, |config| &config.registration_rules);
+
+	let met = rules
+		.iter()
+		.filter(|rule| userinfo.meets(&rule.claims, provider.trusted))
+		.collect_vec();
+
+	if !rules.is_empty() && met.is_empty() {
+		info!(
+			provider = provider.id(),
+			sub = %userinfo.sub,
+			"Refused a new account that meets no registration rule."
+		);
+
+		return Err!(Request(Forbidden(
+			"This sign-in may not create an account here; ask an administrator to invite you."
+		)));
+	}
+
+	Ok(RegistrationTerms {
+		external: met.iter().any(|rule| rule.external),
+		rooms: met
+			.into_iter()
+			.flat_map(|rule| rule.rooms.iter().cloned())
+			.unique()
+			.collect(),
+	})
+}
+
+/// Join a new account to its registration rules' rooms. A failed join is
+/// logged and never fails the sign-in.
+async fn join_registration_rooms(
+	services: &Services,
+	user_id: &UserId,
+	rooms: &[OwnedRoomOrAliasId],
+) {
+	for room in rooms {
+		match services
+			.membership
+			.join_with_invite(user_id, room)
+			.await
+		{
+			| Ok(room_id) => info!(%user_id, %room_id, "Joined a registration rule's room."),
+			| Err(error) =>
+				warn!(%user_id, %room, %error, "Could not join a registration rule's room."),
+		}
+	}
 }
 
 /// Find the session an earlier release keyed on the presented GitHub `login`.
@@ -923,6 +1002,8 @@ async fn ldap_user_exists(services: &Services, user_id: &UserId) -> bool {
 			.is_ok_and(|dns| !dns.is_empty())
 }
 
+/// Create the account a sign-in maps to, once the provider's registration
+/// rules admit it, and return the rooms they give it.
 #[tracing::instrument(
 	name = "register",
 	level = INFO_SPAN_LEVEL,
@@ -936,9 +1017,15 @@ async fn register_user(
 	userinfo: &UserInfo,
 	user_id: &UserId,
 	origin: &str,
-) -> Result {
-	debug_info!(%user_id, "Creating new user account...");
+) -> Result<Vec<OwnedRoomOrAliasId>> {
+	let terms = registration_terms(services, provider, userinfo)?;
 
+	debug_info!(%user_id, external = terms.external, "Creating new user account...");
+
+	// An external account is marked as it is created, before the session and
+	// its login token are committed, so no session of one exists unmarked. A
+	// refusal after this leaves the account, marked, without a link, as one
+	// whose name was taken meanwhile is left.
 	services
 		.users
 		.full_register(Register {
@@ -947,6 +1034,7 @@ async fn register_user(
 			origin: Some(origin),
 			displayname: userinfo.name.as_deref(),
 			grant_first_user_admin: true,
+			external: terms.external,
 			..Default::default()
 		})
 		.await?;
@@ -981,7 +1069,7 @@ async fn register_user(
 	info!("{notice}");
 	services.admin.notify(&notice).await;
 
-	Ok(())
+	Ok(terms.rooms)
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(user_id, avatar_url))]

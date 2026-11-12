@@ -728,6 +728,43 @@ client_secret = "oauth-secret"
 }
 
 #[test]
+fn check_refuses_bad_registration_rules() {
+	let config = |lines: &str| {
+		config_from_toml(&format!(
+			r#"[global]
+server_name = "example.com"
+
+[[global.identity_provider]]
+brand = "google"
+client_id = "google"
+client_secret = "oauth-secret"
+{lines}
+"#
+		))
+		.expect("registration rules config should parse")
+	};
+
+	let refused = |lines: &str, message: &str| {
+		let (result, _) = check_with_captured_logs(&config(lines));
+		let error = result.expect_err("the registration rules should fail config check");
+
+		assert!(error.to_string().contains(message), "{error}");
+	};
+
+	let good = r##"registration_rules = [{ claims = { hd = "example.com" }, rooms = ["#a:example.com", "!abc"] }]"##;
+	let (result, _) = check_with_captured_logs(&config(good));
+
+	result.expect("valid registration rules should pass config check");
+
+	refused("registration_rules = [{ claims = {} }]", "no claims");
+	refused(r#"registration_rules = [{ claims = { groups = "x" } }]"#, "unknown claim");
+	refused(
+		r##"registration_rules = [{ claims = { hd = "example.com" }, rooms = ["#a:other.example"] }]"##,
+		"not a local room alias",
+	);
+}
+
+#[test]
 fn check_warns_when_mas_provisioning_provider_is_untrusted() {
 	let untrusted_provisioning = r#"[global]
 mas_secret = "provisioning-secret"

@@ -72,7 +72,7 @@ use ruma::{
 	OwnedMxcUri, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId,
 	api::client::discovery::discover_support::ContactRole,
 };
-use serde::{Deserialize, de::IgnoredAny};
+use serde::{Deserialize, Serialize, de::IgnoredAny};
 use smallstr::SmallString;
 use tuwunel_macros::config_example_generator;
 use url::Url;
@@ -1973,6 +1973,53 @@ pub struct IdentityProvider {
 	#[serde(default)]
 	pub assigned_accounts: BTreeMap<String, OwnedUserId>,
 
+	/// Rules for who may register through this provider, and the rooms their
+	/// new accounts join. Each rule is a set of claims, all of which must hold,
+	/// optional rooms, and an optional `external` flag:
+	/// `[{ claims = { hd = "school.example" }, rooms = ["#students:example.com"] }]`.
+	/// The claims are `sub`, `preferred_username`, `username`, `nickname`,
+	/// `login`, `name`, `given_name`, `family_name`, `email`, and `hd` (Google's
+	/// hosted domain). Values match exactly, except that `email` and `hd` ignore
+	/// ASCII case, and `email` counts only when the provider verified it.
+	///
+	/// With no rules, registration works as before. With rules, a sign-in that
+	/// would create an account, LDAP provisioning included, is refused unless
+	/// it meets a rule; existing accounts sign in as usual. A new account joins
+	/// the rooms of every rule it meets, after the account is made: when a
+	/// room's join rule needs it, the account is first invited by the room's
+	/// highest-powered active local member that may invite. That is never the
+	/// server's own user or an appservice (bridge) account, which have no
+	/// password, nor a locked, suspended or external account, so a room whose
+	/// only possible inviter is such an account is skipped. Rooms are room IDs
+	/// or local room aliases. Any local user may point an alias
+	/// nothing holds at any room, so an alias is used only when the room it
+	/// resolves to names it in its own `m.room.canonical_alias`; room IDs are
+	/// the robust choice. Whoever first creates a room with an alias a rule
+	/// names that no room has yet owns a room that rightly names it, and new
+	/// accounts are invited there. The admin room, and any room an upgrade
+	/// replaced, are never joined this way. A skipped room, like any failed
+	/// join, never fails the sign-in. The rooms are joined only on the sign-in
+	/// that creates the account: if it fails after the account exists, later
+	/// sign-ins join nothing, and an admin invites. The rules are read at each
+	/// sign-in, so a reload applies to the next one.
+	///
+	/// A new account meeting a rule with `external = true` is external: it
+	/// joins only rooms it is invited to (its rules' rooms invite it first,
+	/// whatever their join rule), creates no rooms or room aliases, upgrades
+	/// no rooms, invites no one (third-party invites included), and finds in
+	/// the user directory only people it shares a room with. Admins still join
+	/// it to a room by inviting it first, as the admin join API does;
+	/// `force-join-room` is refused. Do not list rooms whose members gain
+	/// privileges by membership. An external account is never a server admin:
+	/// `user_is_admin` is false for it even in the admin room, and the admin
+	/// grant refuses it, so admin routes that act as the server user cannot
+	/// carry it out of its rooms. The mark is set when the account is created;
+	/// later sign-ins and rule changes neither set nor clear it.
+	///
+	/// default: []
+	#[serde(default)]
+	pub registration_rules: Vec<RegistrationRule>,
+
 	/// Setting this option to false will inhibit unique ID's from being
 	/// generated as a last-resort when determining a UserId from a provider's
 	/// claims. In the case of untrusted providers, when all provided claims
@@ -2094,6 +2141,42 @@ pub struct IdentityProvider {
 	/// default: false
 	#[serde(default)]
 	pub forward_action_prompt: bool,
+}
+
+/// The claims an identity provider's registration rule may name.
+pub const REGISTRATION_RULE_CLAIMS: &[&str] = &[
+	"sub",
+	"preferred_username",
+	"username",
+	"nickname",
+	"login",
+	"name",
+	"given_name",
+	"family_name",
+	"email",
+	"hd",
+];
+
+/// One of an identity provider's registration rules: claims that must all
+/// hold, and the rooms a new account that meets them joins.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistrationRule {
+	/// Claim names (see [`REGISTRATION_RULE_CLAIMS`]) and the values they
+	/// must have.
+	pub claims: BTreeMap<String, String>,
+
+	/// Room IDs or local room aliases a new account meeting the rule joins.
+	#[serde(default)]
+	pub rooms: Vec<OwnedRoomOrAliasId>,
+
+	/// Whether a new account meeting the rule is external: it joins only
+	/// rooms it is invited to, creates no rooms or room aliases, upgrades no
+	/// rooms, invites no one, and finds in the user directory only people it
+	/// shares a room with. The mark is set when the account is created and
+	/// kept; later sign-ins and rule changes neither set nor clear it.
+	#[serde(default)]
+	pub external: bool,
 }
 
 impl IdentityProvider {

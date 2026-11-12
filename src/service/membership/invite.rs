@@ -53,8 +53,9 @@ pub async fn invite(
 /// True when this server is in the room, the user is neither joined nor
 /// invited, and the join rule would refuse the user uninvited: a public rule
 /// admits anyone, and a restricted rule admits members of the rooms it
-/// allows. When this server is not in the room its view of the join rule may
-/// be stale or absent, so the remote join is left to decide.
+/// allows, but neither admits an external account. When this server is not
+/// in the room its view of the join rule may be stale or absent, so the
+/// remote join is left to decide.
 #[implement(Service)]
 pub async fn join_needs_invite(&self, room_id: &RoomId, user_id: &UserId) -> bool {
 	let server_in_room = self
@@ -84,6 +85,10 @@ pub async fn join_needs_invite(&self, room_id: &RoomId, user_id: &UserId) -> boo
 
 #[implement(Service)]
 async fn admits_uninvited(&self, rule: &JoinRule, user_id: &UserId) -> bool {
+	if self.services.users.is_external(user_id).await {
+		return false;
+	}
+
 	match rule {
 		| JoinRule::Public => true,
 		| JoinRule::Restricted(_) | JoinRule::KnockRestricted(_) =>
