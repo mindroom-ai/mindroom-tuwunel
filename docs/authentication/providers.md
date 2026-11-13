@@ -436,6 +436,70 @@ belongs to the account and is set when the rule creates it: later sign-ins and
 rule changes neither set nor clear it. A failed read of the mark counts as
 external, so a storage fault never lifts the limits.
 
+#### Inviting one address
+
+A server admin can let one more person register without editing the
+configuration. A registration invite names an email address, the rooms its
+account joins, and whether the account is external. It is in effect one more
+rule for that address, `{ claims = { email = "..." }, rooms, external }`, that
+is kept in the database, applies to every provider, and is used once.
+
+Three requests manage the invites. Each needs the access token of a server
+admin; anyone else is refused with `M_FORBIDDEN`:
+
+```sh
+# Invite an address. `rooms` and `external` are optional: no rooms, not external.
+curl -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"rooms": ["!lobby:example.com"], "external": true}' \
+  https://matrix.example.com/_matrix/client/unstable/io.mindroom/admin/registration_invites/alice@example.com
+
+# List the invites.
+curl -H "Authorization: Bearer $TOKEN" \
+  https://matrix.example.com/_matrix/client/unstable/io.mindroom/admin/registration_invites
+
+# Remove an invite.
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  https://matrix.example.com/_matrix/client/unstable/io.mindroom/admin/registration_invites/alice@example.com
+```
+
+`PUT` answers with the invite as it is stored,
+`{"email": "alice@example.com", "rooms": ["!lobby:example.com"], "external": true}`,
+and the list with `{"invites": [...]}`, by address. An address is stored
+lowercased, so its case does not matter in a request or at the provider, and
+writing it again replaces its invite. Percent-encode what a URL path does not
+take as it is, such as `/`, `?`, `#` and `%`. `PUT` refuses a malformed address
+(`M_INVALID_PARAM`), a room that is neither a room ID nor an alias
+(`M_BAD_JSON`), and an address an account already has (`M_THREEPID_IN_USE`,
+naming the account): only a sign-in that creates an account uses an invite, so
+that one would stay in the list for good. `DELETE` answers `M_NOT_FOUND` for an
+address without an invite. The rooms are not checked when the invite is
+written: as with a rule, one that cannot be joined is logged at the sign-in.
+
+At sign-in:
+
+- Only a sign-in that would create an account reads an invite, and only for an
+  address the provider verified, as for a rule's `email` claim. An existing
+  account signs in as before and leaves an invite for its address untouched.
+- On a provider with rules, an invited address is admitted even when it meets
+  no rule.
+- The account is external when a rule it meets or the invite says so. It joins
+  the rooms of the rules it meets, then the invite's, each once, exactly as
+  described above for a rule's rooms.
+- A provider without rules stays open to everyone. An invite there only gives
+  its address the invite's rooms and external mark. A provider with
+  `registration = false` stays closed, invite or not.
+- The invite is deleted once the sign-in has succeeded. A sign-in that failed
+  before that leaves it, so the person can try again.
+- An invite that cannot be read fails the sign-in, so a storage fault never
+  registers an invited external person as a normal account.
+
+No email is sent: tell the person to sign in with that address. A provider
+without rules admits everyone, so to admit invited people only, give it a rule
+nobody meets, such as `{ claims = { hd = "nobody.invalid" } }`. A client can
+tell that the server has invites from `io.mindroom.registration_invites` in the
+`unstable_features` of `GET /_matrix/client/versions`, listed while an identity
+provider is configured.
+
 ### How Tuwunel derives Matrix user IDs from claims
 
 When a user authenticates through a provider for the first time and no

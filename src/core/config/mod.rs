@@ -2016,6 +2016,10 @@ pub struct IdentityProvider {
 	/// carry it out of its rooms. The mark is set when the account is created;
 	/// later sign-ins and rule changes neither set nor clear it.
 	///
+	/// A server admin can also invite single email addresses at runtime, each
+	/// for one new account with its own rooms and `external` flag, through the
+	/// registration invite routes (docs/authentication/providers.md).
+	///
 	/// default: []
 	#[serde(default)]
 	pub registration_rules: Vec<RegistrationRule>,
