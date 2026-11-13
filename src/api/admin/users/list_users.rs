@@ -43,6 +43,7 @@ struct ListParams<'a> {
 	locked: bool,
 	deactivated: DeactivatedFilter,
 	dir: Direction,
+	not_user_type: &'a [String],
 }
 
 /// # `GET /_synapse/admin/v2/users`
@@ -66,6 +67,7 @@ pub(crate) async fn admin_list_users_v2_route(
 		locked: body.locked,
 		deactivated,
 		dir: body.dir.unwrap_or(Direction::Forward),
+		not_user_type: &body.not_user_type,
 	};
 
 	let (users, next_token, total) = list_users(services, &params).await;
@@ -95,6 +97,7 @@ pub(crate) async fn admin_list_users_v3_route(
 		locked: body.locked,
 		deactivated,
 		dir: body.dir.unwrap_or(Direction::Forward),
+		not_user_type: &body.not_user_type,
 	};
 
 	let (users, next_token, total) = list_users(services, &params).await;
@@ -147,9 +150,9 @@ async fn list_users(
 	(page, next_token, total)
 }
 
-/// Applies the substring, admin, locked and deactivated filters to one user and
-/// builds its `UserMinorDetails`, or returns `None` when the user is filtered
-/// out.
+/// Applies the substring, admin, locked, deactivated and user type filters to
+/// one user and builds its `UserMinorDetails`, or returns `None` when the user
+/// is filtered out.
 async fn user_minor_details(
 	services: crate::State,
 	name: &str,
@@ -204,6 +207,17 @@ async fn user_minor_details(
 		return None;
 	}
 
+	let user_type = user_type(services, &user_id).await;
+
+	// As in Synapse, an empty string names the users that have no type.
+	if params
+		.not_user_type
+		.iter()
+		.any(|excluded| excluded == user_type.as_deref().unwrap_or_default())
+	{
+		return None;
+	}
+
 	let avatar_url = services
 		.profile
 		.avatar_url(&user_id)
@@ -218,8 +232,6 @@ async fn user_minor_details(
 		.all_devices_metadata(&user_id)
 		.ready_fold(None, |max, device| max.max(device.last_seen_ts))
 		.await;
-
-	let user_type = user_type(services, &user_id).await;
 
 	Some(UserMinorDetails {
 		displayname,
