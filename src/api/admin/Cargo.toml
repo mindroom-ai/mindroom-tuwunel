@@ -17,6 +17,15 @@ crate-type = [
 #	"dylib",
 ]
 
+[features]
+default = ["server"]
+# Named by the request macros of ruma, which write the half of a request
+# type that a client or a server needs under the feature of that name, in
+# the crate that defines the type (`registration_invites.rs`). The routes
+# need the server half.
+client = []
+server = []
+
 [dependencies]
 axum.workspace = true
 const-str.workspace = true

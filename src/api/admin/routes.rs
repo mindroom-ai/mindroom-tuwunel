@@ -25,6 +25,9 @@ pub fn build(server: &Server) -> Router<State> {
 		.ruma_route(&admin::suspend_user_route)
 		.ruma_route(&admin::is_user_locked_route)
 		.ruma_route(&admin::lock_user_route)
+		.ruma_route(&admin::registration_invites::admin_list_registration_invites_route)
+		.ruma_route(&admin::registration_invites::admin_put_registration_invite_route)
+		.ruma_route(&admin::registration_invites::admin_delete_registration_invite_route)
 }
 
 fn register_synapse_admin_users_routes(router: Router<State>, mas_active: bool) -> Router<State> {

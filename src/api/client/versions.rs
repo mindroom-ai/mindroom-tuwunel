@@ -64,6 +64,11 @@ pub(crate) async fn get_supported_versions_route(
 				.into_iter()
 				.flatten(),
 		)
+		.chain(
+			// Only a sign-in through a provider reads a registration invite.
+			(!services.config.identity_provider.is_empty())
+				.then_some("io.mindroom.registration_invites"),
+		)
 		.map(Into::into)
 		.zip(once(true).cycle())
 		.collect();
