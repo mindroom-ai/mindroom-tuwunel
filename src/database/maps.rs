@@ -350,6 +350,10 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::RANDOM_SMALL
 	},
 	Descriptor {
+		name: "registrationemail_invite",
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
 		name: "registrationtoken_info",
 		..descriptor::RANDOM_SMALL
 	},

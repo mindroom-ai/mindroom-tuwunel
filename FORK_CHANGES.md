@@ -869,6 +869,51 @@ Files: `src/core/config/mod.rs`, `tuwunel-example.toml`,
 `docs/authentication/providers.md`; tests in
 `src/main/tests/sso_registration_rules.rs`.
 
+### SSO registration invites admit single addresses at runtime
+
+Registration rules live in the configuration, so letting one more person
+register meant editing it and reloading. A registration invite is one more
+rule for a single email address, `{ rooms, external }`, kept in a new map,
+`registrationemail_invite`, keyed by the address in its canonical form
+(`threepid::canonicalize_email`), that applies to every provider and is used
+once (`users::{registration_invite, set_registration_invite,
+remove_registration_invite, registration_invites}`). `registration_terms`
+reads the invite of the address the provider verified, as for a rule's
+`email` claim, only for a sign-in that would create an account: on a provider
+with rules it admits a sign-in that meets none, and on any provider its rooms
+and external mark add to those of the met rules. It never closes a provider
+without rules, and the refusal of `registration = false` comes before it and
+is unchanged. Only a missing row
+reads as no invite: a failed read fails the sign-in, so a storage fault never
+registers an invited external person as a normal account. The invite is
+removed in `complete_sso_session` once the sign-in stands, beside the room
+joins, so a sign-in that failed before that can be tried again.
+
+Server admins manage invites through three routes of the fork's own, under
+`/_matrix/client/unstable/io.mindroom/admin/registration_invites`: `GET` lists
+them, `PUT .../{email}` writes one (optional `rooms` and `external`) and
+`DELETE .../{email}` removes one. `RumaAdmin` refuses an account that is no
+server admin with `M_FORBIDDEN` before the request is parsed. `PUT` and
+`DELETE` refuse a malformed address (`M_INVALID_PARAM`); `PUT` also refuses
+something that is no room (`M_BAD_JSON`), an alias of another server
+(`M_INVALID_PARAM`, as the config check does for a rule) and an address an
+account already has (`M_THREEPID_IN_USE`, naming the account), and `DELETE`
+answers `M_NOT_FOUND` for an address without an invite. The routes are
+registered with or without MAS delegation, and `/versions` lists
+`io.mindroom.registration_invites` while an identity provider is configured.
+No email is sent. The request types are the first `tuwunel_api_admin` defines
+itself: ruma's request macros write a type's server half under the `server`
+feature of the defining crate, so the crate has `client` and `server`
+features (`server` by default and for the workspace), and the workspace's
+`check-cfg` list names `ruma_unstable_exhaustive_types`.
+Upstream has no such invites.
+Files: `src/service/users/{mod.rs,registration_invites.rs}`,
+`src/database/maps.rs`, `src/api/client/session/sso.rs`,
+`src/api/admin/{mod.rs,routes.rs,registration_invites.rs,Cargo.toml}`,
+`src/api/client/versions.rs`, `Cargo.toml`, `src/core/config/mod.rs`,
+`tuwunel-example.toml`, `docs/authentication/providers.md`; tests in
+`src/main/tests/sso_registration_rules/invites.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every

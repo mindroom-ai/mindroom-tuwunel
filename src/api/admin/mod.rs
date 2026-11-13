@@ -9,6 +9,8 @@ pub(crate) mod devices;
 pub(crate) mod federation;
 pub(crate) mod media;
 pub(crate) mod misc;
+#[cfg(feature = "server")]
+pub(crate) mod registration_invites;
 pub(crate) mod rooms;
 /// Provides the administrator route builder.
 ///
