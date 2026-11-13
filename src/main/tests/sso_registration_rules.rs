@@ -8,6 +8,8 @@ mod fixture;
 mod admin_api;
 #[path = "client/get.rs"]
 mod get;
+#[path = "sso_registration_rules/invites.rs"]
+mod invites;
 #[path = "client/membership.rs"]
 mod membership;
 #[path = "client/put.rs"]
