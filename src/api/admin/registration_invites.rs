@@ -5,7 +5,7 @@
 
 use axum::extract::State;
 use futures::StreamExt;
-use ruma::OwnedRoomOrAliasId;
+use ruma::{OwnedRoomOrAliasId, RoomAliasId};
 use serde::{Deserialize, Serialize};
 use tuwunel_core::{Err, Result};
 use tuwunel_service::{threepid::canonicalize_email, users::RegistrationInvite};
@@ -136,14 +136,22 @@ pub(crate) async fn admin_list_registration_invites_route(
 ///
 /// An address an account already has is refused: only a sign-in that creates
 /// an account uses an invite, so that one would stay in the list for good.
-/// The rooms are not checked, as a registration rule's are not: one that
-/// cannot be joined is logged at the sign-in.
+/// As for a registration rule, an alias must be on this server, and no room
+/// is checked to exist: one that cannot be joined is logged at the sign-in.
 pub(crate) async fn admin_put_registration_invite_route(
 	State(services): State<crate::State>,
 	body: RumaAdmin<put::Request>,
 ) -> Result<put::Response> {
 	let put::Request { email, rooms, external } = body.body;
 	let email = canonicalize_email(&email)?;
+
+	if let Some(alias) = rooms
+		.iter()
+		.filter_map(|room| <&RoomAliasId>::try_from(&**room).ok())
+		.find(|alias| !services.globals.alias_is_local(alias))
+	{
+		return Err!(Request(InvalidParam("{alias} is not a local room alias.")));
+	}
 
 	if let Some(user_id) = services
 		.threepid
@@ -164,6 +172,7 @@ pub(crate) async fn admin_put_registration_invite_route(
 
 /// Removes the invite of an address through
 /// `DELETE /_matrix/client/unstable/io.mindroom/admin/registration_invites/{email}`.
+/// The address is read as `PUT` reads it, so a malformed one is refused.
 pub(crate) async fn admin_delete_registration_invite_route(
 	State(services): State<crate::State>,
 	body: RumaAdmin<delete::Request>,

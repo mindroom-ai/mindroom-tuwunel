@@ -1249,7 +1249,7 @@ fn claims(sub: &str) -> Value {
 		| "olga" => json!({ "sub": sub, "email": "olga@old.example", "hd": "old.example" }),
 		| "vera" => json!({
 			"sub": sub,
-			"email": "vera@visit.example",
+			"email": "Vera@Visit.example",
 			"email_verified": true,
 			"hd": "visit.example",
 		}),

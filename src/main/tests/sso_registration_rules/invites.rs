@@ -123,7 +123,8 @@ fn unverified_address_is_not_admitted() -> Result {
 }
 
 /// An account that meets a rule and has an invite gets both: the rule's room
-/// and the invite's, and it is external because the invite says so.
+/// and the invite's, and it is external because the invite says so. The
+/// provider reports the address in another case than the invite is stored in.
 #[test]
 fn invite_adds_to_a_met_rule() -> Result {
 	run("sso-registration-invites-adds", async |services, base| {
@@ -200,6 +201,32 @@ fn unjoinable_room_does_not_fail_the_sign_in() -> Result {
 
 		assert_eq!(other, user_id(services, "other")?);
 		assert!(!pending(services, "other@school.example").await?, "the invite is used up");
+
+		Ok(())
+	})
+}
+
+/// An invite that cannot be read fails the sign-in and creates no account,
+/// on a provider that admits the address without one: a storage fault never
+/// registers an invited external person as a normal account.
+#[test]
+fn unreadable_invite_fails_the_sign_in() -> Result {
+	run("sso-registration-invites-unreadable", async |services, base| {
+		make_rooms(services, base).await?;
+		update_rules(services, Vec::clear)?;
+
+		services.db["registrationemail_invite"].insert("other@school.example", "not-json");
+
+		let response = sign_in(base, "other").await?;
+
+		assert!(signed_in(services, &response).await.is_err(), "the sign-in fails");
+		assert!(
+			!services
+				.users
+				.exists(&user_id(services, "other")?)
+				.await,
+			"no account is created"
+		);
 
 		Ok(())
 	})
@@ -293,8 +320,8 @@ async fn advertised(services: &Services, base: &str) -> Result<Value> {
 }
 
 /// An administrator invites an address over HTTP, in whatever case, and sees
-/// it listed in its canonical form; the sign-in it admits uses it up, and an
-/// invite can be removed once.
+/// it listed in its canonical form; the sign-in it admits uses it up, an
+/// invite can be removed once, and a malformed address has none to remove.
 #[test]
 fn administrator_manages_invites_over_http() -> Result {
 	run_with("sso-registration-invites-http", NO_FIRST_ADMIN, async |services, base| {
@@ -334,6 +361,10 @@ fn administrator_manages_invites_over_http() -> Result {
 
 		refusal(response, StatusCode::NOT_FOUND, "M_NOT_FOUND").await?;
 
+		let response = call(&admin, Method::DELETE, Some("nodomain"), &json!({})).await?;
+
+		refusal(response, StatusCode::BAD_REQUEST, "M_INVALID_PARAM").await?;
+
 		Ok(())
 	})
 }
@@ -365,8 +396,8 @@ fn put_defaults_escapes_and_replaces() -> Result {
 	})
 }
 
-/// A malformed address, something that is no room, and an address an account
-/// already has are refused, and store nothing.
+/// A malformed address, something that is no room, an alias of another server,
+/// and an address an account already has are refused, and store nothing.
 #[test]
 fn put_refuses_bad_input() -> Result {
 	run_with("sso-registration-invites-bad-input", NO_FIRST_ADMIN, async |services, base| {
@@ -382,6 +413,12 @@ fn put_refuses_bad_input() -> Result {
 		let response = call(&admin, Method::PUT, Some("other@school.example"), &rooms).await?;
 
 		refusal(response, StatusCode::BAD_REQUEST, "M_BAD_JSON").await?;
+
+		let rooms = json!({ "rooms": ["#welcome:elsewhere.example"] });
+		let response = call(&admin, Method::PUT, Some("other@school.example"), &rooms).await?;
+		let message = refusal(response, StatusCode::BAD_REQUEST, "M_INVALID_PARAM").await?;
+
+		assert!(message.contains("#welcome:elsewhere.example"), "{message}");
 
 		let response = sign_in(base, "guest").await?;
 		let guest = signed_in(services, &response).await?;

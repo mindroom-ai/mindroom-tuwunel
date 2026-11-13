@@ -445,7 +445,7 @@ rule for that address, `{ claims = { email = "..." }, rooms, external }`, that
 is kept in the database, applies to every provider, and is used once.
 
 Three requests manage the invites. Each needs the access token of a server
-admin; anyone else is refused with `M_FORBIDDEN`:
+admin; another account's is refused with `M_FORBIDDEN`:
 
 ```sh
 # Invite an address. `rooms` and `external` are optional: no rooms, not external.
@@ -464,16 +464,18 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 
 `PUT` answers with the invite as it is stored,
 `{"email": "alice@example.com", "rooms": ["!lobby:example.com"], "external": true}`,
-and the list with `{"invites": [...]}`, by address. An address is stored
-lowercased, so its case does not matter in a request or at the provider, and
-writing it again replaces its invite. Percent-encode what a URL path does not
-take as it is, such as `/`, `?`, `#` and `%`. `PUT` refuses a malformed address
-(`M_INVALID_PARAM`), a room that is neither a room ID nor an alias
-(`M_BAD_JSON`), and an address an account already has (`M_THREEPID_IN_USE`,
-naming the account): only a sign-in that creates an account uses an invite, so
-that one would stay in the list for good. `DELETE` answers `M_NOT_FOUND` for an
-address without an invite. The rooms are not checked when the invite is
-written: as with a rule, one that cannot be joined is logged at the sign-in.
+and the list with `{"invites": [...]}`, by address. An address is stored in
+lowercase, with `ß` as `ss`, so its case does not matter in a request or at the
+provider, and writing it again replaces its invite. Percent-encode what a URL
+path does not take as it is, such as `/`, `?`, `#` and `%`. `PUT` and `DELETE`
+refuse a malformed address (`M_INVALID_PARAM`). `PUT` also refuses a room that
+is neither a room ID nor an alias (`M_BAD_JSON`), an alias of another server
+(`M_INVALID_PARAM`), and an address an account already has
+(`M_THREEPID_IN_USE`, naming the account): only a sign-in that creates an
+account uses an invite, so that one would stay in the list for good. `DELETE`
+answers `M_NOT_FOUND` for an address without an invite. No room is checked to
+exist when the invite is written: as with a rule, one that cannot be joined is
+logged at the sign-in.
 
 At sign-in:
 
@@ -486,8 +488,8 @@ At sign-in:
   the rooms of the rules it meets, then the invite's, each once, exactly as
   described above for a rule's rooms.
 - A provider without rules stays open to everyone. An invite there only gives
-  its address the invite's rooms and external mark. A provider with
-  `registration = false` stays closed, invite or not.
+  its address the invite's rooms and external mark. `registration = false` is
+  checked before the rules and the invites, and an invite does not lift it.
 - The invite is deleted once the sign-in has succeeded. A sign-in that failed
   before that leaves it, so the person can try again.
 - An invite that cannot be read fails the sign-in, so a storage fault never

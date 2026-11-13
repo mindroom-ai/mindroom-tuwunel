@@ -882,7 +882,8 @@ reads the invite of the address the provider verified, as for a rule's
 `email` claim, only for a sign-in that would create an account: on a provider
 with rules it admits a sign-in that meets none, and on any provider its rooms
 and external mark add to those of the met rules. It never closes a provider
-without rules, and `registration = false` stays closed. Only a missing row
+without rules, and the refusal of `registration = false` comes before it and
+is unchanged. Only a missing row
 reads as no invite: a failed read fails the sign-in, so a storage fault never
 registers an invited external person as a normal account. The invite is
 removed in `complete_sso_session` once the sign-in stands, beside the room
@@ -891,9 +892,11 @@ joins, so a sign-in that failed before that can be tried again.
 Server admins manage invites through three routes of the fork's own, under
 `/_matrix/client/unstable/io.mindroom/admin/registration_invites`: `GET` lists
 them, `PUT .../{email}` writes one (optional `rooms` and `external`) and
-`DELETE .../{email}` removes one. `RumaAdmin` refuses anyone else with
-`M_FORBIDDEN` before the body is read. `PUT` refuses a malformed address
-(`M_INVALID_PARAM`), something that is no room (`M_BAD_JSON`) and an address an
+`DELETE .../{email}` removes one. `RumaAdmin` refuses an account that is no
+server admin with `M_FORBIDDEN` before the request is parsed. `PUT` and
+`DELETE` refuse a malformed address (`M_INVALID_PARAM`); `PUT` also refuses
+something that is no room (`M_BAD_JSON`), an alias of another server
+(`M_INVALID_PARAM`, as the config check does for a rule) and an address an
 account already has (`M_THREEPID_IN_USE`, naming the account), and `DELETE`
 answers `M_NOT_FOUND` for an address without an invite. The routes are
 registered with or without MAS delegation, and `/versions` lists
