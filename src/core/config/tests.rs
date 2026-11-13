@@ -689,7 +689,7 @@ fn check_toml(toml: &str) -> (Result, String) {
 }
 
 #[test]
-fn check_refuses_assigned_accounts_of_other_servers_or_twice() {
+fn check_refuses_bad_assigned_accounts() {
 	let config = |lines: &str| {
 		config_from_toml(&format!(
 			r#"[global]
@@ -725,6 +725,13 @@ client_secret = "oauth-secret"
 		r#"assigned_accounts = { "a@example.com" = "@a:example.com", "A@example.com" = "@b:example.com" }"#,
 		"lists an address twice",
 	);
+
+	let claims = r#"assigned_accounts_claims = { hd = "example.com" }"#;
+	let (result, _) = check_with_captured_logs(&config(claims));
+
+	result.expect("known assigned accounts claims should pass config check");
+
+	refused(r#"assigned_accounts_claims = { groups = "x" }"#, "unknown claim");
 }
 
 #[test]

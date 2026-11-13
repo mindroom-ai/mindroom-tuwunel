@@ -1960,18 +1960,35 @@ pub struct IdentityProvider {
 	/// `email` claim, matched ignoring ASCII case:
 	/// `{ "alice@example.com" = "@alice:example.com" }`. A listed address's first
 	/// sign-in gets that account, or is refused if the account is missing, the
-	/// server user, deactivated, or linked to another identity, or if the provider
-	/// says the address is unverified; one with an empty password becomes an SSO
+	/// server user, deactivated, or linked to another identity, if the provider
+	/// says the address is unverified, or if the sign-in lacks a claim of
+	/// `assigned_accounts_claims`; one with an empty password becomes an SSO
 	/// account. Whoever controls a listed address gets the account: use this with
-	/// an app restricted to your own organization, not a multi-tenant one, and not
-	/// with a provider whose users can set or edit their address unverified. List
-	/// only accounts created for these people: one deactivated before deactivation
-	/// reasons were recorded has none and would be reactivated. Remove entries
-	/// once their people have signed in. A reload applies to the next sign-in.
+	/// an app restricted to your own organization, not a multi-tenant one, unless
+	/// `assigned_accounts_claims` names claims only your organization's accounts
+	/// hold, and never with a provider whose users can set or edit their address
+	/// unverified. List only accounts created for these people: one deactivated
+	/// before deactivation reasons were recorded has none and would be
+	/// reactivated. Remove entries once their people have signed in. A reload
+	/// applies to the next sign-in.
 	///
 	/// default: {}
 	#[serde(default)]
 	pub assigned_accounts: BTreeMap<String, OwnedUserId>,
+
+	/// Claims a sign-in must all hold to get the account `assigned_accounts`
+	/// lists for its address: `{ hd = "example.com" }`. The claim names and
+	/// their matching are those of a registration rule's `claims`. A sign-in
+	/// whose address is listed but which lacks one is refused, as one whose
+	/// address is unverified is, and gets no other account; unlisted addresses
+	/// are unaffected. Set it when the app admits accounts outside your
+	/// organization: Google, for one, lets a personal account hold a work
+	/// address, verified, but sends no `hd` for it. A reload applies to the next
+	/// sign-in.
+	///
+	/// default: {}
+	#[serde(default)]
+	pub assigned_accounts_claims: BTreeMap<String, String>,
 
 	/// Rules for who may register through this provider, and the rooms their
 	/// new accounts join. Each rule is a set of claims, all of which must hold,
@@ -2147,7 +2164,8 @@ pub struct IdentityProvider {
 	pub forward_action_prompt: bool,
 }
 
-/// The claims an identity provider's registration rule may name.
+/// The claims an identity provider's registration rule, or its
+/// `assigned_accounts_claims`, may name.
 pub const REGISTRATION_RULE_CLAIMS: &[&str] = &[
 	"sub",
 	"preferred_username",

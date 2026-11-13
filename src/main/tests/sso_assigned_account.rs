@@ -81,7 +81,8 @@ const ASSIGNED: &str = r#"{
 	"pat@example.com" = "@pat:localhost",
 	"server@example.com" = "@conduit:localhost",
 	"uma@example.com" = "@uma:localhost",
-	"vera@example.com" = "@vera:localhost"
+	"vera@example.com" = "@vera:localhost",
+	"wes@example.com" = "@wes:localhost"
 }"#;
 
 /// The second chained provider's map. The test lists an address for the
@@ -112,7 +113,8 @@ const CHAIN: [&str; 2] = ["chain-a", "chain-b"];
 /// provider says is unverified, or which names another account than a chained
 /// sign-in carries, is refused, linked to nothing and given no other account,
 /// and the account is left as it was. An address listed by a reload is
-/// assigned at the next sign-in.
+/// assigned at the next sign-in. With `assigned_accounts_claims`, a listed
+/// address whose sign-in lacks those claims is refused the same way.
 #[test]
 fn sso_assigned_account() -> Result {
 	// A child process of `sso_assigned_migrated_deactivation` runs every test of
@@ -383,6 +385,14 @@ async fn userinfo(headers: HeaderMap) -> Json<Value> {
 		claims["email_verified"] = json!(true);
 	}
 
+	// A Workspace account of the organization sends its hosted domain, one of
+	// another organization sends that one's, and a personal account none.
+	if sub.starts_with("workspace") {
+		claims["hd"] = json!("example.com");
+	} else if sub.starts_with("foreign") {
+		claims["hd"] = json!("other.example");
+	}
+
 	Json(claims)
 }
 
@@ -483,7 +493,8 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	refusals(services, base, &client).await?;
 	chained(services, base, &client).await?;
 	reserved(services, base, &client).await?;
-	reloaded(services, base, &client).await
+	reloaded(services, base, &client).await?;
+	claimed(services, base, &client).await
 }
 
 /// Listed addresses whose sign-in is refused, each for one reason.
@@ -685,6 +696,72 @@ async fn reloaded(services: &Services, base: &str, client: &Client) -> Result {
 	Ok(())
 }
 
+/// With `assigned_accounts_claims`, which a reload sets, a listed address gets
+/// its account only when the sign-in holds those claims. One without the
+/// organization's hosted domain, as a personal account holding a work address
+/// sends, or with another organization's, is refused as an unverified one is:
+/// linked to nothing, given no other account, and the account stays unlinked,
+/// for a chained sign-in too. An unlisted address is mapped as before.
+async fn claimed(services: &Services, base: &str, client: &Client) -> Result {
+	let wes = register_ahead(services, base, "wes").await?;
+	let mut config = (*services.server.config.clone()).clone();
+
+	config
+		.identity_provider
+		.values_mut()
+		.filter(|provider| [IDP, CHAIN[1]].contains(&provider.id()))
+		.for_each(|provider| {
+			provider.assigned_accounts_claims =
+				[("hd".to_owned(), "example.com".to_owned())].into();
+		});
+
+	reload(&services.config, &config)?;
+	services.server.config.update(config)?;
+
+	refused(services, client, base, "personal-wes", "wes", "lacks the claims").await?;
+	refused(services, client, base, "foreign-wes", "wes", "lacks the claims").await?;
+	assert!(!services.oauth.sessions.is_linked(&wes).await, "wes is linked to nothing");
+	assert_eq!(services.users.password_hash(&wes).await?, "");
+	assert_eq!(services.users.origin(&wes).await?, "password");
+
+	let response = sign_in(client, base, "workspace-wes", "wes").await?;
+
+	assert_eq!(signed_in(services, &response).await?, wes);
+	assert_eq!(linked_account(services, "workspace-wes").await?, wes);
+
+	// An unlisted address needs no claims.
+	let response = sign_in(client, base, "zed", "zed").await?;
+	let zed = UserId::parse_with_server_name("zed", services.globals.server_name())?;
+
+	assert_eq!(signed_in(services, &response).await?, zed);
+
+	// The second chained provider lists the carried account's address.
+	let carried = UserId::parse_with_server_name("chainfirst", services.globals.server_name())?;
+	let response =
+		chain(client, base, ("chain-first", "chainfirst"), ("personal-chain", "chainfirst"))
+			.await?;
+
+	assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+	let error: Value = response.json().await?;
+	let message = error["error"].as_str().unwrap_or_default();
+
+	assert!(message.contains("lacks the claims"), "{message}");
+	assert!(
+		unlinked(services, "personal-chain").await?,
+		"personal-chain is linked to nothing"
+	);
+
+	let response =
+		chain(client, base, ("chain-first", "chainfirst"), ("workspace-chain", "chainfirst"))
+			.await?;
+
+	assert_eq!(signed_in(services, &response).await?, carried);
+	assert_eq!(linked_account(services, "workspace-chain").await?, carried);
+
+	Ok(())
+}
+
 /// Register an appservice that creates accounts for the test's people.
 ///
 /// Its namespace is exclusive, as a migration's usually is: SSO never names a
@@ -693,7 +770,7 @@ async fn register_appservice(services: &Services) -> Result {
 	let namespaces = Namespaces {
 		users: vec![Namespace::new(
 			true,
-			"^@(alice|carol|dave|gina|hank|kim|rita|uma|vera):.*$".to_owned(),
+			"^@(alice|carol|dave|gina|hank|kim|rita|uma|vera|wes):.*$".to_owned(),
 		)],
 		..Default::default()
 	};

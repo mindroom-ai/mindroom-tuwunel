@@ -641,6 +641,17 @@ fn refuse_unverified<T>(user_id: &UserId) -> Result<T> {
 	Err!(Request(Forbidden("The provider says this sign-in's address is unverified.")))
 }
 
+/// Refuse a listed address whose sign-in lacks a claim of the provider's
+/// `assigned_accounts_claims`, as a personal account holding a work address
+/// lacks the organization's `hd`. Only the log names the account.
+fn refuse_unclaimed<T>(user_id: &UserId) -> Result<T> {
+	warn!(%user_id, "Refused an assigned sign-in: it lacks the provider's assigned_accounts_claims.");
+
+	Err!(Request(Forbidden(
+		"This sign-in lacks the claims this server requires for its address."
+	)))
+}
+
 /// Map an authenticated SSO/OIDC identity onto a local account and return the
 /// resulting user together with the committed session. Shared by the browser
 /// SSO callback and the native Apple login endpoint.
@@ -674,6 +685,10 @@ async fn complete_sso_session(
 				| Some(assigned)
 					if old_user_id.is_none() && userinfo.email_verified == Some(false) =>
 					return refuse_unverified(&assigned),
+				| Some(assigned)
+					if old_user_id.is_none()
+						&& !holds_assigned_claims(services, provider, &userinfo) =>
+					return refuse_unclaimed(&assigned),
 				| Some(assigned) if old_user_id.is_none() && assigned != user_id =>
 					return Err!(Request(Forbidden(warn!(
 						"This sign-in is assigned to {assigned}, not {user_id}, which it \
@@ -685,6 +700,8 @@ async fn complete_sso_session(
 			| (None, None) => match assigned_user_id {
 				| Some(user_id) if userinfo.email_verified == Some(false) =>
 					return refuse_unverified(&user_id),
+				| Some(user_id) if !holds_assigned_claims(services, provider, &userinfo) =>
+					return refuse_unclaimed(&user_id),
 				| Some(user_id) => {
 					let assignment = services
 						.users
@@ -1188,6 +1205,19 @@ fn assigned_account(
 		.iter()
 		.find(|(address, _)| address.eq_ignore_ascii_case(email))
 		.map(|(_, user_id)| user_id.clone())
+}
+
+/// Whether the identity holds every claim of the provider's
+/// `assigned_accounts_claims`, which it needs to get its listed account. Read
+/// from the live configuration, as the map is; none named always holds.
+fn holds_assigned_claims(services: &Services, provider: &Provider, userinfo: &UserInfo) -> bool {
+	let claims = services
+		.oauth
+		.providers
+		.find_config(provider.id())
+		.map_or(&provider.assigned_accounts_claims, |config| &config.assigned_accounts_claims);
+
+	claims.is_empty() || userinfo.meets(claims, provider.trusted)
 }
 
 /// Whether any provider's `assigned_accounts` lists the account, which is then

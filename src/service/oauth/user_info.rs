@@ -79,8 +79,9 @@ impl UserInfo {
 			.filter(|_| self.email_verified.unwrap_or(trusted))
 	}
 
-	/// Whether every claim of a registration rule holds. An empty rule and an
-	/// unknown claim name never hold. `email` counts only when the provider
+	/// Whether every claim of a registration rule, or of a provider's
+	/// `assigned_accounts_claims`, holds. An empty set and an unknown claim
+	/// name never hold. `email` counts only when the provider
 	/// vouches for it, and `email` and `hd` ignore ASCII case; the others are
 	/// exact.
 	#[must_use]

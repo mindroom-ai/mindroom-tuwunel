@@ -914,6 +914,28 @@ Files: `src/service/users/{mod.rs,registration_invites.rs}`,
 `tuwunel-example.toml`, `docs/authentication/providers.md`; tests in
 `src/main/tests/sso_registration_rules/invites.rs`.
 
+### SSO assigned accounts can require claims
+
+A provider's `assigned_accounts` gives a listed address's first sign-in its
+account on the `email` claim alone, so it was safe only with an app restricted
+to the organization. An app that admits outside people too, through
+`registration_rules`, accepts any account, and Google lets a personal account
+hold a Workspace organization's address: it sends that address, verified, but
+no `hd`. Such a sign-in got the listed account. A provider's
+`assigned_accounts_claims` names claims a sign-in must all hold to get its
+listed account, with a registration rule's claim names and matching
+(`UserInfo::meets`); the config check refuses an unknown name as it does in a
+rule. A listed address's sign-in that lacks one, chained or not, is refused
+with `M_FORBIDDEN` and a warning naming the account, as one the provider says
+is unverified is, so it neither takes an account by name nor registers. The
+claims are read from the live config, so a reload applies to the next sign-in.
+Empty, the default, sign-in works as before; unlisted addresses are unaffected.
+Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,
+`tuwunel-example.toml`, `src/service/oauth/user_info.rs`,
+`src/api/client/session/sso.rs`, `src/api/client/session/sso/native_apple.rs`,
+`docs/authentication/providers.md`; tests in
+`src/main/tests/sso_assigned_account.rs` and `src/core/config/tests.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every
@@ -1679,6 +1701,9 @@ mindroom_ephemeral_events_enabled = true
 # Empty by default; list only addresses your organization assigns, for
 # accounts created for those people, and remove entries once they signed in.
 assigned_accounts = { "alice@example.com" = "@alice:example.com" }
+# Empty by default; claims a sign-in must hold to get its listed account, for
+# an app that also admits accounts outside the organization.
+assigned_accounts_claims = { hd = "example.com" }
 ```
 
 ### Registration rules for SSO sign-ins
