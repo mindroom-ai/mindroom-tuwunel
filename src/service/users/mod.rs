@@ -5,6 +5,7 @@ mod invite_filter;
 mod keys;
 mod ldap;
 mod register;
+mod registration_invites;
 mod server_user;
 mod sso;
 #[cfg(test)]
@@ -43,6 +44,7 @@ pub use self::{
 	invite_filter::InviteFilter,
 	keys::{DeviceKeysUpdate, DeviceListChange, DeviceListRecord, parse_master_key},
 	register::Register,
+	registration_invites::RegistrationInvite,
 	server_user::SERVER_USER_KEY,
 	sso::{DeactivationReason, SsoAssignment},
 };
@@ -110,6 +112,7 @@ struct Data {
 	userdeviceidalgorithm_fallback: Arc<Map>,
 	oidcdevice_userdeviceid: Arc<Map>,
 	oidccskeybypass_userid: Arc<Map>,
+	registrationemail_invite: Arc<Map>,
 	userfilterid_filter: Arc<Map>,
 	userid_dehydrateddevice: Arc<Map>,
 	userid_devicelistversion: Arc<Map>,
@@ -144,6 +147,7 @@ impl crate::Service for Service {
 				logintoken_expiresatuserid: args.db["logintoken_expiresatuserid"].clone(),
 				oidcdevice_userdeviceid: args.db["oidcdevice_userdeviceid"].clone(),
 				oidccskeybypass_userid: args.db["oidccskeybypass_userid"].clone(),
+				registrationemail_invite: args.db["registrationemail_invite"].clone(),
 				todeviceid_events: args.db["todeviceid_events"].clone(),
 				spentrefresh_userdeviceid: args.db["spentrefresh_userdeviceid"].clone(),
 				token_userdeviceid: args.db["token_userdeviceid"].clone(),

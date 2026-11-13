@@ -715,7 +715,7 @@ async fn complete_sso_session(
 		};
 
 		let created = !services.users.exists(&user_id).await;
-		let rooms = if created {
+		let terms = if created {
 			let origin = match provider.registration {
 				| true => "sso",
 				// Present in LDAP is an existing user to provision, not a new registration.
@@ -728,7 +728,7 @@ async fn complete_sso_session(
 
 			register_user(services, provider, &session, &userinfo, &user_id, origin).await?
 		} else {
-			Vec::new()
+			RegistrationTerms::default()
 		};
 
 		// An account a first sign-in takes by name is held from here until its link
@@ -752,12 +752,12 @@ async fn complete_sso_session(
 			);
 		}
 
-		Ok((session, (user_id, held, rooms)))
+		Ok((session, (user_id, held, terms)))
 	};
 
 	// An assigned account without a password becomes an SSO account in the
 	// batch that links it, so no reader finds one without the other.
-	let (session, (user_id, held, rooms), old_sess_id) = services
+	let (session, (user_id, held, terms), old_sess_id) = services
 		.oauth
 		.sessions
 		.commit_identity_session_with(&unique_id, complete_identity, |(user_id, held, _), txn| {
@@ -817,33 +817,63 @@ async fn complete_sso_session(
 
 	services.users.locked_check(&user_id).await?;
 
+	// The invite is used up only once the sign-in stands, so one that failed
+	// before this can be tried again.
+	if let Some(email) = &terms.invite {
+		services
+			.users
+			.remove_registration_invite(email)
+			.await;
+	}
+
 	// Joined only once the sign-in stands, and outside the identity's and the
 	// account's locks, which slow joins would otherwise hold.
-	join_registration_rooms(services, &user_id, &rooms)
+	join_registration_rooms(services, &user_id, &terms.rooms)
 		.boxed() // size firewall
 		.await;
 
 	Ok((user_id, session))
 }
 
-/// What the registration rules a new account meets give it.
+/// What the registration rules a new account meets, and the registration
+/// invite of its address, give it.
+#[derive(Default)]
 struct RegistrationTerms {
-	/// The rules' rooms, in order and each once.
+	/// The rules' rooms, then the invite's, in order and each once.
 	rooms: Vec<OwnedRoomOrAliasId>,
 
-	/// Whether any of the rules makes the account external.
+	/// Whether any of the rules, or the invite, makes the account external.
 	external: bool,
+
+	/// The address whose invite was used, which the sign-in uses up.
+	invite: Option<String>,
 }
 
-/// The terms of every registration rule of the provider a new account meets.
+/// The terms of every registration rule of the provider a new account meets,
+/// and of the registration invite of the address the provider vouches for.
 /// The rules are read from the live config, so a reload applies to the next
 /// sign-in; a provider a reload removed keeps the rules it was loaded with. A
-/// provider with rules refuses an account that meets none.
-fn registration_terms(
+/// provider with rules refuses an account that meets none and has no invite.
+/// An invite that cannot be read fails the sign-in, so its terms are never
+/// skipped.
+async fn registration_terms(
 	services: &Services,
 	provider: &Provider,
 	userinfo: &UserInfo,
 ) -> Result<RegistrationTerms> {
+	let email = userinfo
+		.verified_email(provider.trusted)
+		.and_then(|email| canonicalize_email(email).ok());
+
+	let invite = match email {
+		| Some(email) => services
+			.users
+			.registration_invite(&email)
+			.await?
+			.map(|invite| (email, invite)),
+		| None => None,
+	};
+
 	let rules = services
 		.oauth
 		.providers
@@ -855,11 +885,11 @@ fn registration_terms(
 		.filter(|rule| userinfo.meets(&rule.claims, provider.trusted))
 		.collect_vec();
 
-	if !rules.is_empty() && met.is_empty() {
+	if !rules.is_empty() && met.is_empty() && invite.is_none() {
 		info!(
 			provider = provider.id(),
 			sub = %userinfo.sub,
-			"Refused a new account that meets no registration rule."
+			"Refused a new account that meets no registration rule and has no invite."
 		);
 
 		return Err!(Request(Forbidden(
@@ -867,18 +897,25 @@ fn registration_terms(
 		)));
 	}
 
+	let (email, invite) = invite.unzip();
+	let invited = invite.iter();
+
 	Ok(RegistrationTerms {
-		external: met.iter().any(|rule| rule.external),
+		external: met.iter().any(|rule| rule.external)
+			|| invited.clone().any(|invite| invite.external),
 		rooms: met
 			.into_iter()
-			.flat_map(|rule| rule.rooms.iter().cloned())
+			.flat_map(|rule| &rule.rooms)
+			.chain(invited.flat_map(|invite| &invite.rooms))
+			.cloned()
 			.unique()
 			.collect(),
+		invite: email,
 	})
 }
 
-/// Join a new account to its registration rules' rooms. A failed join is
-/// logged and never fails the sign-in.
+/// Join a new account to the rooms of its registration rules and invite. A
+/// failed join is logged and never fails the sign-in.
 async fn join_registration_rooms(
 	services: &Services,
 	user_id: &UserId,
@@ -890,9 +927,8 @@ async fn join_registration_rooms(
 			.join_with_invite(user_id, room)
 			.await
 		{
-			| Ok(room_id) => info!(%user_id, %room_id, "Joined a registration rule's room."),
-			| Err(error) =>
-				warn!(%user_id, %room, %error, "Could not join a registration rule's room."),
+			| Ok(room_id) => info!(%user_id, %room_id, "Joined a registration room."),
+			| Err(error) => warn!(%user_id, %room, %error, "Could not join a registration room."),
 		}
 	}
 }
@@ -1003,7 +1039,7 @@ async fn ldap_user_exists(services: &Services, user_id: &UserId) -> bool {
 }
 
 /// Create the account a sign-in maps to, once the provider's registration
-/// rules admit it, and return the rooms they give it.
+/// rules or a registration invite admit it, and return the terms they give it.
 #[tracing::instrument(
 	name = "register",
 	level = INFO_SPAN_LEVEL,
@@ -1017,8 +1053,8 @@ async fn register_user(
 	userinfo: &UserInfo,
 	user_id: &UserId,
 	origin: &str,
-) -> Result<Vec<OwnedRoomOrAliasId>> {
-	let terms = registration_terms(services, provider, userinfo)?;
+) -> Result<RegistrationTerms> {
+	let terms = registration_terms(services, provider, userinfo).await?;
 
 	debug_info!(%user_id, external = terms.external, "Creating new user account...");
 
@@ -1069,7 +1105,7 @@ async fn register_user(
 	info!("{notice}");
 	services.admin.notify(&notice).await;
 
-	Ok(terms.rooms)
+	Ok(terms)
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(user_id, avatar_url))]
