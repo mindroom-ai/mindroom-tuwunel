@@ -20,6 +20,14 @@ pub fn build(server: &Server) -> Router<State> {
 	let router = register_synapse_admin_federation_routes(router);
 	let router = register_synapse_admin_misc_routes(router);
 
+	// These request types are this crate's own, and ruma writes the half a
+	// server needs under the `server` feature, which every dependent enables.
+	#[cfg(feature = "server")]
+	let router = router
+		.ruma_route(&admin::registration_invites::admin_list_registration_invites_route)
+		.ruma_route(&admin::registration_invites::admin_put_registration_invite_route)
+		.ruma_route(&admin::registration_invites::admin_delete_registration_invite_route);
+
 	router
 		.ruma_route(&admin::is_user_suspended_route)
 		.ruma_route(&admin::suspend_user_route)

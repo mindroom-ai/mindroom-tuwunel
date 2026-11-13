@@ -8,6 +8,8 @@ mod fixture;
 mod admin_api;
 #[path = "client/get.rs"]
 mod get;
+#[path = "sso_registration_rules/invites.rs"]
+mod invites;
 #[path = "client/membership.rs"]
 mod membership;
 #[path = "client/put.rs"]
@@ -1247,7 +1249,7 @@ fn claims(sub: &str) -> Value {
 		| "olga" => json!({ "sub": sub, "email": "olga@old.example", "hd": "old.example" }),
 		| "vera" => json!({
 			"sub": sub,
-			"email": "vera@visit.example",
+			"email": "Vera@Visit.example",
 			"email_verified": true,
 			"hd": "visit.example",
 		}),

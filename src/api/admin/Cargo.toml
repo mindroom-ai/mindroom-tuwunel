@@ -20,12 +20,20 @@ crate-type = [
 [features]
 default = [
 	"release_max_log_level",
+	"server",
 	"tuwunel-api/default",
 	"tuwunel-api-client/default",
 	"tuwunel-core/default",
 	"tuwunel-matrix/default",
 	"tuwunel-service/default",
 ]
+
+# Named by the request macros of ruma, which write the half of a request
+# type that a client or a server needs under the feature of that name, in
+# the crate that defines the type (`registration_invites.rs`). The routes
+# need the server half.
+client = []
+server = []
 
 release_max_log_level = [
 	"log/max_level_trace",
