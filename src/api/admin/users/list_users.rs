@@ -14,6 +14,7 @@ use tuwunel_core::{
 	},
 };
 
+use super::user_type;
 use crate::{Ruma, require_admin};
 
 /// The `deactivated` query filter, whose semantics differ between v2 and v3.
@@ -218,9 +219,12 @@ async fn user_minor_details(
 		.ready_fold(None, |max, device| max.max(device.last_seen_ts))
 		.await;
 
+	let user_type = user_type(services, &user_id).await;
+
 	Some(UserMinorDetails {
 		displayname,
 		avatar_url,
+		user_type,
 		admin,
 		deactivated,
 		locked,

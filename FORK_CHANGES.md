@@ -914,6 +914,24 @@ Files: `src/service/users/{mod.rs,registration_invites.rs}`,
 `tuwunel-example.toml`, `docs/authentication/providers.md`; tests in
 `src/main/tests/sso_registration_rules/invites.rs`.
 
+### The user admin API marks external accounts, and does not deactivate an admin
+
+The mark of an external account (`users::is_external`) reached no admin route,
+so an admin client could not tell those accounts apart. An external account now
+has `"user_type": "external"` in the items of `GET /_synapse/admin/v2/users` and
+`GET /_synapse/admin/v3/users` and in `GET /_synapse/admin/v2/users/{user_id}`;
+any other account has no `user_type`, as before. The field is Synapse's own
+for a kind of account and was unset here.
+`POST /_synapse/admin/v1/deactivate/{user_id}` refuses another server admin and
+the admin who asks with `M_FORBIDDEN`, after its other checks, as the lock and
+suspend routes of MSC4323 do: a deactivation cannot be undone from an admin
+client. `PUT /_synapse/admin/v2/users/{user_id}` with `deactivated` set, the
+admin room's command and an account's own `/account/deactivate` are unchanged.
+Upstream marks no external accounts and deactivates an admin through this
+route.
+Files: `src/api/admin/users/{mod.rs,list_users.rs,deactivate_account.rs}`;
+tests in `src/main/tests/admin_users_external.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every
