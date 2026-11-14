@@ -49,9 +49,22 @@ pub(crate) use self::{
 /// `REDACT_ALL_EVENTS_ACTION_NAME`. The redact-status endpoint filters on it.
 const REDACT_USER_ACTION: &str = "redact_all_events";
 
+/// The `user_type` of an external account. No other account has one.
+const EXTERNAL_USER_TYPE: &str = "external";
+
+/// The Synapse `user_type` of a local user: set for an external account only,
+/// so an admin client can tell those apart.
+async fn user_type(services: crate::State, user_id: &UserId) -> Option<String> {
+	services
+		.users
+		.is_external(user_id)
+		.await
+		.then(|| EXTERNAL_USER_TYPE.to_owned())
+}
+
 /// Assembles the Synapse `UserDetails` for a local user from the fields tuwunel
 /// persists. Fields tuwunel never stores (guest, shadow-banned, external IDs,
-/// user type, appservice, consent) are left at their absent defaults.
+/// appservice, consent) are left at their absent defaults.
 async fn user_details(services: crate::State, user_id: &UserId) -> UserDetails {
 	let displayname = services.profile.displayname(user_id).await.ok();
 
@@ -85,9 +98,12 @@ async fn user_details(services: crate::State, user_id: &UserId) -> UserDetails {
 		.ready_fold(None, |max, device| max.max(device.last_seen_ts))
 		.await;
 
+	let user_type = user_type(services, user_id).await;
+
 	UserDetails {
 		displayname,
 		avatar_url,
+		user_type,
 		admin,
 		deactivated,
 		locked,
