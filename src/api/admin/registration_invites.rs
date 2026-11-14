@@ -3,6 +3,8 @@
 //!
 //! The routes are MindRoom's own, so their request types are defined here.
 
+use std::collections::HashSet;
+
 use axum::extract::State;
 use futures::{StreamExt, future::join};
 use ruma::{OwnedRoomOrAliasId, RoomAliasId};
@@ -138,7 +140,12 @@ pub(crate) async fn admin_list_registration_invites_route(
 		.external_forbidden_rooms()
 		.collect();
 
-	let (invites, external_forbidden_rooms) = join(invites, external_forbidden_rooms).await;
+	let (invites, mut external_forbidden_rooms): (_, Vec<_>) =
+		join(invites, external_forbidden_rooms).await;
+
+	// A room listed by alias and by ID, or by two aliases, is named once.
+	let mut named = HashSet::new();
+	external_forbidden_rooms.retain(|room| named.insert(room.clone()));
 
 	Ok(list::Response { invites, external_forbidden_rooms })
 }

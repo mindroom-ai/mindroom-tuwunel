@@ -480,21 +480,27 @@ be in, as room IDs or aliases of this server:
 external_forbidden_rooms = ["#staff:example.com", "!abc:example.com"]
 ```
 
-Rooms are compared by room ID: an alias is resolved each time it is checked, so
-moving it moves the protection, and one that names no room matches nothing.
+A room is listed when it is named as listed, when its room ID matches (an alias
+is resolved each time it is checked, so moving it moves the protection), or when
+its canonical alias is listed: a room created with a listed alias is protected
+from its first invite, though `createRoom` registers the alias only after it
+sends the invites. List rooms by alias: a room upgrade moves the old room's
+local aliases to the new room, so the protection follows, while a room ID
+names only the old room.
 Empty, the default, nothing changes. With rooms listed:
 
 - An invite of an external account to a listed room is refused with
   `M_FORBIDDEN`, whoever sends it, server admins included: `/invite`, a member
   event sent as state, and the invite the admin join API
-  (`POST /_synapse/admin/v1/join/{room}`) sends first.
+  (`POST /_synapse/admin/v1/join/{room}`) sends first, and an invite another
+  server sends over federation.
 - An external account's join of a listed room is refused with `M_FORBIDDEN`, by
   any route, an invite it already had or a knock approved later included.
 - A rule's or a registration invite's listed room is skipped when the account
   is created, with a warning in the log, and the account is still created and
   joins its other rooms.
 - `PUT .../registration_invites/{email}` with `"external": true` refuses a
-  listed room, named by ID or by an alias of a listed room, with `M_FORBIDDEN`
+  listed room, named as listed, by ID, or by an alias of a listed room, with `M_FORBIDDEN`
   naming the room as the request gave it (see [Inviting one address](#inviting-one-address)).
 - The configuration check refuses an alias of another server, and a rule with
   `external = true` that names a listed room as it is listed.

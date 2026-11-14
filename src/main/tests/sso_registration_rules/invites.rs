@@ -475,9 +475,15 @@ fn put_refuses_listed_rooms_for_external_invites() -> Result {
 		let rooms = make_rooms(services, base).await?;
 		let admin = administrator(services, base).await?;
 
-		forbid(services, &["#staff:localhost", rooms.public.as_str()])?;
+		forbid(services, &["#staff:localhost", rooms.public.as_str(), "#later:localhost"])?;
 
-		for room in ["#staff:localhost", rooms.staff.as_str(), "#public:localhost"] {
+		// `#later` names no room yet: listed as written, it is refused all the same.
+		for room in [
+			"#staff:localhost",
+			rooms.staff.as_str(),
+			"#public:localhost",
+			"#later:localhost",
+		] {
 			let terms = json!({ "rooms": ["#class:localhost", room], "external": true });
 			let response =
 				call(&admin, Method::PUT, Some("other@school.example"), &terms).await?;
@@ -515,8 +521,15 @@ fn list_names_the_listed_rooms() -> Result {
 
 			assert_eq!(forbidden_rooms().await?, json!([]));
 
-			forbid(services, &["#staff:localhost", rooms.public.as_str(), "#nowhere:localhost"])?;
+			forbid(services, &[
+				"#staff:localhost",
+				rooms.public.as_str(),
+				"#nowhere:localhost",
+				rooms.staff.as_str(),
+				"#public:localhost",
+			])?;
 
+			// Each room once, though listed by alias and by ID.
 			assert_eq!(forbidden_rooms().await?, json!([rooms.staff, rooms.public]));
 
 			Ok(())

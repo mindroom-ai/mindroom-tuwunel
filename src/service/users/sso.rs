@@ -205,12 +205,38 @@ impl Service {
 	}
 
 	/// Whether `external_forbidden_rooms` lists the room, a room ID or a local
-	/// alias, compared as room IDs: aliases are resolved now, and one that
-	/// names no room matches nothing. The list is read from the live config.
+	/// alias: as it is written, or compared as room IDs, aliases resolved now
+	/// (one that names no room matches only as written). A room whose
+	/// canonical alias is listed counts as listed too: `createRoom` sets that
+	/// alias before it sends the room's invites, and registers the alias only
+	/// after them. The list is read from the live config.
 	pub async fn external_forbidden_room(&self, room: &RoomOrAliasId) -> bool {
+		let listed = |name: &str| {
+			self.services
+				.server
+				.config
+				.external_forbidden_rooms
+				.iter()
+				.any(|listed| listed.as_str() == name)
+		};
+
+		if listed(room.as_str()) {
+			return true;
+		}
+
 		let Some(room_id) = self.local_room_id(room).await else {
 			return false;
 		};
+
+		if let Ok(alias) = self
+			.services
+			.state_accessor
+			.get_canonical_alias(&room_id)
+			.await
+			&& listed(alias.as_str())
+		{
+			return true;
+		}
 
 		self.external_forbidden_rooms()
 			.any(async |listed| listed == room_id)

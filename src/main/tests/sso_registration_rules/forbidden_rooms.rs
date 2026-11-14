@@ -41,6 +41,19 @@ fn external_account_is_not_invited_to_listed_rooms() -> Result {
 			assert_eq!(membership_of(services, &guest_id, room_id).await, None, "{room_id}");
 		}
 
+		// A member event sent as state meets the same refusal.
+		let state_invite = creator
+			.request(
+				Method::PUT,
+				&creator
+					.url(&room_path(&rooms.staff, &format!("state/m.room.member/{guest_id}"))),
+				&json!({ "membership": "invite" }),
+			)
+			.await?;
+
+		forbidden(state_invite, KEPT_OUT).await?;
+		assert_eq!(membership_of(services, &guest_id, &rooms.staff).await, None);
+
 		creator
 			.act_on(&rooms.open, "invite", &guest_id)
 			.await?;
@@ -129,6 +142,39 @@ fn external_account_joins_no_listed_room() -> Result {
 		.await;
 
 		assert!(renamed, "the member event in the class carries the new name");
+
+		Ok(())
+	})
+}
+
+/// A room created with a listed alias invites no external account, though
+/// `createRoom` sends its invites before it registers the alias: its canonical
+/// alias is listed from the start. A staff account is invited as usual.
+#[test]
+fn room_created_with_a_listed_alias_invites_no_external_account() -> Result {
+	run("sso-forbidden-rooms-create", async |services, base| {
+		make_rooms(services, base).await?;
+		let creator = creator(services, base);
+		let (guest_id, _) = sign_in_with(services, base, "guest", GUEST_TOKEN).await?;
+		let outsider_id = register(services, "outsider", OUTSIDER_TOKEN).await?;
+
+		forbid(services, &["#later:localhost"])?;
+
+		let room_id = creator
+			.create_room(&json!({
+				"preset": "private_chat",
+				"room_alias_name": "later",
+				"invite": [guest_id, outsider_id],
+			}))
+			.await?;
+
+		assert_eq!(membership_of(services, &guest_id, &room_id).await, None);
+		assert!(
+			membership_of(services, &outsider_id, &room_id)
+				.await
+				.is_some(),
+			"the staff account is invited"
+		);
 
 		Ok(())
 	})
