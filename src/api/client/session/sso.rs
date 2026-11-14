@@ -645,7 +645,7 @@ fn refuse_unverified<T>(user_id: &UserId) -> Result<T> {
 /// `assigned_accounts_claims`, as a personal account holding a work address
 /// lacks the organization's `hd`. Only the log names the account.
 fn refuse_unclaimed<T>(user_id: &UserId) -> Result<T> {
-	warn!(%user_id, "Refused an assigned sign-in: it lacks the provider's assigned_accounts_claims.");
+	warn!(%user_id, "Refused a sign-in lacking assigned_accounts_claims.");
 
 	Err!(Request(Forbidden(
 		"This sign-in lacks the claims this server requires for its address."
@@ -676,7 +676,13 @@ async fn complete_sso_session(
 			..session
 		};
 
-		let assigned_user_id = assigned_account(services, provider, &userinfo);
+		// A listed address signs in only with the claims, whatever account it
+		// would get: linked, carried, adopted or assigned.
+		let assigned_user_id = match assigned_account(services, provider, &userinfo) {
+			| Some((user_id, false)) => return refuse_unclaimed(&user_id),
+			| assigned => assigned.map(|(user_id, _)| user_id),
+		};
+
 		let mut taken = None;
 		let (user_id, mut held) = match (session.user_id, old_user_id) {
 			// A chained identity without a link of its own takes the carried
@@ -685,10 +691,6 @@ async fn complete_sso_session(
 				| Some(assigned)
 					if old_user_id.is_none() && userinfo.email_verified == Some(false) =>
 					return refuse_unverified(&assigned),
-				| Some(assigned)
-					if old_user_id.is_none()
-						&& !holds_assigned_claims(services, provider, &userinfo) =>
-					return refuse_unclaimed(&assigned),
 				| Some(assigned) if old_user_id.is_none() && assigned != user_id =>
 					return Err!(Request(Forbidden(warn!(
 						"This sign-in is assigned to {assigned}, not {user_id}, which it \
@@ -700,8 +702,6 @@ async fn complete_sso_session(
 			| (None, None) => match assigned_user_id {
 				| Some(user_id) if userinfo.email_verified == Some(false) =>
 					return refuse_unverified(&user_id),
-				| Some(user_id) if !holds_assigned_claims(services, provider, &userinfo) =>
-					return refuse_unclaimed(&user_id),
 				| Some(user_id) => {
 					let assignment = services
 						.users
@@ -1185,39 +1185,34 @@ async fn bind_email(services: &Services, user_id: &UserId, email: &str) -> Resul
 	bind_new_account_email(services, user_id, &email).await
 }
 
-/// The account `assigned_accounts` gives the identity's email address, if any.
+/// The account `assigned_accounts` gives the identity's email address, if any,
+/// and whether the identity holds every claim of `assigned_accounts_claims`,
+/// without which a listed address signs in to no account. An empty
+/// `assigned_accounts_claims` always holds.
 ///
-/// The map is read from the live configuration, so a reload applies to the next
+/// Both are read from the live configuration, so a reload applies to the next
 /// sign-in. Addresses match ignoring ASCII case only.
 fn assigned_account(
 	services: &Services,
 	provider: &Provider,
 	userinfo: &UserInfo,
-) -> Option<OwnedUserId> {
+) -> Option<(OwnedUserId, bool)> {
 	let email = userinfo.email.as_deref()?;
-
-	services
+	let config = services
 		.oauth
 		.providers
 		.find_config(provider.id())
-		.ok()?
+		.ok()?;
+
+	let user_id = config
 		.assigned_accounts
 		.iter()
 		.find(|(address, _)| address.eq_ignore_ascii_case(email))
-		.map(|(_, user_id)| user_id.clone())
-}
+		.map(|(_, user_id)| user_id.clone())?;
 
-/// Whether the identity holds every claim of the provider's
-/// `assigned_accounts_claims`, which it needs to get its listed account. Read
-/// from the live configuration, as the map is; none named always holds.
-fn holds_assigned_claims(services: &Services, provider: &Provider, userinfo: &UserInfo) -> bool {
-	let claims = services
-		.oauth
-		.providers
-		.find_config(provider.id())
-		.map_or(&provider.assigned_accounts_claims, |config| &config.assigned_accounts_claims);
+	let claims = &config.assigned_accounts_claims;
 
-	claims.is_empty() || userinfo.meets(claims, provider.trusted)
+	Some((user_id, claims.is_empty() || userinfo.meets(claims, provider.trusted)))
 }
 
 /// Whether any provider's `assigned_accounts` lists the account, which is then

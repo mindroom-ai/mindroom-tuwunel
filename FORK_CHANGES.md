@@ -922,13 +922,16 @@ to the organization. An app that admits outside people too, through
 `registration_rules`, accepts any account, and Google lets a personal account
 hold a Workspace organization's address: it sends that address, verified, but
 no `hd`. Such a sign-in got the listed account. A provider's
-`assigned_accounts_claims` names claims a sign-in must all hold to get its
-listed account, with a registration rule's claim names and matching
+`assigned_accounts_claims` names claims every sign-in of a listed address must
+all hold, with a registration rule's claim names and matching
 (`UserInfo::meets`); the config check refuses an unknown name as it does in a
-rule. A listed address's sign-in that lacks one, chained or not, is refused
-with `M_FORBIDDEN` and a warning naming the account, as one the provider says
-is unverified is, so it neither takes an account by name nor registers. The
-claims are read from the live config, so a reload applies to the next sign-in.
+rule. `assigned_account` reads the account and the claims from one live config
+lookup, and `complete_sso_session` refuses a listed address that lacks one with
+`M_FORBIDDEN` and a warning naming the account before it selects any account:
+the listed one, one the identity is already linked to (also by adoption, or
+from before the claims were set), or one a chained sign-in carries. So it
+neither takes an account by name nor registers. Set it before the app admits
+accounts outside the organization. A reload applies to the next sign-in.
 Empty, the default, sign-in works as before; unlisted addresses are unaffected.
 Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,
 `tuwunel-example.toml`, `src/service/oauth/user_info.rs`,
@@ -1701,8 +1704,8 @@ mindroom_ephemeral_events_enabled = true
 # Empty by default; list only addresses your organization assigns, for
 # accounts created for those people, and remove entries once they signed in.
 assigned_accounts = { "alice@example.com" = "@alice:example.com" }
-# Empty by default; claims a sign-in must hold to get its listed account, for
-# an app that also admits accounts outside the organization.
+# Empty by default; claims every sign-in of a listed address must hold. Set it
+# before the app admits accounts outside the organization.
 assigned_accounts_claims = { hd = "example.com" }
 ```
 

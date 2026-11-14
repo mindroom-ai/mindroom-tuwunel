@@ -1960,10 +1960,11 @@ pub struct IdentityProvider {
 	/// `email` claim, matched ignoring ASCII case:
 	/// `{ "alice@example.com" = "@alice:example.com" }`. A listed address's first
 	/// sign-in gets that account, or is refused if the account is missing, the
-	/// server user, deactivated, or linked to another identity, if the provider
-	/// says the address is unverified, or if the sign-in lacks a claim of
-	/// `assigned_accounts_claims`; one with an empty password becomes an SSO
-	/// account. Whoever controls a listed address gets the account: use this with
+	/// server user, deactivated, or linked to another identity, or if the
+	/// provider says the address is unverified; one with an empty password
+	/// becomes an SSO account. Any sign-in of a listed address, first or later,
+	/// is refused when it lacks a claim of `assigned_accounts_claims`. Whoever
+	/// controls a listed address gets the account: use this with
 	/// an app restricted to your own organization, not a multi-tenant one, unless
 	/// `assigned_accounts_claims` names claims only your organization's accounts
 	/// hold, and never with a provider whose users can set or edit their address
@@ -1976,12 +1977,13 @@ pub struct IdentityProvider {
 	#[serde(default)]
 	pub assigned_accounts: BTreeMap<String, OwnedUserId>,
 
-	/// Claims a sign-in must all hold to get the account `assigned_accounts`
-	/// lists for its address: `{ hd = "example.com" }`. The claim names and
-	/// their matching are those of a registration rule's `claims`. A sign-in
-	/// whose address is listed but which lacks one is refused, as one whose
-	/// address is unverified is, and gets no other account; unlisted addresses
-	/// are unaffected. Set it when the app admits accounts outside your
+	/// Claims every sign-in of an address `assigned_accounts` lists must all
+	/// hold: `{ hd = "example.com" }`. The claim names and their matching are
+	/// those of a registration rule's `claims`. A sign-in whose address is
+	/// listed but which lacks one is refused, whatever account it would get:
+	/// the listed one, one its identity is linked to (also from before this was
+	/// set), or one a chained sign-in carries. Unlisted addresses are
+	/// unaffected. Set it before the app admits accounts outside your
 	/// organization: Google, for one, lets a personal account hold a work
 	/// address, verified, but sends no `hd` for it. A reload applies to the next
 	/// sign-in.

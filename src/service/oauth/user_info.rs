@@ -81,9 +81,10 @@ impl UserInfo {
 
 	/// Whether every claim of a registration rule, or of a provider's
 	/// `assigned_accounts_claims`, holds. An empty set and an unknown claim
-	/// name never hold. `email` counts only when the provider
-	/// vouches for it, and `email` and `hd` ignore ASCII case; the others are
-	/// exact.
+	/// name never hold here; an empty `assigned_accounts_claims` requires
+	/// nothing, so its caller treats it as met without asking. `email` counts
+	/// only when the provider vouches for it, and `email` and `hd` ignore ASCII
+	/// case; the others are exact.
 	#[must_use]
 	pub fn meets(&self, claims: &BTreeMap<String, String>, trusted: bool) -> bool {
 		let exact = |have: Option<&str>, want: &str| have == Some(want);

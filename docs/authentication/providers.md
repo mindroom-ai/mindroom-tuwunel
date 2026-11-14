@@ -73,7 +73,7 @@ please refer to the section on [environment variables](#configuring-via-environm
 | `userid_claims` | all | Claims used to compute the Matrix localpart for new registrations. When empty, Tuwunel avoids generated IDs where possible. The special value `"unique"` forces generated IDs exclusively. The claim `"sub"` takes precedence over all others when listed. |
 | `trusted` | `false` | Inverts user matching: instead of registering a new account when claims conflict with existing users, Tuwunel finds the first matching user and grants access to it. **Only set this for providers you self-host and fully control. Never use with public providers (GitHub, GitLab, Google, etc.); it enables account takeover.** For migrated databases, prefer durable bulk adoption or individual association to temporarily enabling this option. A trusted provider's `email` claim is also bound to a new account when it sends no `email_verified` claim. |
 | `assigned_accounts` | `{}` | Assigns existing local accounts to people by the address in their `email` claim, matched ignoring ASCII case. A listed address's first sign-in gets that account or is refused, never another account. **Only for an app restricted to your own organization, or with `assigned_accounts_claims`; whoever controls a listed address gets the account.** See [Assigning accounts created before the first sign-in](#assigning-accounts-created-before-the-first-sign-in). |
-| `assigned_accounts_claims` | `{}` | Claims a sign-in must all hold to get the account `assigned_accounts` lists for its address, such as `{ hd = "example.com" }`, named and matched as in `registration_rules`. A listed address's sign-in that lacks one is refused. See [Assigning accounts created before the first sign-in](#assigning-accounts-created-before-the-first-sign-in). |
+| `assigned_accounts_claims` | `{}` | Claims every sign-in of an address `assigned_accounts` lists must all hold, such as `{ hd = "example.com" }`, named and matched as in `registration_rules`. A listed address's sign-in that lacks one is refused, whatever account it would get, linked ones included. Set it before the app admits accounts outside your organization. See [Assigning accounts created before the first sign-in](#assigning-accounts-created-before-the-first-sign-in). |
 | `registration_rules` | `[]` | Rules a sign-in must meet to create an account, each a set of claims, the rooms a new account meeting it joins, and whether that account is external (joins only by invite). Empty, registration works as before. See [Letting only some people register](#letting-only-some-people-register). |
 | `unique_id_fallbacks` | `true` | When no claim maps cleanly to an available username, generate a unique random localpart as a fallback. Set to `false` on private servers where random usernames are undesirable — a misconfiguration will produce an error instead. |
 | `registration` | `true` | Whether this provider can create new Matrix accounts. Set to `false` to restrict the provider to existing users only. |
@@ -302,7 +302,8 @@ client_id = "tuwunel"
 assigned_accounts = { "alice@example.com" = "@alice:example.com" }
 ```
 
-**Use this with an app restricted to your own organization**, such as a Google
+**Use this with an app restricted to your own organization, or set
+`assigned_accounts_claims` (below).** Such an app is, for example, a Google
 Workspace app with the "Internal" user type or a single-tenant Microsoft Entra
 ID app, whose addresses the organization assigns; list only its members'
 addresses (an Entra app also admits guests, whose addresses it does not assign).
@@ -320,8 +321,11 @@ An app that also admits people outside your organization, such as one whose
 Google, for one, lets a personal account hold an address of a Google Workspace
 organization: it sends that address, verified, but no `hd` (hosted domain)
 claim. Name the claims only your organization's accounts hold in
-`assigned_accounts_claims`, and a listed address's sign-in that lacks one is
-refused like an unverified one:
+`assigned_accounts_claims`, and every sign-in of a listed address that lacks
+one is refused, whatever account it would get: the listed one, one its identity
+is already linked to, or one a chained sign-in carries. Set it before the app
+admits accounts from outside your organization, so no such account signs in to
+a listed one first:
 
 ```toml
 [[global.identity_provider]]
