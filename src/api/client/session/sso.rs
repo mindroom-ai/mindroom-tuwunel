@@ -641,6 +641,18 @@ fn refuse_unverified<T>(user_id: &UserId) -> Result<T> {
 	Err!(Request(Forbidden("The provider says this sign-in's address is unverified.")))
 }
 
+/// Refuse a listed address whose sign-in lacks a claim of the provider's
+/// `assigned_accounts_claims`, as a personal account holding a work address
+/// lacks the organization's `hd`. Only the log names the listed account, the
+/// identity's subject and the account the identity is linked to, if any.
+fn refuse_unclaimed<T>(user_id: &UserId, sub: &str, linked: Option<&UserId>) -> Result<T> {
+	warn!(%user_id, %sub, ?linked, "Refused a sign-in lacking assigned_accounts_claims.");
+
+	Err!(Request(Forbidden(
+		"This sign-in lacks the claims this server requires for its address."
+	)))
+}
+
 /// Map an authenticated SSO/OIDC identity onto a local account and return the
 /// resulting user together with the committed session. Shared by the browser
 /// SSO callback and the native Apple login endpoint.
@@ -665,7 +677,14 @@ async fn complete_sso_session(
 			..session
 		};
 
-		let assigned_user_id = assigned_account(services, provider, &userinfo);
+		// A listed address signs in only with the claims, whatever account it
+		// would get: linked, carried, adopted or assigned.
+		let assigned_user_id = match assigned_account(services, provider, &userinfo) {
+			| Some((user_id, false)) =>
+				return refuse_unclaimed(&user_id, &userinfo.sub, old_user_id.as_deref()),
+			| assigned => assigned.map(|(user_id, _)| user_id),
+		};
+
 		let mut taken = None;
 		let (user_id, mut held) = match (session.user_id, old_user_id) {
 			// A chained identity without a link of its own takes the carried
@@ -1168,26 +1187,34 @@ async fn bind_email(services: &Services, user_id: &UserId, email: &str) -> Resul
 	bind_new_account_email(services, user_id, &email).await
 }
 
-/// The account `assigned_accounts` gives the identity's email address, if any.
+/// The account `assigned_accounts` gives the identity's email address, if any,
+/// and whether the identity holds every claim of `assigned_accounts_claims`,
+/// without which a listed address signs in to no account. An empty
+/// `assigned_accounts_claims` always holds.
 ///
-/// The map is read from the live configuration, so a reload applies to the next
+/// Both are read from the live configuration, so a reload applies to the next
 /// sign-in. Addresses match ignoring ASCII case only.
 fn assigned_account(
 	services: &Services,
 	provider: &Provider,
 	userinfo: &UserInfo,
-) -> Option<OwnedUserId> {
+) -> Option<(OwnedUserId, bool)> {
 	let email = userinfo.email.as_deref()?;
-
-	services
+	let config = services
 		.oauth
 		.providers
 		.find_config(provider.id())
-		.ok()?
+		.ok()?;
+
+	let user_id = config
 		.assigned_accounts
 		.iter()
 		.find(|(address, _)| address.eq_ignore_ascii_case(email))
-		.map(|(_, user_id)| user_id.clone())
+		.map(|(_, user_id)| user_id.clone())?;
+
+	let claims = &config.assigned_accounts_claims;
+
+	Some((user_id, claims.is_empty() || userinfo.meets(claims, provider.trusted)))
 }
 
 /// Whether any provider's `assigned_accounts` lists the account, which is then

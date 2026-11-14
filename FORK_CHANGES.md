@@ -945,6 +945,36 @@ Files: `src/api/admin/users/{mod.rs,list_users.rs,deactivate_account.rs,create_o
 `src/service/users/{mod.rs,sso.rs}`, `src/service/deactivate/mod.rs`; tests in
 `src/main/tests/admin_users_external.rs`.
 
+### SSO assigned accounts can require claims
+
+A provider's `assigned_accounts` gives a listed address's first sign-in its
+account on the `email` claim alone, so it was safe only with an app restricted
+to the organization. An app that admits outside people too, through
+`registration_rules`, accepts any account, and Google lets a personal account
+hold a Workspace organization's address: it sends that address, verified, but
+no `hd`. Such a sign-in got the listed account. A provider's
+`assigned_accounts_claims` names claims every sign-in of a listed address must
+all hold, with a registration rule's claim names and matching
+(`UserInfo::meets`); the config check refuses an unknown name as it does in a
+rule. `assigned_account` reads the account and the claims from one live config
+lookup, and `complete_sso_session` refuses a listed address that lacks one with
+`M_FORBIDDEN` and a warning naming the account before it selects any account:
+the listed one, one the identity is already linked to (also by adoption, or
+from before the claims were set), or one a chained sign-in carries. So it
+neither takes an account by name nor registers. Set it before the app admits
+accounts outside the organization: the check reads the address each sign-in
+sends, so an identity whose address changed after it took a listed account is
+not checked, and a refusal ends no existing session. If an outside account may
+already hold a listed one, delete that identity's link
+(`!admin query oauth delete`) and log out the account's devices. A reload
+applies to the next sign-in.
+Empty, the default, sign-in works as before; unlisted addresses are unaffected.
+Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,
+`tuwunel-example.toml`, `src/service/oauth/user_info.rs`,
+`src/api/client/session/sso.rs`, `src/api/client/session/sso/native_apple.rs`,
+`docs/authentication/providers.md`; tests in
+`src/main/tests/sso_assigned_account.rs` and `src/core/config/tests.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every
@@ -1710,6 +1740,9 @@ mindroom_ephemeral_events_enabled = true
 # Empty by default; list only addresses your organization assigns, for
 # accounts created for those people, and remove entries once they signed in.
 assigned_accounts = { "alice@example.com" = "@alice:example.com" }
+# Empty by default; claims every sign-in of a listed address must hold. Set it
+# before the app admits accounts outside the organization.
+assigned_accounts_claims = { hd = "example.com" }
 ```
 
 ### Registration rules for SSO sign-ins
