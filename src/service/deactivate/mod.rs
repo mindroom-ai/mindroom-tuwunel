@@ -15,7 +15,7 @@ use tuwunel_core::{
 };
 use tuwunel_matrix::{Event, pdu::PduBuilder};
 
-use crate::users::DeactivationReason;
+use crate::users::{DeactivationGuard, DeactivationReason};
 
 const CURRENT_MEMBERSHIPS: &[MembershipState] =
 	&[MembershipState::Join, MembershipState::Invite, MembershipState::Knock];
@@ -50,9 +50,28 @@ pub async fn full_deactivate<'a>(
 	erase: bool,
 	reason: DeactivationReason,
 ) -> Result {
+	self.full_deactivate_guarded(user_id, erase, reason, DeactivationGuard::LastAdmin)
+		.await
+}
+
+/// [`Service::full_deactivate`], unless the account is one `guard` refuses.
+///
+/// A refused account is left as it was: the refusal comes before anything of
+/// it is changed.
+#[implement(Service)]
+// cross-crate codegen firewall
+#[async_noinline]
+#[tracing::instrument(skip(self), level = "debug")]
+pub async fn full_deactivate_guarded<'a>(
+	&'a self,
+	user_id: &'a UserId,
+	erase: bool,
+	reason: DeactivationReason,
+	guard: DeactivationGuard,
+) -> Result {
 	self.services
 		.users
-		.deactivate_account(user_id, reason)
+		.deactivate_account_guarded(user_id, reason, guard)
 		.await?;
 
 	self.clear_profile(user_id).await;

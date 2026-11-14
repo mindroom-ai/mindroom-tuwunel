@@ -14,6 +14,7 @@ use tuwunel_core::{
 	},
 };
 
+use super::user_type;
 use crate::{Ruma, require_admin};
 
 /// The `deactivated` query filter, whose semantics differ between v2 and v3.
@@ -39,6 +40,7 @@ struct ListParams<'a> {
 	locked: bool,
 	deactivated: DeactivatedFilter,
 	dir: Option<Direction>,
+	not_user_type: &'a [String],
 }
 
 /// # `GET /_synapse/admin/v2/users`
@@ -62,6 +64,7 @@ pub(crate) async fn admin_list_users_v2_route(
 		locked: body.locked,
 		deactivated,
 		dir: body.dir,
+		not_user_type: &body.not_user_type,
 	};
 
 	let (users, next_token, total) = list_users(services, &params).await;
@@ -91,6 +94,7 @@ pub(crate) async fn admin_list_users_v3_route(
 		locked: body.locked,
 		deactivated,
 		dir: body.dir,
+		not_user_type: &body.not_user_type,
 	};
 
 	let (users, next_token, total) = list_users(services, &params).await;
@@ -127,9 +131,7 @@ async fn list_users(
 				user_id,
 				user_id_lower.as_deref(),
 				name_lower.as_deref(),
-				params.admins,
-				params.locked,
-				params.deactivated,
+				params,
 			)
 			.await
 		})
@@ -155,17 +157,15 @@ async fn list_users(
 	(page, next_token, total)
 }
 
-/// Applies the substring, admin, locked and deactivated filters to one user and
-/// builds its `UserMinorDetails`, or returns `None` when the user is filtered
-/// out.
+/// Applies the substring, admin, locked, deactivated and user type filters to
+/// one user and builds its `UserMinorDetails`, or returns `None` when the user
+/// is filtered out.
 async fn user_minor_details(
 	services: crate::State,
 	user_id: OwnedUserId,
 	user_id_filter: Option<&str>,
 	name_filter: Option<&str>,
-	admin_filter: Option<bool>,
-	locked_filter: bool,
-	deactivated_filter: DeactivatedFilter,
+	params: &ListParams<'_>,
 ) -> Option<UserMinorDetails> {
 	if name_filter.is_none()
 		&& let Some(needle) = user_id_filter
@@ -191,14 +191,14 @@ async fn user_minor_details(
 	}
 
 	let admin = services.admin.user_is_admin(&user_id).await;
-	if let Some(want_admin) = admin_filter
+	if let Some(want_admin) = params.admins
 		&& want_admin != admin
 	{
 		return None;
 	}
 
 	let locked = services.users.is_locked(&user_id).await;
-	if locked && !locked_filter {
+	if locked && !params.locked {
 		return None;
 	}
 
@@ -208,13 +208,24 @@ async fn user_minor_details(
 		.await
 		.unwrap_or(false);
 
-	let keep = match deactivated_filter {
+	let keep = match params.deactivated {
 		| DeactivatedFilter::Any => true,
 		| DeactivatedFilter::Only => deactivated,
 		| DeactivatedFilter::Exclude => !deactivated,
 	};
 
 	if !keep {
+		return None;
+	}
+
+	let user_type = user_type(services, &user_id).await;
+
+	// As in Synapse, an empty string names the users that have no type.
+	if params
+		.not_user_type
+		.iter()
+		.any(|excluded| excluded == user_type.as_deref().unwrap_or_default())
+	{
 		return None;
 	}
 
@@ -236,6 +247,7 @@ async fn user_minor_details(
 	Some(UserMinorDetails {
 		displayname,
 		avatar_url,
+		user_type,
 		admin,
 		deactivated,
 		locked,

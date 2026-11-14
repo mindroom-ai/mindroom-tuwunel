@@ -27,7 +27,8 @@ type ProfileWrites = ArrayVec<ProfileValue, 2>;
 /// # `PUT /_synapse/admin/v2/users/{user_id}`
 ///
 /// Creates a local account or modifies an existing one. `user_type`,
-/// `external_ids` and `approved` are accepted and ignored (not persisted).
+/// `external_ids` and `approved` are accepted and ignored (not persisted): the
+/// `user_type` of the response is the account's own mark, not the one sent.
 pub(crate) async fn admin_create_or_modify_route(
 	State(services): State<crate::State>,
 	body: Ruma<create_or_modify::Request>,
