@@ -447,7 +447,7 @@ pub struct Config {
 	/// The config check refuses another server's alias, and an external
 	/// registration rule naming a listed room as it is listed here.
 	///
-	/// example: ["#staff:example.com", "!abc:example.com"]
+	/// For example `["#staff:example.com", "!abc:example.com"]`.
 	///
 	/// default: []
 	#[serde(default)]
