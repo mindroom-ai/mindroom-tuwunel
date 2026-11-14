@@ -5,7 +5,7 @@
 //! identity and network fields.
 
 use std::{
-	collections::BTreeSet,
+	collections::{BTreeMap, BTreeSet},
 	env::consts::OS,
 	fs::read_to_string,
 	net::{IpAddr, SocketAddr},
@@ -948,6 +948,13 @@ fn check_room_version(config: &Config) -> Result {
 	Ok(())
 }
 
+/// A claim name outside [`REGISTRATION_RULE_CLAIMS`], which never holds.
+fn unknown_claim(claims: &BTreeMap<String, String>) -> Option<&String> {
+	claims
+		.keys()
+		.find(|claim| !REGISTRATION_RULE_CLAIMS.contains(&claim.as_str()))
+}
+
 fn check_identity_providers(config: &Config) -> Result {
 	for a in config.identity_provider.values() {
 		let count = config
@@ -990,6 +997,13 @@ fn check_identity_providers(config: &Config) -> Result {
 			return Err!(Config(
 				"assigned_accounts",
 				"Identity provider №{i} lists an address twice, in different case."
+			));
+		}
+
+		if let Some(claim) = unknown_claim(&provider.assigned_accounts_claims) {
+			return Err!(Config(
+				"assigned_accounts_claims",
+				"Identity provider №{i} names an unknown claim {claim}."
 			));
 		}
 
@@ -1103,11 +1117,7 @@ fn check_registration_rules(config: &Config, i: &str, provider: &IdentityProvide
 			));
 		}
 
-		if let Some(claim) = rule
-			.claims
-			.keys()
-			.find(|claim| !REGISTRATION_RULE_CLAIMS.contains(&claim.as_str()))
-		{
+		if let Some(claim) = unknown_claim(&rule.claims) {
 			return Err!(Config(
 				"registration_rules",
 				"A rule on identity provider №{i} names an unknown claim {claim}."
