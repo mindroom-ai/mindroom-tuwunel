@@ -60,6 +60,20 @@ impl DeactivationReason {
 	}
 }
 
+/// Which accounts a deactivation refuses.
+///
+/// Every deactivation refuses the last active admin. A route that an admin
+/// client reaches with one press asks for more, and the deactivation itself
+/// looks: it holds the admins room's lock, which a promotion holds too, so no
+/// account becomes an admin between the look and the deactivation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeactivationGuard {
+	/// Only the last active admin.
+	LastAdmin,
+	/// Every active server admin.
+	Admins,
+}
+
 fn can_reactivate_deactivated_sso(reason: Option<&str>) -> bool { matches!(reason, Some("self")) }
 
 impl Service {

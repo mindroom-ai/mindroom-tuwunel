@@ -46,7 +46,7 @@ pub use self::{
 	register::Register,
 	registration_invites::RegistrationInvite,
 	server_user::SERVER_USER_KEY,
-	sso::{DeactivationReason, SsoAssignment},
+	sso::{DeactivationGuard, DeactivationReason, SsoAssignment},
 };
 
 pub const PASSWORD_SENTINEL: &str = "*";
@@ -294,6 +294,17 @@ impl Service {
 		user_id: &UserId,
 		reason: DeactivationReason,
 	) -> Result {
+		self.deactivate_account_guarded(user_id, reason, DeactivationGuard::LastAdmin)
+			.await
+	}
+
+	/// Deactivate account, unless it is one `guard` refuses.
+	pub async fn deactivate_account_guarded(
+		&self,
+		user_id: &UserId,
+		reason: DeactivationReason,
+		guard: DeactivationGuard,
+	) -> Result {
 		// Held until the password is cleared; see `lock_admin_room`.
 		let admin_lock = self.services.admin.lock_admin_room().await;
 
@@ -309,6 +320,20 @@ impl Service {
 			return Err!(Request(Forbidden(
 				"Cannot deactivate the last admin of this server. Make another user an admin \
 				 first."
+			)));
+		}
+
+		// An admin deactivated without leaving the admins room is still in it, with
+		// nothing left to protect. An unreadable account counts as active.
+		if guard == DeactivationGuard::Admins
+			&& self.services.admin.user_is_admin(user_id).await
+			&& !self
+				.is_deactivated(user_id)
+				.await
+				.unwrap_or(false)
+		{
+			return Err!(Request(Forbidden(
+				"You cannot deactivate another server administrator"
 			)));
 		}
 
