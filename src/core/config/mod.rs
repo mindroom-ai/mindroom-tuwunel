@@ -1963,9 +1963,9 @@ pub struct IdentityProvider {
 	/// server user, deactivated, or linked to another identity, or if the
 	/// provider says the address is unverified; one with an empty password
 	/// becomes an SSO account. Any sign-in of a listed address, first or later,
-	/// is refused when it lacks a claim of `assigned_accounts_claims`. Whoever
-	/// controls a listed address gets the account: use this with
-	/// an app restricted to your own organization, not a multi-tenant one, unless
+	/// that lacks a claim of `assigned_accounts_claims` is refused. Whoever
+	/// controls a listed address gets the account: use this with an app
+	/// restricted to your own organization, not a multi-tenant one, unless
 	/// `assigned_accounts_claims` names claims only your organization's accounts
 	/// hold, and never with a provider whose users can set or edit their address
 	/// unverified. List only accounts created for these people: one deactivated
@@ -1979,14 +1979,17 @@ pub struct IdentityProvider {
 
 	/// Claims every sign-in of an address `assigned_accounts` lists must all
 	/// hold: `{ hd = "example.com" }`. The claim names and their matching are
-	/// those of a registration rule's `claims`. A sign-in whose address is
-	/// listed but which lacks one is refused, whatever account it would get:
-	/// the listed one, one its identity is linked to (also from before this was
-	/// set), or one a chained sign-in carries. Unlisted addresses are
-	/// unaffected. Set it before the app admits accounts outside your
-	/// organization: Google, for one, lets a personal account hold a work
-	/// address, verified, but sends no `hd` for it. A reload applies to the next
-	/// sign-in.
+	/// those of a registration rule's `claims`. A sign-in whose address is listed
+	/// but which lacks one is refused, whatever account it would get: the listed
+	/// one, one its identity is linked to, or one a chained sign-in carries. The
+	/// check reads the address each sign-in sends: an identity that took a listed
+	/// account and then changed its address is no longer listed, so it is not
+	/// checked. Unlisted addresses are unaffected. Set it before the app admits
+	/// accounts outside your organization: Google, for one, lets a personal
+	/// account hold a work address, verified, but sends no `hd` for it. It
+	/// refuses sign-ins only: if such an account may already have signed in to a
+	/// listed one, delete that identity's link (`!admin query oauth delete`) and
+	/// log out the account's devices. A reload applies to the next sign-in.
 	///
 	/// default: {}
 	#[serde(default)]

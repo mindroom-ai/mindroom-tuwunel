@@ -643,9 +643,10 @@ fn refuse_unverified<T>(user_id: &UserId) -> Result<T> {
 
 /// Refuse a listed address whose sign-in lacks a claim of the provider's
 /// `assigned_accounts_claims`, as a personal account holding a work address
-/// lacks the organization's `hd`. Only the log names the account.
-fn refuse_unclaimed<T>(user_id: &UserId) -> Result<T> {
-	warn!(%user_id, "Refused a sign-in lacking assigned_accounts_claims.");
+/// lacks the organization's `hd`. Only the log names the listed account, the
+/// identity's subject and the account the identity is linked to, if any.
+fn refuse_unclaimed<T>(user_id: &UserId, sub: &str, linked: Option<&UserId>) -> Result<T> {
+	warn!(%user_id, %sub, ?linked, "Refused a sign-in lacking assigned_accounts_claims.");
 
 	Err!(Request(Forbidden(
 		"This sign-in lacks the claims this server requires for its address."
@@ -679,7 +680,8 @@ async fn complete_sso_session(
 		// A listed address signs in only with the claims, whatever account it
 		// would get: linked, carried, adopted or assigned.
 		let assigned_user_id = match assigned_account(services, provider, &userinfo) {
-			| Some((user_id, false)) => return refuse_unclaimed(&user_id),
+			| Some((user_id, false)) =>
+				return refuse_unclaimed(&user_id, &userinfo.sub, old_user_id.as_deref()),
 			| assigned => assigned.map(|(user_id, _)| user_id),
 		};
 

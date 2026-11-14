@@ -931,7 +931,12 @@ lookup, and `complete_sso_session` refuses a listed address that lacks one with
 the listed one, one the identity is already linked to (also by adoption, or
 from before the claims were set), or one a chained sign-in carries. So it
 neither takes an account by name nor registers. Set it before the app admits
-accounts outside the organization. A reload applies to the next sign-in.
+accounts outside the organization: the check reads the address each sign-in
+sends, so an identity whose address changed after it took a listed account is
+not checked, and a refusal ends no existing session. If an outside account may
+already hold a listed one, delete that identity's link
+(`!admin query oauth delete`) and log out the account's devices. A reload
+applies to the next sign-in.
 Empty, the default, sign-in works as before; unlisted addresses are unaffected.
 Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,
 `tuwunel-example.toml`, `src/service/oauth/user_info.rs`,
