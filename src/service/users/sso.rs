@@ -211,14 +211,17 @@ impl Service {
 	/// alias before it sends the room's invites, and registers the alias only
 	/// after them. The list is read from the live config.
 	pub async fn external_forbidden_room(&self, room: &RoomOrAliasId) -> bool {
-		let listed = |name: &str| {
-			self.services
-				.server
-				.config
-				.external_forbidden_rooms
-				.iter()
-				.any(|listed| listed.as_str() == name)
-		};
+		let rooms = &self
+			.services
+			.server
+			.config
+			.external_forbidden_rooms;
+		let listed = |name: &str| rooms.iter().any(|listed| listed.as_str() == name);
+
+		// Empty, the default: no lookups.
+		if rooms.is_empty() {
+			return false;
+		}
 
 		if listed(room.as_str()) {
 			return true;
