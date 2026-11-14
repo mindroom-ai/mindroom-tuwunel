@@ -857,6 +857,15 @@ fn check_identity_providers(config: &Config) -> Result {
 		}
 	}
 
+	if let Some(alias) = config
+		.external_forbidden_rooms
+		.iter()
+		.filter_map(|room| <&RoomAliasId>::try_from(&**room).ok())
+		.find(|alias| alias.server_name() != config.server_name)
+	{
+		return Err!(Config("external_forbidden_rooms", "{alias} is not a local room alias."));
+	}
+
 	for (i, provider) in &config.identity_provider {
 		check_identity_provider_secret(i, provider)?;
 
@@ -915,6 +924,19 @@ fn check_identity_providers(config: &Config) -> Result {
 				return Err!(Config(
 					"registration_rules",
 					"{alias} on identity provider №{i} is not a local room alias."
+				));
+			}
+
+			if let Some(room) = rule
+				.rooms
+				.iter()
+				.filter(|_| rule.external)
+				.find(|room| config.external_forbidden_rooms.contains(room))
+			{
+				return Err!(Config(
+					"registration_rules",
+					"An external rule on identity provider №{i} names {room}, which \
+					 external_forbidden_rooms lists."
 				));
 			}
 		}

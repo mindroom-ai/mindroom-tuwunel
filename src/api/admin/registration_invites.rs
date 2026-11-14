@@ -4,7 +4,7 @@
 //! The routes are MindRoom's own, so their request types are defined here.
 
 use axum::extract::State;
-use futures::StreamExt;
+use futures::{StreamExt, future::join};
 use ruma::{OwnedRoomOrAliasId, RoomAliasId};
 use serde::{Deserialize, Serialize};
 use tuwunel_core::{Err, Result};
@@ -34,7 +34,10 @@ impl Invite {
 }
 
 pub(crate) mod list {
-	use ruma::api::{auth_scheme::AccessToken, metadata, request, response};
+	use ruma::{
+		OwnedRoomId,
+		api::{auth_scheme::AccessToken, metadata, request, response},
+	};
 
 	use super::Invite;
 
@@ -52,6 +55,10 @@ pub(crate) mod list {
 	pub(crate) struct Response {
 		/// Every invite, by address.
 		pub(crate) invites: Vec<Invite>,
+
+		/// The rooms of `external_forbidden_rooms`, as room IDs, which an
+		/// external invite may not name.
+		pub(crate) external_forbidden_rooms: Vec<OwnedRoomId>,
 	}
 }
 
@@ -124,10 +131,16 @@ pub(crate) async fn admin_list_registration_invites_route(
 		.users
 		.registration_invites()
 		.map(|(email, invite)| Invite::new(email, invite))
-		.collect()
-		.await;
+		.collect();
 
-	Ok(list::Response { invites })
+	let external_forbidden_rooms = services
+		.users
+		.external_forbidden_rooms()
+		.collect();
+
+	let (invites, external_forbidden_rooms) = join(invites, external_forbidden_rooms).await;
+
+	Ok(list::Response { invites, external_forbidden_rooms })
 }
 
 /// Writes the invite of an address through
@@ -138,6 +151,8 @@ pub(crate) async fn admin_list_registration_invites_route(
 /// an account uses an invite, so that one would stay in the list for good.
 /// As for a registration rule, an alias must be on this server, and no room
 /// is checked to exist: one that cannot be joined is logged at the sign-in.
+/// An external invite may not name a room of `external_forbidden_rooms`, by
+/// its ID or by an alias that resolves to it.
 pub(crate) async fn admin_put_registration_invite_route(
 	State(services): State<crate::State>,
 	body: RumaAdmin<put::Request>,
@@ -151,6 +166,12 @@ pub(crate) async fn admin_put_registration_invite_route(
 		.find(|alias| !services.globals.alias_is_local(alias))
 	{
 		return Err!(Request(InvalidParam("{alias} is not a local room alias.")));
+	}
+
+	for room in rooms.iter().filter(|_| external) {
+		if services.users.external_forbidden_room(room).await {
+			return Err!(Request(Forbidden("External accounts may not be in {room}.")));
+		}
 	}
 
 	if let Some(user_id) = services
