@@ -6,6 +6,8 @@ mod fixture;
 
 #[path = "client/admin_api.rs"]
 mod admin_api;
+#[path = "sso_registration_rules/forbidden_rooms.rs"]
+mod forbidden_rooms;
 #[path = "client/get.rs"]
 mod get;
 #[path = "sso_registration_rules/invites.rs"]
@@ -1164,6 +1166,17 @@ where
 		.ok_or_else(|| err!("the provider is configured"))?;
 
 	update(&mut provider.registration_rules);
+	reload(&services.config, &config)?;
+	services.server.config.update(config)?;
+
+	Ok(())
+}
+
+/// Set `external_forbidden_rooms` through a config reload.
+fn forbid(services: &Services, rooms: &[&str]) -> Result {
+	let mut config = (*services.server.config.clone()).clone();
+
+	config.external_forbidden_rooms = rooms.iter().copied().map(alias).collect();
 	reload(&services.config, &config)?;
 	services.server.config.update(config)?;
 

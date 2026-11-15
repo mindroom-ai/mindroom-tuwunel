@@ -104,6 +104,11 @@ pub(crate) async fn create_room_route(
 		.await
 		.transpose()?;
 
+	// MindRoom: `external_forbidden_rooms` by an alias this request sets.
+	if let Some(alias) = &alias {
+		external_forbidden_alias_check(&services, &body, alias).await?;
+	}
+
 	// Increment and hold the counter; the room will sync atomically to clients
 	// which is preferable.
 	let next_count = services.globals.next_count();
@@ -205,6 +210,44 @@ pub(crate) async fn create_room_route(
 	info!("{sender_user} created a room with room ID {room_id}");
 
 	Ok(create_room::v3::Response::new(room_id))
+}
+
+/// MindRoom: refuse a room with an alias `external_forbidden_rooms` lists
+/// when the request names an external account, in `invite` or as the state key
+/// of a member event in `initial_state`. The alias is registered only after
+/// the room's events, so the timeline's check cannot resolve it yet.
+async fn external_forbidden_alias_check(
+	services: &Services,
+	body: &Ruma<create_room::v3::Request>,
+	alias: &RoomAliasId,
+) -> Result {
+	if !services
+		.users
+		.external_forbidden_room(alias.into())
+		.await
+	{
+		return Ok(());
+	}
+
+	let members = body
+		.initial_state
+		.iter()
+		.filter_map(|state| {
+			state
+				.deserialize_as_unchecked::<InitialEvent>()
+				.ok()
+		})
+		.filter(|event| event.event_type == StateEventType::RoomMember)
+		.filter_map(|event| UserId::parse(event.state_key.as_str()).ok());
+
+	for user_id in body.invite.iter().cloned().chain(members) {
+		services
+			.users
+			.external_invitee_check(&user_id, alias.into())
+			.await?;
+	}
+
+	Ok(())
 }
 
 async fn apply_creator_join_pdu(

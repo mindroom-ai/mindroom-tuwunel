@@ -430,6 +430,32 @@ pub struct Config {
 	#[serde(default, with = "identity_provider_serde")]
 	pub identity_provider: BTreeMap<String, IdentityProvider>,
 
+	/// MindRoom: Rooms an external account may never be in, as room IDs or
+	/// room aliases of this server. An identity provider's registration rule
+	/// or a registration invite with `external` makes an account external
+	/// (docs/authentication/providers.md).
+	///
+	/// List rooms whose members gain privileges by membership, such as a
+	/// staff room. An external account is not invited to a listed room,
+	/// whoever sends the invite, server admins included, and does not join
+	/// one by any path, with `M_FORBIDDEN`. A listed room of a registration
+	/// rule or invite is skipped and logged when the account is created, and
+	/// the registration invite routes refuse an external invite naming one.
+	/// An alias is resolved when it is checked, and `createRoom` for a listed
+	/// alias is refused when it names an external account. List rooms by
+	/// alias: a room upgrade moves its aliases, not its ID, to the new room.
+	/// An external account already in a listed room stays there: an admin
+	/// removes it by hand.
+	///
+	/// The config check refuses another server's alias, and an external
+	/// registration rule naming a listed room as it is listed here.
+	///
+	/// For example `["#staff:example.com", "!abc:example.com"]`.
+	///
+	/// default: []
+	#[serde(default)]
+	pub external_forbidden_rooms: Vec<OwnedRoomOrAliasId>,
+
 	/// MindRoom: Collapse multiple m.replace (edit) events per target into
 	/// only the latest one in `/sync` timeline responses.
 	///
@@ -2034,11 +2060,13 @@ pub struct IdentityProvider {
 	/// the user directory only people it shares a room with. Admins still join
 	/// it to a room by inviting it first, as the admin join API does;
 	/// `force-join-room` is refused. Do not list rooms whose members gain
-	/// privileges by membership. An external account is never a server admin:
-	/// `user_is_admin` is false for it even in the admin room, and the admin
-	/// grant refuses it, so admin routes that act as the server user cannot
-	/// carry it out of its rooms. The mark is set when the account is created;
-	/// later sign-ins and rule changes neither set nor clear it.
+	/// privileges by membership; list them in `external_forbidden_rooms`,
+	/// which keeps external accounts out of them. An external account is
+	/// never a server admin: `user_is_admin` is false for it even in the
+	/// admin room, and the admin grant refuses it, so admin routes that act
+	/// as the server user cannot carry it out of its rooms. The mark is set
+	/// when the account is created; later sign-ins and rule changes neither
+	/// set nor clear it.
 	///
 	/// A server admin can also invite single email addresses at runtime, each
 	/// for one new account with its own rooms and `external` flag, through the

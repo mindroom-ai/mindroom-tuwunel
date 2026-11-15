@@ -840,7 +840,8 @@ API invite it first; `force-join-room`, which joins without one, is refused.
 An external requester's user directory search keeps only users it shares a
 joined room with, whatever `directory.users.show_all_local` says. Such a
 rule should not list rooms whose members gain privileges by membership: the
-rule invites the account there. An external account also creates no room
+rule invites the account there. `external_forbidden_rooms` (below) keeps
+external accounts out of such rooms. An external account also creates no room
 alias: `alias::creation_check`, which `PUT /directory/room/{alias}` and
 `createRoom`'s `room_alias_name` call, refuses it with "This account may not
 create room aliases." (`users::external_alias_check`); server-internal alias
@@ -974,6 +975,48 @@ Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,
 `src/api/client/session/sso.rs`, `src/api/client/session/sso/native_apple.rs`,
 `docs/authentication/providers.md`; tests in
 `src/main/tests/sso_assigned_account.rs` and `src/core/config/tests.rs`.
+
+### External accounts are kept out of listed rooms
+
+An external account joins only rooms it is invited to, but nothing kept it out
+of a room whose members gain privileges by membership: an admin's registration
+invite or rule could list such a room, and any member with invite power could
+invite the account there by hand. The global `external_forbidden_rooms` lists
+rooms an external account may never be in, as room IDs or aliases of this
+server. `users::external_forbidden_room` compares a room ID with the list read
+from the live config: a room is listed when it is named as listed or when its
+ID matches an entry (each alias resolved through `resolve_local_alias` when it
+checks). `createRoom` registers a new room's alias only after the room's
+events, so with a listed `room_alias_name` it refuses a request that names an
+external account, in `invite` or as a member event in `initial_state`, before
+the room exists (`external_forbidden_alias_check`). The timeline's
+`external_sender_check`, which every local event passes, refuses an
+invite whose target is an external account into a listed room, whoever sends
+it, admins included, so `/invite`, the state endpoint, the admin join API's
+invite and the invite a rule's or registration invite's room sends at account
+creation all meet it; the latter is logged and skipped, and the account is
+still created. `external_join_check`, which the timeline and `membership::join`
+run, refuses an external account's join of a listed room it is not yet joined
+to, invited or not, so a remote join meets it too; a join it is already joined
+with stands, as a profile change resends it. Members already in a listed room
+are not removed: an admin removes them by hand. `PUT
+.../registration_invites/{email}` with `external` refuses a listed room, by ID
+or by an alias that resolves to one, with `M_FORBIDDEN` naming the room as
+given, and `GET .../registration_invites` adds `external_forbidden_rooms`, the
+listed rooms as IDs, for a client's room picker. The config check refuses
+another server's alias, and an external registration rule naming a listed room
+by the same identifier. Empty, the default, nothing changes. The federation
+invite route runs the same invitee check, so a remote server's invite is
+refused there; an invite a remote server sends as an event of a room this
+server is already in is stored, and only the join is refused. Upstream has no
+external accounts. Files: `src/core/config/{mod.rs,check.rs}`,
+`tuwunel-example.toml`, `src/service/users/sso.rs`,
+`src/service/rooms/timeline/create.rs`,
+`src/api/admin/registration_invites.rs`, `src/api/federation/invite.rs`,
+`src/api/client/room/create.rs`,
+`docs/authentication/providers.md`; tests in
+`src/main/tests/sso_registration_rules/{forbidden_rooms.rs,invites.rs}`
+and `src/core/config/tests.rs`.
 
 ### Sliding sync receipts and typing only for joined rooms
 
@@ -1716,6 +1759,14 @@ registration_rules = [
   # external: joins only rooms it is invited to, creates and invites nothing.
   { claims = { email = "alice@school.example" }, rooms = ["#class:example.com"], external = true },
 ]
+```
+
+### Rooms external accounts are kept out of
+```toml
+[global]
+# Empty by default. Room IDs or aliases of this server; external accounts are
+# neither invited to nor joined to them.
+external_forbidden_rooms = ["#staff:example.com"]
 ```
 
 ### Native Sign in with Apple

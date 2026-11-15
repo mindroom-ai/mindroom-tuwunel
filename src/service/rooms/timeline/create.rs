@@ -211,7 +211,9 @@ struct Membership {
 
 /// Refuse what an external account may not author: a room's create event, an
 /// invite (a third-party invite too), and its own join to a room it is neither
-/// joined to nor invited to. Every local event is built here, so the state endpoint, room upgrades and
+/// joined to nor invited to, or to a room `external_forbidden_rooms` lists.
+/// Refuse too anyone's invite of an external account to such a listed room.
+/// Every local event is built here, so the state endpoint, room upgrades and
 /// remote invites meet the refusals `createRoom`, `/invite` and `/join` do.
 /// Only those event types read the account's mark.
 #[implement(super::Service)]
@@ -235,7 +237,18 @@ async fn external_sender_check(
 			};
 
 			match membership {
-				| MembershipState::Invite => users.external_invite_check(sender).await,
+				| MembershipState::Invite => {
+					users.external_invite_check(sender).await?;
+
+					// The state key names the invitee; a malformed one is the auth rules' to refuse.
+					let Some(invitee) = state_key.and_then(|key| UserId::parse(key).ok()) else {
+						return Ok(());
+					};
+
+					users
+						.external_invitee_check(&invitee, room_id.into())
+						.await
+				},
 				| MembershipState::Join if state_key == Some(sender.as_str()) =>
 					users.external_join_check(sender, room_id).await,
 				| _ => Ok(()),
