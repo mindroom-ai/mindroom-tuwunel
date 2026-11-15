@@ -261,7 +261,7 @@ async fn external_sender_check(
 					};
 
 					users
-						.external_invitee_check(&invitee, room_id)
+						.external_invitee_check(&invitee, room_id.into())
 						.await
 				},
 				| MembershipState::Join if state_key == Some(sender.as_str()) =>

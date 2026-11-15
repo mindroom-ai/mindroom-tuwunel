@@ -303,7 +303,7 @@ async fn check_invite_permitted(
 	// lists, whichever server sends the invite.
 	services
 		.users
-		.external_invitee_check(invited_user, &body.room_id)
+		.external_invitee_check(invited_user, (&*body.room_id).into())
 		.await?;
 
 	// The recipient's own policy is the only per-sender answer this route

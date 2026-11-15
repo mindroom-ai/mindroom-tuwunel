@@ -984,15 +984,16 @@ invite or rule could list such a room, and any member with invite power could
 invite the account there by hand. The global `external_forbidden_rooms` lists
 rooms an external account may never be in, as room IDs or aliases of this
 server. `users::external_forbidden_room` compares a room ID with the list read
-from the live config: a room is listed when it is named as listed, when its ID
-matches an entry (each alias resolved through `resolve_local_alias` when it
-checks), or when its canonical alias is listed, which `createRoom` sets before
-it sends a new room's invites and registers the alias only after them. The
-timeline's
-`external_sender_check`, which every local event passes, refuses an invite
-whose target is an external account into a listed room, whoever sends it,
-admins included, so `/invite`, the state endpoint, the admin join API's invite
-and the invite a rule's or registration invite's room sends at account
+from the live config: a room is listed when it is named as listed or when its
+ID matches an entry (each alias resolved through `resolve_local_alias` when it
+checks). `createRoom` registers a new room's alias only after the room's
+events, so with a listed `room_alias_name` it refuses a request that names an
+external account, in `invite` or as a member event in `initial_state`, before
+the room exists (`external_forbidden_alias_check`). The timeline's
+`external_sender_check`, which every local event passes, refuses an
+invite whose target is an external account into a listed room, whoever sends
+it, admins included, so `/invite`, the state endpoint, the admin join API's
+invite and the invite a rule's or registration invite's room sends at account
 creation all meet it; the latter is logged and skipped, and the account is
 still created. `external_join_check`, which the timeline and `membership::join`
 run, refuses an external account's join of a listed room it is not yet joined
@@ -1004,12 +1005,15 @@ or by an alias that resolves to one, with `M_FORBIDDEN` naming the room as
 given, and `GET .../registration_invites` adds `external_forbidden_rooms`, the
 listed rooms as IDs, for a client's room picker. The config check refuses
 another server's alias, and an external registration rule naming a listed room
-by the same identifier. Empty, the default, nothing changes. The federation invite
-route runs the same invitee check, so a remote server's invite is refused too.
-Upstream has no external accounts. Files: `src/core/config/{mod.rs,check.rs}`,
+by the same identifier. Empty, the default, nothing changes. The federation
+invite route runs the same invitee check, so a remote server's invite is
+refused there; an invite a remote server sends as an event of a room this
+server is already in is stored, and only the join is refused. Upstream has no
+external accounts. Files: `src/core/config/{mod.rs,check.rs}`,
 `tuwunel-example.toml`, `src/service/users/sso.rs`,
 `src/service/rooms/timeline/create.rs`,
 `src/api/admin/registration_invites.rs`, `src/api/federation/invite.rs`,
+`src/api/client/room/create.rs`,
 `docs/authentication/providers.md`; tests in
 `src/main/tests/sso_registration_rules/{forbidden_rooms.rs,invites.rs}`
 and `src/core/config/tests.rs`.

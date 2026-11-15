@@ -440,11 +440,11 @@ pub struct Config {
 	/// one by any path, with `M_FORBIDDEN`. A listed room of a registration
 	/// rule or invite is skipped and logged when the account is created, and
 	/// the registration invite routes refuse an external invite naming one.
-	/// An alias is resolved when it is checked; a room also counts as listed
-	/// when its canonical alias is listed, so a room created with a listed
-	/// alias is protected before the alias is registered. List rooms by
-	/// alias: a room upgrade moves its aliases, not its ID, to the new room. An external account already in a listed room stays
-	/// there: an admin removes it by hand.
+	/// An alias is resolved when it is checked, and `createRoom` for a listed
+	/// alias is refused when it names an external account. List rooms by
+	/// alias: a room upgrade moves its aliases, not its ID, to the new room.
+	/// An external account already in a listed room stays there: an admin
+	/// removes it by hand.
 	///
 	/// The config check refuses another server's alias, and an external
 	/// registration rule naming a listed room as it is listed here.

@@ -195,9 +195,18 @@ impl Service {
 	}
 
 	/// Refuse an invite of an external account to a room
-	/// `external_forbidden_rooms` lists, whoever sends it.
-	pub async fn external_invitee_check(&self, user_id: &UserId, room_id: &RoomId) -> Result {
-		if self.external_forbidden_room(room_id.into()).await && self.is_external(user_id).await {
+	/// `external_forbidden_rooms` lists, whoever sends it. Empty, the default,
+	/// it reads nothing.
+	pub async fn external_invitee_check(&self, user_id: &UserId, room: &RoomOrAliasId) -> Result {
+		let listing = !self
+			.services
+			.server
+			.config
+			.external_forbidden_rooms
+			.is_empty();
+
+		if listing && self.is_external(user_id).await && self.external_forbidden_room(room).await
+		{
 			return Err!(Request(Forbidden("{EXTERNAL_FORBIDDEN}")));
 		}
 
@@ -206,40 +215,30 @@ impl Service {
 
 	/// Whether `external_forbidden_rooms` lists the room, a room ID or a local
 	/// alias: as it is written, or compared as room IDs, aliases resolved now
-	/// (one that names no room matches only as written). A room whose
-	/// canonical alias is listed counts as listed too: `createRoom` sets that
-	/// alias before it sends the room's invites, and registers the alias only
-	/// after them. The list is read from the live config.
+	/// (one that names no room matches only as written). The list is read
+	/// from the live config.
 	pub async fn external_forbidden_room(&self, room: &RoomOrAliasId) -> bool {
 		let rooms = &self
 			.services
 			.server
 			.config
 			.external_forbidden_rooms;
-		let listed = |name: &str| rooms.iter().any(|listed| listed.as_str() == name);
 
 		// Empty, the default: no lookups.
 		if rooms.is_empty() {
 			return false;
 		}
 
-		if listed(room.as_str()) {
+		if rooms
+			.iter()
+			.any(|listed| listed.as_str() == room.as_str())
+		{
 			return true;
 		}
 
 		let Some(room_id) = self.local_room_id(room).await else {
 			return false;
 		};
-
-		if let Ok(alias) = self
-			.services
-			.state_accessor
-			.get_canonical_alias(&room_id)
-			.await
-			&& listed(alias.as_str())
-		{
-			return true;
-		}
 
 		self.external_forbidden_rooms()
 			.any(async |listed| listed == room_id)

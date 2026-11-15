@@ -462,13 +462,13 @@ whose members gain privileges by membership** in a rule with `external = true`,
 such as a room whose bots or integrations serve everyone in it: the rule invites
 the account there like into any other room it lists. Name such rooms in the
 global `external_forbidden_rooms` instead, so the server keeps external accounts
-out of them (see [Rooms external accounts are kept out of](#rooms-external-accounts-are-kept-out-of)).
-A client that joins a room
-on its own, without an invite (such as a room the server advertises for shared
-emoji), fails for an external account unless a rule invited it there. The mark
-belongs to the account and is set when the rule creates it: later sign-ins and
-rule changes neither set nor clear it. A failed read of the mark counts as
-external, so a storage fault never lifts the limits.
+out of them (see
+[Rooms external accounts are kept out of](#rooms-external-accounts-are-kept-out-of)).
+A client that joins a room on its own, without an invite (such as a room the
+server advertises for shared emoji), fails for an external account unless a rule
+invited it there. The mark belongs to the account and is set when the rule
+creates it: later sign-ins and rule changes neither set nor clear it. A failed
+read of the mark counts as external, so a storage fault never lifts the limits.
 
 #### Rooms external accounts are kept out of
 
@@ -480,20 +480,22 @@ be in, as room IDs or aliases of this server:
 external_forbidden_rooms = ["#staff:example.com", "!abc:example.com"]
 ```
 
-A room is listed when it is named as listed, when its room ID matches (an alias
-is resolved each time it is checked, so moving it moves the protection), or when
-its canonical alias is listed: a room created with a listed alias is protected
-from its first invite, though `createRoom` registers the alias only after it
-sends the invites. List rooms by alias: a room upgrade moves the old room's
-local aliases to the new room, so the protection follows, while a room ID
-names only the old room.
-Empty, the default, nothing changes. With rooms listed:
+A room is listed when it is named as listed or when its room ID matches (an
+alias is resolved each time it is checked, so moving it moves the protection).
+`createRoom` with a listed `room_alias_name` is refused with `M_FORBIDDEN` when
+it names an external account, in `invite` or as a member event in
+`initial_state`: it registers the alias only after the room's events, so it
+checks before the room exists. List rooms by alias: a room upgrade moves the old
+room's local aliases to the new room, so the protection follows, while a room ID
+names only the old room. Empty, the default, nothing changes. With rooms listed:
 
 - An invite of an external account to a listed room is refused with
   `M_FORBIDDEN`, whoever sends it, server admins included: `/invite`, a member
-  event sent as state, and the invite the admin join API
+  event sent as state, the invite the admin join API
   (`POST /_synapse/admin/v1/join/{room}`) sends first, and an invite another
-  server sends over federation.
+  server sends through the federation invite route. An invite another server
+  sends as an event of a room this server is already in is stored, but the join
+  it would allow is refused.
 - An external account's join of a listed room is refused with `M_FORBIDDEN`, by
   any route, an invite it already had or a knock approved later included.
 - A rule's or a registration invite's listed room is skipped when the account

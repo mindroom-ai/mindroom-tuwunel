@@ -147,11 +147,12 @@ fn external_account_joins_no_listed_room() -> Result {
 	})
 }
 
-/// A room created with a listed alias invites no external account, though
-/// `createRoom` sends its invites before it registers the alias: its canonical
-/// alias is listed from the start. A staff account is invited as usual.
+/// `createRoom` registers its alias only after the room's events, so a request
+/// for a listed alias that names an external account is refused before the
+/// room exists, whether in `invite` or as a member event in `initial_state`.
+/// With staff alone the room is created, and its alias then protects it.
 #[test]
-fn room_created_with_a_listed_alias_invites_no_external_account() -> Result {
+fn room_with_a_listed_alias_is_not_created_with_an_external_account() -> Result {
 	run("sso-forbidden-rooms-create", async |services, base| {
 		make_rooms(services, base).await?;
 		let creator = creator(services, base);
@@ -160,20 +161,72 @@ fn room_created_with_a_listed_alias_invites_no_external_account() -> Result {
 
 		forbid(services, &["#later:localhost"])?;
 
-		let room_id = creator
-			.create_room(&json!({
-				"preset": "private_chat",
-				"room_alias_name": "later",
-				"invite": [guest_id, outsider_id],
-			}))
-			.await?;
+		let invited = json!({
+			"preset": "private_chat",
+			"room_alias_name": "later",
+			"invite": [outsider_id, guest_id],
+		});
+		let as_state = json!({
+			"preset": "private_chat",
+			"room_alias_name": "later",
+			"initial_state": [
+				{
+					"type": "m.room.canonical_alias",
+					"state_key": "",
+					"content": { "alias": null },
+				},
+				{
+					"type": "m.room.member",
+					"state_key": guest_id,
+					"content": { "membership": "invite" },
+				},
+			],
+		});
 
-		assert_eq!(membership_of(services, &guest_id, &room_id).await, None);
+		for body in [invited, as_state] {
+			let created = creator
+				.post_url(&creator.url("createRoom"), &body)
+				.await?;
+
+			forbidden(created, KEPT_OUT).await?;
+		}
+
+		// The alias is still free, so the refused requests made no room.
+		let staff_only = json!({
+			"preset": "private_chat",
+			"room_alias_name": "later",
+			"invite": [outsider_id],
+		});
+		let room_id = creator.create_room(&staff_only).await?;
+
 		assert!(
 			membership_of(services, &outsider_id, &room_id)
 				.await
 				.is_some(),
 			"the staff account is invited"
+		);
+
+		let invite = creator
+			.post_url(
+				&creator.url(&room_path(&room_id, "invite")),
+				&json!({ "user_id": guest_id }),
+			)
+			.await?;
+
+		forbidden(invite, KEPT_OUT).await?;
+
+		// An alias the setting does not list is created with the account.
+		let unlisted = json!({
+			"preset": "private_chat",
+			"room_alias_name": "elsewhere",
+			"invite": [guest_id],
+		});
+		let room_id = creator.create_room(&unlisted).await?;
+
+		assert!(
+			membership_of(services, &guest_id, &room_id)
+				.await
+				.is_some()
 		);
 
 		Ok(())
