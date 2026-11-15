@@ -1,5 +1,5 @@
-use futures::StreamExt;
-use ruma::{OwnedUserId, RoomId, UserId};
+use futures::{Stream, StreamExt, stream};
+use ruma::{OwnedRoomId, OwnedUserId, RoomId, RoomOrAliasId, UserId};
 use tuwunel_core::{
 	Err, Error, Result, err, utils,
 	utils::{BoolExt, MutexMapGuard, result::NotFound},
@@ -8,6 +8,10 @@ use tuwunel_core::{
 use tuwunel_database::{Deserialized, Txn};
 
 use super::{PASSWORD_SENTINEL, Service};
+
+/// The refusal of an external account's invite to or join of a room
+/// `external_forbidden_rooms` lists.
+const EXTERNAL_FORBIDDEN: &str = "External accounts may not be in this room.";
 
 /// An account a first sign-in links: its password lock, held until the link
 /// is stored, and whether the account has an empty password to convert.
@@ -169,19 +173,103 @@ impl Service {
 	}
 
 	/// Refuse an external account's join to a room it is neither joined to nor
-	/// invited to. A join it is already joined with stands, as a profile change
+	/// invited to, and to a room `external_forbidden_rooms` lists, invited or
+	/// not. A join it is already joined with stands, as a profile change
 	/// resends it, and an approved knock is an invite.
 	pub async fn external_join_check(&self, user_id: &UserId, room_id: &RoomId) -> Result {
 		let state_cache = &self.services.state_cache;
 
-		if !self.is_external(user_id).await
-			|| state_cache.is_joined(user_id, room_id).await
-			|| state_cache.is_invited(user_id, room_id).await
-		{
+		if !self.is_external(user_id).await || state_cache.is_joined(user_id, room_id).await {
+			return Ok(());
+		}
+
+		if self.external_forbidden_room(room_id.into()).await {
+			return Err!(Request(Forbidden("{EXTERNAL_FORBIDDEN}")));
+		}
+
+		if state_cache.is_invited(user_id, room_id).await {
 			return Ok(());
 		}
 
 		Err!(Request(Forbidden("This account may join a room only when invited.")))
+	}
+
+	/// Refuse an invite of an external account to a room
+	/// `external_forbidden_rooms` lists, whoever sends it. Empty, the default,
+	/// it reads nothing.
+	pub async fn external_invitee_check(&self, user_id: &UserId, room: &RoomOrAliasId) -> Result {
+		let listing = !self
+			.services
+			.server
+			.config
+			.external_forbidden_rooms
+			.is_empty();
+
+		if listing && self.is_external(user_id).await && self.external_forbidden_room(room).await
+		{
+			return Err!(Request(Forbidden("{EXTERNAL_FORBIDDEN}")));
+		}
+
+		Ok(())
+	}
+
+	/// Whether `external_forbidden_rooms` lists the room, a room ID or a local
+	/// alias: as it is written, or compared as room IDs, aliases resolved now
+	/// (one that names no room matches only as written). The list is read
+	/// from the live config.
+	pub async fn external_forbidden_room(&self, room: &RoomOrAliasId) -> bool {
+		let rooms = &self
+			.services
+			.server
+			.config
+			.external_forbidden_rooms;
+
+		// Empty, the default: no lookups.
+		if rooms.is_empty() {
+			return false;
+		}
+
+		if rooms
+			.iter()
+			.any(|listed| listed.as_str() == room.as_str())
+		{
+			return true;
+		}
+
+		let Some(room_id) = self.local_room_id(room).await else {
+			return false;
+		};
+
+		self.external_forbidden_rooms()
+			.any(async |listed| listed == room_id)
+			.await
+	}
+
+	/// The rooms `external_forbidden_rooms` lists, as room IDs, in the order
+	/// listed: an alias is resolved now, and one that names no room is left
+	/// out.
+	pub fn external_forbidden_rooms(&self) -> impl Stream<Item = OwnedRoomId> + Send + '_ {
+		let rooms = self
+			.services
+			.server
+			.config
+			.external_forbidden_rooms
+			.clone();
+
+		stream::iter(rooms).filter_map(async |room| self.local_room_id(&room).await)
+	}
+
+	/// The room a room ID or a local alias names now.
+	async fn local_room_id(&self, room: &RoomOrAliasId) -> Option<OwnedRoomId> {
+		match <&RoomId>::try_from(room) {
+			| Ok(room_id) => Some(room_id.to_owned()),
+			| Err(alias) => self
+				.services
+				.alias
+				.resolve_local_alias(alias)
+				.await
+				.ok(),
+		}
 	}
 
 	/// Compatibility repair for legacy SSO users whose origin was accidentally

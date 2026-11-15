@@ -514,12 +514,58 @@ join API (`POST /_synapse/admin/v1/join/{room}`) does; the `force-join-room`
 admin command, which joins without an invite, is refused. **Do not list rooms
 whose members gain privileges by membership** in a rule with `external = true`,
 such as a room whose bots or integrations serve everyone in it: the rule invites
-the account there like into any other room it lists. A client that joins a room
-on its own, without an invite (such as a room the server advertises for shared
-emoji), fails for an external account unless a rule invited it there. The mark
-belongs to the account and is set when the rule creates it: later sign-ins and
-rule changes neither set nor clear it. A failed read of the mark counts as
-external, so a storage fault never lifts the limits.
+the account there like into any other room it lists. Name such rooms in the
+global `external_forbidden_rooms` instead, so the server keeps external accounts
+out of them (see
+[Rooms external accounts are kept out of](#rooms-external-accounts-are-kept-out-of)).
+A client that joins a room on its own, without an invite (such as a room the
+server advertises for shared emoji), fails for an external account unless a rule
+invited it there. The mark belongs to the account and is set when the rule
+creates it: later sign-ins and rule changes neither set nor clear it. A failed
+read of the mark counts as external, so a storage fault never lifts the limits.
+
+#### Rooms external accounts are kept out of
+
+The global `external_forbidden_rooms` lists rooms an external account may never
+be in, as room IDs or aliases of this server:
+
+```toml
+[global]
+external_forbidden_rooms = ["#staff:example.com", "!abc:example.com"]
+```
+
+A room is listed when it is named as listed or when its room ID matches (an
+alias is resolved each time it is checked, so moving it moves the protection).
+`createRoom` with a listed `room_alias_name` is refused with `M_FORBIDDEN` when
+it names an external account, in `invite` or as a member event in
+`initial_state`: it registers the alias only after the room's events, so it
+checks before the room exists. List rooms by alias: a room upgrade moves the old
+room's local aliases to the new room, so the protection follows, while a room ID
+names only the old room. Empty, the default, nothing changes. With rooms listed:
+
+- An invite of an external account to a listed room is refused with
+  `M_FORBIDDEN`, whoever sends it, server admins included: `/invite`, a member
+  event sent as state, the invite the admin join API
+  (`POST /_synapse/admin/v1/join/{room}`) sends first, and an invite another
+  server sends through the federation invite route. An invite another server
+  sends as an event of a room this server is already in is stored, but the join
+  it would allow is refused.
+- An external account's join of a listed room is refused with `M_FORBIDDEN`, by
+  any route, an invite it already had or a knock approved later included.
+- A rule's or a registration invite's listed room is skipped when the account
+  is created, with a warning in the log, and the account is still created and
+  joins its other rooms.
+- `PUT .../registration_invites/{email}` with `"external": true` refuses a
+  listed room, named as listed, by ID, or by an alias of a listed room, with `M_FORBIDDEN`
+  naming the room as the request gave it (see [Inviting one address](#inviting-one-address)).
+- The configuration check refuses an alias of another server, and a rule with
+  `external = true` that names a listed room as it is listed.
+
+An external account already in a room when it is listed stays there; the
+setting removes no one. An admin removes it by hand, for example with
+`POST /_matrix/client/v3/rooms/{room}/kick`. Its own member events there, such
+as a display name change, still go through. The setting is read when it is
+checked, so a configuration reload applies to the next invite or join.
 
 #### Inviting one address
 
@@ -549,13 +595,18 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 
 `PUT` answers with the invite as it is stored,
 `{"email": "alice@example.com", "rooms": ["!lobby:example.com"], "external": true}`,
-and the list with `{"invites": [...]}`, by address. An address is stored in
+and the list with `{"invites": [...], "external_forbidden_rooms": [...]}`: the
+invites by address, and the rooms of `external_forbidden_rooms` as room IDs,
+aliases resolved and one that names no room left out, so a client can keep
+them out of an external invite's room picker. An address is stored in
 lowercase, with `ß` as `ss`, so its case does not matter in a request or at the
 provider, and writing it again replaces its invite. Percent-encode what a URL
 path does not take as it is, such as `/`, `?`, `#` and `%`. `PUT` and `DELETE`
 refuse a malformed address (`M_INVALID_PARAM`). `PUT` also refuses a room that
 is neither a room ID nor an alias (`M_BAD_JSON`), an alias of another server
-(`M_INVALID_PARAM`), and an address an account already has
+(`M_INVALID_PARAM`), with `"external": true` a room of
+`external_forbidden_rooms` (`M_FORBIDDEN`, naming the room), and an address an
+account already has
 (`M_THREEPID_IN_USE`, naming the account): only a sign-in that creates an
 account uses an invite, so that one would stay in the list for good. `DELETE`
 answers `M_NOT_FOUND` for an address without an invite. No room is checked to

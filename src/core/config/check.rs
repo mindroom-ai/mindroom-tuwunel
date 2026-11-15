@@ -131,6 +131,7 @@ pub fn check(config: &Config) -> Result {
 	check_url_previews(config)?;
 	check_room_version(config)?;
 	check_identity_providers(config)?;
+	check_external_forbidden_rooms(config)?;
 	warn_oidc_registration_token(config);
 	warn_oidc_client_approval(config);
 	warn_native_auth_without_sign_in(config);
@@ -955,6 +956,20 @@ fn unknown_claim(claims: &BTreeMap<String, String>) -> Option<&String> {
 		.find(|claim| !REGISTRATION_RULE_CLAIMS.contains(&claim.as_str()))
 }
 
+/// Refuse another server's alias in `external_forbidden_rooms`.
+fn check_external_forbidden_rooms(config: &Config) -> Result {
+	if let Some(alias) = config
+		.external_forbidden_rooms
+		.iter()
+		.filter_map(|room| <&RoomAliasId>::try_from(&**room).ok())
+		.find(|alias| alias.server_name() != config.server_name)
+	{
+		return Err!(Config("external_forbidden_rooms", "{alias} is not a local room alias."));
+	}
+
+	Ok(())
+}
+
 fn check_identity_providers(config: &Config) -> Result {
 	for a in config.identity_provider.values() {
 		let count = config
@@ -1133,6 +1148,19 @@ fn check_registration_rules(config: &Config, i: &str, provider: &IdentityProvide
 			return Err!(Config(
 				"registration_rules",
 				"{alias} on identity provider №{i} is not a local room alias."
+			));
+		}
+
+		if let Some(room) = rule
+			.rooms
+			.iter()
+			.filter(|_| rule.external)
+			.find(|room| config.external_forbidden_rooms.contains(room))
+		{
+			return Err!(Config(
+				"registration_rules",
+				"An external rule on identity provider №{i} names {room}, which \
+				 external_forbidden_rooms lists."
 			));
 		}
 	}

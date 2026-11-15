@@ -858,6 +858,60 @@ client_secret = "oauth-secret"
 }
 
 #[test]
+fn check_refuses_bad_external_forbidden_rooms() {
+	let config = |rooms: &str, rule_rooms: &str, external: bool| {
+		config_from_toml(&format!(
+			r#"[global]
+server_name = "example.com"
+external_forbidden_rooms = {rooms}
+
+[[global.identity_provider]]
+brand = "google"
+client_id = "google"
+client_secret = "oauth-secret"
+registration_rules = [{{ claims = {{ hd = "example.com" }}, rooms = {rule_rooms}, external = {external} }}]
+"#
+		))
+		.expect("external forbidden rooms config should parse")
+	};
+
+	let check = |rooms: &str, rule_rooms: &str, external: bool| {
+		check_with_captured_logs(&config(rooms, rule_rooms, external)).0
+	};
+
+	let listed = r##"["#staff:example.com", "!abc:example.com"]"##;
+
+	check(listed, r##"["#class:example.com"]"##, true)
+		.expect("an external rule naming no listed room should pass config check");
+	check(listed, r##"["#staff:example.com", "!abc:example.com"]"##, false)
+		.expect("a rule without external may name listed rooms");
+
+	for rule_rooms in
+		[r##"["#staff:example.com"]"##, r##"["#class:example.com", "!abc:example.com"]"##]
+	{
+		let error = check(listed, rule_rooms, true)
+			.expect_err("an external rule naming a listed room should fail config check");
+
+		assert!(
+			error
+				.to_string()
+				.contains("external_forbidden_rooms"),
+			"{error}"
+		);
+	}
+
+	let error = check(r##"["#staff:other.example"]"##, "[]", false)
+		.expect_err("another server's alias should fail config check");
+
+	assert!(
+		error
+			.to_string()
+			.contains("#staff:other.example is not a local room alias"),
+		"{error}"
+	);
+}
+
+#[test]
 fn check_warns_when_mas_provisioning_provider_is_untrusted() {
 	let untrusted_provisioning = r#"[global]
 mas_secret = "provisioning-secret"
