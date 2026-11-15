@@ -290,6 +290,13 @@ async fn check_invite_permitted(
 		return Err!(Request(Forbidden("This server does not allow room invites.")));
 	}
 
+	// MindRoom: an external account is invited to no room external_forbidden_rooms
+	// lists, whichever server sends the invite.
+	services
+		.users
+		.external_invitee_check(invited_user, (&*body.room_id).into())
+		.await?;
+
 	// The recipient's own policy is the only per-sender answer this route
 	// gives, so it waits for the origin check to bind the sender. Answering
 	// earlier would let any server read a local user's rules for user ids it

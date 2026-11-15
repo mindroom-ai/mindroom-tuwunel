@@ -11,8 +11,8 @@ use tuwunel_service::{Services, threepid::canonicalize_email, users::Registratio
 use super::{
 	alias, boot,
 	client::{Client, accepted},
-	creator, creator_id, make_rooms, membership_of, refused, run, run_with, sign_in, signed_in,
-	update_rules, user_id,
+	creator, creator_id, forbid, make_rooms, membership_of, refused, run, run_with, sign_in,
+	signed_in, update_rules, user_id,
 };
 
 /// The invite routes, below the client API's unstable prefix.
@@ -257,6 +257,38 @@ fn existing_account_keeps_its_terms() -> Result {
 	})
 }
 
+/// An external invite naming a listed room still admits its address: the
+/// account is created and joined to the invite's other rooms, and the listed
+/// one is skipped.
+#[test]
+fn invite_skips_listed_rooms() -> Result {
+	let options = [r##"external_forbidden_rooms=["#staff:localhost"]"##];
+
+	run_with("sso-registration-invites-listed", &options, async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+
+		invite(
+			services,
+			"other@school.example",
+			&["#staff:localhost", "#class:localhost"],
+			true,
+		)?;
+
+		let response = sign_in(base, "other").await?;
+		let other = signed_in(services, &response).await?;
+
+		assert!(services.users.is_external(&other).await, "the invite makes it external");
+		assert_eq!(
+			membership_of(services, &other, &rooms.class).await,
+			Some(MembershipState::Join)
+		);
+		assert_eq!(membership_of(services, &other, &rooms.staff).await, None);
+		assert!(!pending(services, "other@school.example").await?, "the invite is used up");
+
+		Ok(())
+	})
+}
+
 /// Call an invite route as the client: the list, or the entry of an address,
 /// which is sent as it is given.
 async fn call(
@@ -431,6 +463,78 @@ fn put_refuses_bad_input() -> Result {
 
 		Ok(())
 	})
+}
+
+/// An external invite naming a listed room is refused and stores nothing,
+/// whether it names the room as listed, by its ID, or by an alias of a room
+/// listed by ID; the refusal names the room as given. The same rooms without
+/// `external` are accepted.
+#[test]
+fn put_refuses_listed_rooms_for_external_invites() -> Result {
+	run_with("sso-registration-invites-put-listed", NO_FIRST_ADMIN, async |services, base| {
+		let rooms = make_rooms(services, base).await?;
+		let admin = administrator(services, base).await?;
+
+		forbid(services, &["#staff:localhost", rooms.public.as_str(), "#later:localhost"])?;
+
+		// `#later` names no room yet: listed as written, it is refused all the same.
+		for room in [
+			"#staff:localhost",
+			rooms.staff.as_str(),
+			"#public:localhost",
+			"#later:localhost",
+		] {
+			let terms = json!({ "rooms": ["#class:localhost", room], "external": true });
+			let response =
+				call(&admin, Method::PUT, Some("other@school.example"), &terms).await?;
+			let message = refusal(response, StatusCode::FORBIDDEN, "M_FORBIDDEN").await?;
+
+			assert!(message.contains(room), "{message}");
+		}
+
+		assert_eq!(listed(&admin).await?, json!([]));
+
+		let terms = json!({ "rooms": ["#staff:localhost", "#public:localhost"] });
+		let response = call(&admin, Method::PUT, Some("other@school.example"), &terms).await?;
+
+		accepted(response).await?;
+
+		Ok(())
+	})
+}
+
+/// The list names the listed rooms as room IDs, an alias resolved and one that
+/// names no room left out, and none while the setting is empty.
+#[test]
+fn list_names_the_listed_rooms() -> Result {
+	run_with(
+		"sso-registration-invites-list-listed",
+		NO_FIRST_ADMIN,
+		async |services, base| {
+			let rooms = make_rooms(services, base).await?;
+			let admin = administrator(services, base).await?;
+			let forbidden_rooms = async || -> Result<Value> {
+				let response = call(&admin, Method::GET, None, &json!({})).await?;
+
+				Ok(accepted(response).await?["external_forbidden_rooms"].take())
+			};
+
+			assert_eq!(forbidden_rooms().await?, json!([]));
+
+			forbid(services, &[
+				"#staff:localhost",
+				rooms.public.as_str(),
+				"#nowhere:localhost",
+				rooms.staff.as_str(),
+				"#public:localhost",
+			])?;
+
+			// Each room once, though listed by alias and by ID.
+			assert_eq!(forbidden_rooms().await?, json!([rooms.staff, rooms.public]));
+
+			Ok(())
+		},
+	)
 }
 
 /// An account that is no server administrator reaches none of the routes: it
