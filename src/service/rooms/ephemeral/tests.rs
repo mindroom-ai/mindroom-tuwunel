@@ -1,9 +1,11 @@
 #![cfg(test)]
 
-use ruma::{DeviceId, RoomId, TransactionId, UserId, api::client::filter::RoomEventFilter};
+use ruma::{
+	DeviceId, OwnedUserId, RoomId, TransactionId, UserId, api::client::filter::RoomEventFilter,
+};
 use serde_json::{json, value::to_raw_value};
 
-use super::{Buffer, New, SendOutcome, opts_into};
+use super::{Buffer, MAX_EVENTS, New, RATE_LIMIT, SendOutcome, opts_into};
 
 const ROOM: &str = "!room:example.com";
 const OTHER_ROOM: &str = "!other:example.com";
@@ -46,23 +48,30 @@ fn counts(buffer: &Buffer, since: u64, until: u64, now: u64) -> Vec<u64> {
 		.collect()
 }
 
+fn rate_limit() -> u64 { RATE_LIMIT.try_into().unwrap() }
+
 #[test]
-fn evicts_oldest_beyond_256_events() {
+fn evicts_oldest_beyond_max_events() {
 	let mut buffer = Buffer::default();
 	let mut now = T0;
-	for count in 1..=257 {
+	let last = u64::try_from(MAX_EVENTS).unwrap() + 1;
+	for count in 1..=last {
 		let txn_id = count.to_string();
 		let outcome = send(&mut buffer, now, count, new(room(), &txn_id, 1));
 
 		assert_eq!(outcome, SendOutcome::Accepted, "event {count}");
-		now += 40;
+		now += 2;
 	}
 
 	let counts = counts(&buffer, 0, u64::MAX, now);
 
-	assert_eq!(counts.len(), 256);
+	assert_eq!(counts.len(), MAX_EVENTS);
 	assert_eq!(counts.first(), Some(&2));
-	assert_eq!(counts.last(), Some(&257));
+	assert_eq!(counts.last(), Some(&last));
+
+	let index = &buffer.rooms[room()].txns;
+
+	assert_eq!(index.len(), MAX_EVENTS, "evicted events leave the transaction index");
 }
 
 #[test]
@@ -95,6 +104,21 @@ fn expires_after_thirty_seconds() {
 
 	assert_eq!(counts(&buffer, 0, u64::MAX, T0 + 30_000), [1]);
 	assert!(counts(&buffer, 0, u64::MAX, T0 + 30_001).is_empty());
+}
+
+/// An expired event no longer answers for its transaction, so the same
+/// transaction sent again is buffered anew.
+#[test]
+fn transaction_after_its_event_expired_is_buffered_again() {
+	let mut buffer = Buffer::default();
+
+	send(&mut buffer, T0, 1, new(room(), "again", 1));
+
+	assert_eq!(
+		send(&mut buffer, T0 + 30_001, 2, new(room(), "again", 1)),
+		SendOutcome::Accepted
+	);
+	assert_eq!(counts(&buffer, 0, u64::MAX, T0 + 30_001), [2]);
 }
 
 #[test]
@@ -133,9 +157,10 @@ fn duplicate_txn_is_not_buffered_twice() {
 }
 
 #[test]
-fn rate_limits_31st_event_in_one_second() {
+fn rate_limits_event_past_the_limit_in_one_second() {
 	let mut buffer = Buffer::default();
-	for count in 1..=30 {
+	let limit = rate_limit();
+	for count in 1..=limit {
 		let txn_id = count.to_string();
 
 		assert_eq!(
@@ -146,30 +171,125 @@ fn rate_limits_31st_event_in_one_second() {
 	}
 
 	let SendOutcome::RateLimited { retry_after_ms } =
-		send(&mut buffer, T0 + 500, 31, new(room(), "31", 1))
+		send(&mut buffer, T0 + 500, limit + 1, new(room(), "over", 1))
 	else {
-		panic!("the 31st event in one second must be rate limited");
+		panic!("the event past the limit in one second must be rate limited");
 	};
 
-	assert!(retry_after_ms > 0 && retry_after_ms <= 1000, "retry_after_ms {retry_after_ms}");
 	assert_eq!(retry_after_ms, 500);
-	assert_eq!(send(&mut buffer, T0 + 1000, 32, new(room(), "32", 1)), SendOutcome::Accepted);
+	assert_eq!(
+		send(&mut buffer, T0 + 1000, limit + 2, new(room(), "next", 1)),
+		SendOutcome::Accepted
+	);
 }
 
 #[test]
 fn retried_transaction_is_answered_in_a_full_window() {
 	let mut buffer = Buffer::default();
-	for count in 1..=30 {
+	let limit = rate_limit();
+	for count in 1..=limit {
 		let txn_id = count.to_string();
 
 		send(&mut buffer, T0, count, new(room(), &txn_id, 1));
 	}
 
-	assert_eq!(send(&mut buffer, T0 + 100, 31, new(room(), "7", 1)), SendOutcome::Duplicate);
+	assert_eq!(
+		send(&mut buffer, T0 + 100, limit + 1, new(room(), "7", 1)),
+		SendOutcome::Duplicate
+	);
 	assert!(matches!(
-		send(&mut buffer, T0 + 100, 32, new(room(), "31", 1)),
+		send(&mut buffer, T0 + 100, limit + 2, new(room(), "over", 1)),
 		SendOutcome::RateLimited { .. }
 	));
+}
+
+/// What a sync saw of a stretch of streaming: the frames its senders sent, the
+/// ones the buffer refused, and the ones the sync got.
+#[derive(Debug, Default, Eq, PartialEq)]
+struct Streamed {
+	sent: u64,
+	refused: u64,
+	delivered: u64,
+}
+
+/// Streams `streams` replies from each of `senders` into one room for
+/// `seconds`, each sending one delta of `delta_len` bytes every 100 ms and a
+/// snapshot of `snapshot_len` bytes every 5 s instead, as the MindRoom runtime
+/// does, while a sync reads the room every `read_every_ms`.
+#[expect(clippy::arithmetic_side_effects)]
+fn stream(
+	senders: usize,
+	streams: usize,
+	seconds: u64,
+	read_every_ms: u64,
+	(delta_len, snapshot_len): (usize, usize),
+) -> Streamed {
+	let senders: Vec<OwnedUserId> = (0..senders)
+		.map(|i| {
+			format!("@agent{i}:example.com")
+				.try_into()
+				.unwrap()
+		})
+		.collect();
+
+	let mut buffer = Buffer::default();
+	let mut streamed = Streamed::default();
+	let (mut count, mut since) = (0, 0);
+	for tick in 0..seconds * 10 {
+		let now = T0 + tick * 100;
+		for (agent, sender) in senders.iter().enumerate() {
+			for reply in 0..streams {
+				let txn_id = format!("{agent}.{reply}.{tick}");
+				let content_len = if tick % 50 == 0 { snapshot_len } else { delta_len };
+				let event = New {
+					sender,
+					..new(room(), &txn_id, content_len)
+				};
+
+				count += 1;
+				streamed.sent += 1;
+				if send(&mut buffer, now, count, event) != SendOutcome::Accepted {
+					streamed.refused += 1;
+				}
+			}
+		}
+
+		if (now - T0 + 100).is_multiple_of(read_every_ms) {
+			let read = counts(&buffer, since, count, now);
+
+			streamed.delivered += u64::try_from(read.len()).unwrap();
+			since = count;
+		}
+	}
+
+	streamed
+}
+
+/// One sender streaming 50 replies at the runtime's 10 frames a second, as one
+/// agent answering in 50 threads of a room does, is never refused, and a sync
+/// that reads the room every 100 ms gets every frame.
+#[test]
+fn one_sender_streams_fifty_replies() {
+	let streamed = stream(1, 50, 3, 100, (300, 3_000));
+
+	assert_eq!(streamed, Streamed {
+		sent: 1_500,
+		refused: 0,
+		delivered: 1_500
+	});
+}
+
+/// A sync that falls 5 s behind, the runtime's time between snapshots, still
+/// gets every frame of 50 streaming replies, here from 17 senders.
+#[test]
+fn sync_five_seconds_behind_gets_every_frame() {
+	let streamed = stream(17, 3, 10, 5_000, (300, 3_000));
+
+	assert_eq!(streamed, Streamed {
+		sent: 5_100,
+		refused: 0,
+		delivered: 5_100
+	});
 }
 
 #[test]

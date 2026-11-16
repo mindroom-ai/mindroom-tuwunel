@@ -8,7 +8,8 @@
 mod tests;
 
 use std::{
-	collections::{HashMap, VecDeque},
+	collections::{HashMap, VecDeque, hash_map},
+	hash::{BuildHasher, RandomState},
 	ops::Deref,
 	sync::{Arc, RwLock},
 };
@@ -21,8 +22,12 @@ use serde_json::value::RawValue as RawJsonValue;
 use tokio::sync::broadcast;
 use tuwunel_core::{Result, trace, utils::millis_since_unix_epoch};
 
-/// Most events one room holds; the oldest is evicted first.
-const MAX_EVENTS: usize = 256;
+/// Most events one room holds; the oldest is evicted first. That is nearly 7 s
+/// of one sender at the rate limit, longer than the 5 s the MindRoom runtime
+/// leaves between a reply's snapshots, so a sync that falls behind by less gets
+/// every frame, and one that falls further still gets each reply's newest
+/// snapshot.
+const MAX_EVENTS: usize = 4_096;
 
 /// Most bytes of content, event types, and transaction IDs one room holds; the
 /// oldest events are evicted first.
@@ -34,8 +39,10 @@ const TTL_MS: u64 = 30_000;
 /// Length in milliseconds of one rate-limit window.
 const RATE_WINDOW_MS: u64 = 1_000;
 
-/// Most events one sender may send to one room in a rate-limit window.
-const RATE_LIMIT: usize = 30;
+/// Most events one sender may send to one room in a rate-limit window: one
+/// agent streaming 50 replies at the MindRoom runtime's 10 frames a second,
+/// with its sub-agent frames and room to spare.
+const RATE_LIMIT: usize = 600;
 
 /// Milliseconds a write waits after a sweep before sweeping every room again.
 const SWEEP_INTERVAL_MS: u64 = 60_000;
@@ -77,19 +84,23 @@ struct Buffer {
 	rooms: HashMap<OwnedRoomId, Room>,
 	rates: HashMap<(OwnedRoomId, OwnedUserId), Window>,
 	last_sweep: u64,
+	txn_hasher: RandomState,
 }
 
-/// One room's events in count order, with the sum of their sizes.
+/// One room's events in count order, with the sum of their sizes and how many
+/// of them hold each transaction hash.
 #[derive(Default)]
 struct Room {
 	entries: VecDeque<Entry>,
 	bytes: usize,
+	txns: HashMap<u64, usize>,
 }
 
 struct Entry {
 	event: BufferedEphemeral,
 	device_id: Option<OwnedDeviceId>,
 	txn_id: OwnedTransactionId,
+	txn_hash: u64,
 }
 
 /// The events one sender sent to one room in the window starting at `start`.
@@ -241,15 +252,20 @@ impl Buffer {
 			self.sweep(now);
 		}
 
+		let txn_hash =
+			self.txn_hasher
+				.hash_one((new.event_type, new.sender, new.device_id, new.txn_id));
+
 		let room = self
 			.rooms
 			.entry(new.room_id.to_owned())
 			.or_default();
 
 		// A retried transaction that already landed is answered before the rate
-		// window, so a retry never turns an accepted send into a refusal.
+		// window, so a retry never turns an accepted send into a refusal. Only a
+		// send whose hash is buffered pays for the scan.
 		room.expire(now);
-		if room.entries.iter().any(|entry| entry.is(&new)) {
+		if room.txns.contains_key(&txn_hash) && room.entries.iter().any(|entry| entry.is(&new)) {
 			return Err(SendOutcome::Duplicate);
 		}
 
@@ -280,6 +296,7 @@ impl Buffer {
 			},
 			device_id: new.device_id.map(ToOwned::to_owned),
 			txn_id: new.txn_id.to_owned(),
+			txn_hash,
 		});
 
 		Ok(count)
@@ -322,20 +339,43 @@ impl Room {
 	/// Appends an event, then evicts the oldest beyond the count or byte cap.
 	fn push(&mut self, entry: Entry) {
 		self.bytes = self.bytes.saturating_add(entry.bytes());
+		let held = self.txns.entry(entry.txn_hash).or_default();
+		*held = held.saturating_add(1);
 		self.entries.push_back(entry);
 
 		while self.entries.len() > MAX_EVENTS || self.bytes > MAX_BYTES {
-			let Some(evicted) = self.entries.pop_front() else {
+			if self.pop_oldest().is_none() {
 				break;
-			};
-
-			self.bytes = self.bytes.saturating_sub(evicted.bytes());
+			}
 		}
 	}
 
+	/// Drops the oldest events while they are expired. Events are buffered in
+	/// the order of their timestamps, so the expired ones are at the front; if
+	/// the clock steps back, later ones wait for the front one, and reads skip
+	/// them meanwhile.
 	fn expire(&mut self, now: u64) {
-		self.entries.retain(|entry| !entry.expired(now));
-		self.bytes = self.entries.iter().map(Entry::bytes).sum();
+		while self
+			.entries
+			.front()
+			.is_some_and(|entry| entry.expired(now))
+		{
+			drop(self.pop_oldest());
+		}
+	}
+
+	fn pop_oldest(&mut self) -> Option<Entry> {
+		let evicted = self.entries.pop_front()?;
+
+		self.bytes = self.bytes.saturating_sub(evicted.bytes());
+		if let hash_map::Entry::Occupied(mut held) = self.txns.entry(evicted.txn_hash) {
+			match held.get().saturating_sub(1) {
+				| 0 => drop(held.remove()),
+				| left => drop(held.insert(left)),
+			}
+		}
+
+		Some(evicted)
 	}
 }
 
