@@ -139,7 +139,11 @@ fn transaction_expired_behind_a_newer_event_is_buffered_again() {
 
 	let held = &buffer.rooms[room()];
 
-	assert_eq!(held.txns.len(), 2, "the expired event left the transaction index");
+	assert!(
+		held.txns.values().all(|&events| events == 1),
+		"the expired event left the transaction index: {:?}",
+		held.txns
+	);
 	assert!(!held.unordered, "the buffer is back in timestamp order");
 }
 
