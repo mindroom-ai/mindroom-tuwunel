@@ -106,19 +106,20 @@ fn expires_after_thirty_seconds() {
 	assert!(counts(&buffer, 0, u64::MAX, T0 + 30_001).is_empty());
 }
 
-/// An expired event no longer answers for its transaction, so the same
+/// Expired events no longer answer for their transactions, so the same
 /// transaction sent again is buffered anew.
 #[test]
 fn transaction_after_its_event_expired_is_buffered_again() {
 	let mut buffer = Buffer::default();
 
-	send(&mut buffer, T0, 1, new(room(), "again", 1));
+	send(&mut buffer, T0, 1, new(room(), "first", 1));
+	send(&mut buffer, T0, 2, new(room(), "again", 1));
 
 	assert_eq!(
-		send(&mut buffer, T0 + 30_001, 2, new(room(), "again", 1)),
+		send(&mut buffer, T0 + 30_001, 3, new(room(), "again", 1)),
 		SendOutcome::Accepted
 	);
-	assert_eq!(counts(&buffer, 0, u64::MAX, T0 + 30_001), [2]);
+	assert_eq!(counts(&buffer, 0, u64::MAX, T0 + 30_001), [3]);
 }
 
 #[test]
