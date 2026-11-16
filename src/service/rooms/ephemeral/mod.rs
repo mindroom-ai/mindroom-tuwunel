@@ -357,9 +357,7 @@ impl Room {
 			.is_some_and(|last| entry.sent() < last.sent());
 
 		while self.entries.len() >= MAX_EVENTS {
-			if self.pop_oldest().is_none() {
-				break;
-			}
+			drop(self.pop_oldest());
 		}
 
 		self.bytes = self.bytes.saturating_add(entry.bytes());

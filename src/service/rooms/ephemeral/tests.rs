@@ -257,9 +257,10 @@ struct Streamed {
 }
 
 /// Streams `streams` replies from each of `senders` into one room for
-/// `seconds`, each sending one delta of `delta_len` bytes every 100 ms and a
-/// snapshot of `snapshot_len` bytes every 5 s instead, as the MindRoom runtime
-/// does, while a sync reads the room every `read_every_ms`.
+/// `seconds`, each sending one delta every 100 ms and a snapshot every 5 s
+/// instead, as the MindRoom runtime does, while a sync reads the room every
+/// `read_every_ms`. A delta's body is `delta_len` characters of text in 8
+/// bytes of JSON, and a snapshot's `snapshot_len`.
 #[expect(clippy::arithmetic_side_effects)]
 fn stream(
 	senders: usize,
