@@ -246,7 +246,7 @@ fn retried_transaction_is_answered_in_a_full_window() {
 /// What a sync saw of a stretch of streaming: the frames its senders sent, the
 /// ones the buffer refused, the ones the sync got, and whether those were the
 /// accepted ones, each once and in order.
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 struct Streamed {
 	sent: u64,
 	refused: u64,
@@ -275,7 +275,6 @@ fn stream(
 		.collect();
 
 	let mut buffer = Buffer::default();
-	let mut streamed = Streamed::default();
 	let (mut accepted, mut got) = (Vec::new(), Vec::new());
 	let (mut count, mut since) = (0, 0);
 	for tick in 0..seconds * 10 {
@@ -290,24 +289,24 @@ fn stream(
 				};
 
 				count += 1;
-				streamed.sent += 1;
 				if send(&mut buffer, now, count, event) == SendOutcome::Accepted {
 					accepted.push(count);
-				} else {
-					streamed.refused += 1;
 				}
 			}
 		}
 
-		if (now - T0 + 100).is_multiple_of(read_every_ms) {
+		if ((tick + 1) * 100).is_multiple_of(read_every_ms) {
 			got.extend(counts(&buffer, since, count, now));
 			since = count;
 		}
 	}
 
-	streamed.delivered = u64::try_from(got.len()).unwrap();
-	streamed.exact = got == accepted;
-	streamed
+	Streamed {
+		sent: count,
+		refused: count - u64::try_from(accepted.len()).unwrap(),
+		delivered: u64::try_from(got.len()).unwrap(),
+		exact: got == accepted,
+	}
 }
 
 /// One sender streaming 50 replies at the runtime's 10 frames a second, as one

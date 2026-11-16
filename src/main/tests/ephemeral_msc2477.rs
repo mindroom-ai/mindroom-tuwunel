@@ -210,7 +210,7 @@ fn rate_limits_full_window() -> Result {
 		// over is accepted, so the test fills it and asks again, three times at
 		// most.
 		for attempt in 0..3 {
-			let refused_at = (0..100_000).find(|n| {
+			let filled = (0..100_000).any(|n| {
 				let txn_id = format!("fill-{attempt}-{n}");
 				let outcome = services.ephemeral.send(
 					&room_id,
@@ -224,7 +224,7 @@ fn rate_limits_full_window() -> Result {
 				outcome != SendOutcome::Accepted
 			});
 
-			assert!(refused_at.is_some(), "the window never filled");
+			assert!(filled, "the window never filled");
 
 			let txn_id = format!("over-{attempt}");
 			let response = alice
