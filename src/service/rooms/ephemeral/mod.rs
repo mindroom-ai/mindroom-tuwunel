@@ -24,10 +24,10 @@ use tuwunel_core::{Result, trace, utils::millis_since_unix_epoch};
 
 /// Most events one room holds; the oldest is evicted first. That is nearly 7 s
 /// of one sender at the rate limit, longer than the 5 s the MindRoom runtime
-/// leaves between a reply's snapshots. While events average under 256 bytes,
-/// as the runtime's unencrypted frames do, this cap binds before `MAX_BYTES`:
-/// a sync that falls behind by less gets every frame, and one that falls
-/// further still gets each reply's newest snapshot.
+/// leaves between a reply's snapshots. While events average under 256 bytes as
+/// `MAX_BYTES` counts them, this cap binds first: a sync that falls behind by
+/// less gets every frame, and one that falls further still gets each reply's
+/// newest snapshot.
 const MAX_EVENTS: usize = 4_096;
 
 /// Most bytes of content, event types, and transaction IDs one room holds; the
@@ -375,11 +375,10 @@ impl Room {
 	/// back; then every event is checked until the order holds again.
 	fn expire(&mut self, now: u64) {
 		if self.unordered {
-			let Self { entries, bytes, txns, .. } = self;
-			entries.retain(|entry| {
+			self.entries.retain(|entry| {
 				let live = !entry.expired(now);
 				if !live {
-					forget(bytes, txns, entry);
+					forget(&mut self.bytes, &mut self.txns, entry);
 				}
 
 				live
