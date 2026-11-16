@@ -2,18 +2,15 @@
 
 use std::time::{Duration, Instant};
 
-use futures::{
-	StreamExt,
-	future::{join, join_all},
-};
+use futures::{StreamExt, future::join};
 use reqwest::{Response, StatusCode};
-use serde_json::{Value, json};
+use serde_json::{Value, json, value::to_raw_value};
 use tokio::time::{sleep, timeout};
 use tuwunel_core::{
 	Result, implement,
-	ruma::{OwnedRoomId, OwnedUserId, RoomId, api::client::filter::RoomEventFilter},
+	ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId, api::client::filter::RoomEventFilter},
 };
-use tuwunel_service::Services;
+use tuwunel_service::{Services, rooms::ephemeral::SendOutcome};
 
 use self::{
 	client::{Client, field, register},
@@ -199,24 +196,41 @@ fn refuses_non_object_body() -> Result {
 	})
 }
 
-/// A burst over 30 events in one second is refused with the time until the
-/// window ends.
+/// Once a sender's window for a room is full, a send is refused with the time
+/// until the window ends.
 #[test]
-fn rate_limits_bursts() -> Result {
+fn rate_limits_full_window() -> Result {
 	boot("ephemeral-msc2477-rate", OPTIONS, async |services, base| {
 		let (alice, _, room_id) = joined_pair(services, base).await?;
-		let content = json!({ "x": 1 });
-		let txn_ids: Vec<String> = (0..100).map(|i| format!("burst-{i}")).collect();
-		let responses = join_all(
-			txn_ids
-				.iter()
-				.map(|txn_id| alice.put_ephemeral(&room_id, LIVE, txn_id, &content)),
-		)
-		.await;
+		let alice_id = UserId::parse_with_server_name("alice", services.globals.server_name())?;
+		let content = to_raw_value(&json!({ "x": 1 }))?;
 
-		let mut limited = 0_usize;
-		for response in responses {
-			let response = response?;
+		// The window fills in process, so the refusal does not depend on how fast
+		// the server answers a burst. A request that lands after the window rolled
+		// over is accepted, so the test fills it and asks again, three times at
+		// most.
+		for attempt in 0..3 {
+			let filled = (0..100_000).any(|n| {
+				let txn_id = format!("fill-{attempt}-{n}");
+				let outcome = services.ephemeral.send(
+					&room_id,
+					&alice_id,
+					None,
+					LIVE,
+					txn_id.as_str().into(),
+					content.clone(),
+				);
+
+				outcome != SendOutcome::Accepted
+			});
+
+			assert!(filled, "the window never filled");
+
+			let txn_id = format!("over-{attempt}");
+			let response = alice
+				.put_ephemeral(&room_id, LIVE, &txn_id, &json!({ "x": 1 }))
+				.await?;
+
 			if response.status() == StatusCode::OK {
 				continue;
 			}
@@ -228,12 +242,11 @@ fn rate_limits_bursts() -> Result {
 			let retry_after_ms = body["retry_after_ms"].as_u64().unwrap_or(0);
 
 			assert!((1..=1000).contains(&retry_after_ms), "{body}");
-			limited += 1;
+
+			return Ok(());
 		}
 
-		assert!(limited > 0, "a burst of 100 was not rate limited");
-
-		Ok(())
+		panic!("a full window never refused the HTTP send");
 	})
 }
 
