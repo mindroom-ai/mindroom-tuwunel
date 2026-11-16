@@ -24,15 +24,18 @@ use tuwunel_core::{Result, trace, utils::millis_since_unix_epoch};
 
 /// Most events one room holds; the oldest is evicted first. That is nearly 7 s
 /// of one sender at the rate limit, longer than the 5 s the MindRoom runtime
-/// leaves between a reply's snapshots. While events average under 256 bytes as
-/// `MAX_BYTES` counts them, this cap binds first: a sync that falls behind by
-/// less gets every frame, and one that falls further still gets each reply's
-/// newest snapshot.
+/// leaves between a reply's snapshots; `MAX_BYTES` binds first only while
+/// events average over 1 KiB.
 const MAX_EVENTS: usize = 4_096;
 
 /// Most bytes of content, event types, and transaction IDs one room holds; the
-/// oldest events are evicted first.
-const MAX_BYTES: usize = 1_048_576;
+/// oldest events are evicted first. One sender's 50 replies put at most about
+/// 800 KiB a second into a room: a snapshot of at most 64 KiB (the largest
+/// body) from each every 5 s, 640 KiB a second, and about 500 deltas of some
+/// 300 bytes. So this holds at least the 5 s between a reply's snapshots even
+/// when every snapshot is as large as it may be, and a sync up to 5 s behind
+/// finds every reply's latest snapshot.
+const MAX_BYTES: usize = 4 * 1_048_576;
 
 /// Age in milliseconds after which an event is no longer delivered.
 const TTL_MS: u64 = 30_000;

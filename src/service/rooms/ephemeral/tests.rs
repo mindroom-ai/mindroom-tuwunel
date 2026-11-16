@@ -5,7 +5,7 @@ use ruma::{
 };
 use serde_json::{json, value::to_raw_value};
 
-use super::{Buffer, MAX_EVENTS, New, RATE_LIMIT, SendOutcome, opts_into};
+use super::{Buffer, MAX_BYTES, MAX_EVENTS, New, RATE_LIMIT, SendOutcome, opts_into};
 
 const ROOM: &str = "!room:example.com";
 const OTHER_ROOM: &str = "!other:example.com";
@@ -75,22 +75,22 @@ fn evicts_oldest_beyond_max_events() {
 }
 
 #[test]
-fn evicts_oldest_beyond_one_mib() {
+fn evicts_oldest_beyond_max_bytes() {
 	let mut buffer = Buffer::default();
 
-	send(&mut buffer, T0, 1, new(room(), "first", 600 * 1024));
-	send(&mut buffer, T0, 2, new(room(), "second", 600 * 1024));
+	send(&mut buffer, T0, 1, new(room(), "first", MAX_BYTES * 3 / 5));
+	send(&mut buffer, T0, 2, new(room(), "second", MAX_BYTES * 3 / 5));
 
 	assert_eq!(counts(&buffer, 0, u64::MAX, T0), [2]);
 }
 
 /// The transaction id is held with the event, so it counts toward the bound.
 #[test]
-fn long_txn_id_counts_toward_one_mib() {
+fn long_txn_id_counts_toward_max_bytes() {
 	let mut buffer = Buffer::default();
-	let long_txn_id = "t".repeat(500 * 1024);
+	let long_txn_id = "t".repeat(MAX_BYTES / 2);
 
-	send(&mut buffer, T0, 1, new(room(), "first", 600 * 1024));
+	send(&mut buffer, T0, 1, new(room(), "first", MAX_BYTES * 3 / 5));
 	send(&mut buffer, T0, 2, new(room(), &long_txn_id, 1));
 
 	assert_eq!(counts(&buffer, 0, u64::MAX, T0), [2]);
@@ -149,14 +149,16 @@ fn transaction_expired_behind_a_newer_event_is_buffered_again() {
 fn events_expired_behind_a_newer_event_free_their_bytes() {
 	let mut buffer = Buffer::default();
 
-	send(&mut buffer, T0 + 1_000, 1, new(room(), "newer", 60 * 1024));
+	let size = MAX_BYTES / 17;
+
+	send(&mut buffer, T0 + 1_000, 1, new(room(), "newer", size));
 	for count in 2..=16 {
 		let txn_id = count.to_string();
 
-		send(&mut buffer, T0, count, new(room(), &txn_id, 60 * 1024));
+		send(&mut buffer, T0, count, new(room(), &txn_id, size));
 	}
 
-	send(&mut buffer, T0 + 30_001, 17, new(room(), "last", 64 * 1024));
+	send(&mut buffer, T0 + 30_001, 17, new(room(), "last", 2 * size));
 
 	assert_eq!(counts(&buffer, 0, u64::MAX, T0 + 30_001), [1, 17]);
 }
@@ -334,6 +336,22 @@ fn sync_five_seconds_behind_gets_every_frame() {
 		sent: 5_100,
 		refused: 0,
 		delivered: 5_100,
+		exact: true,
+	});
+}
+
+/// One sender's 50 replies, each sending a snapshot of the largest body the
+/// route accepts (64 KiB) every 5 s and a 300-byte delta every 100 ms
+/// otherwise, fit in the buffer for 5 s, so a sync that falls 5 s behind still
+/// gets every frame, each reply's latest snapshot included.
+#[test]
+fn sync_five_seconds_behind_gets_the_largest_snapshots() {
+	let streamed = stream(1, 50, 10, 5_000, (292, 65_528));
+
+	assert_eq!(streamed, Streamed {
+		sent: 5_000,
+		refused: 0,
+		delivered: 5_000,
 		exact: true,
 	});
 }

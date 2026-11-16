@@ -1255,7 +1255,7 @@ Behavior:
   one sender to one room in a one-second window 429 `M_LIMIT_EXCEEDED` with
   `retry_after_ms` until the window ends. A transaction (type, sender, device,
   txnId) that is still buffered answers `{}` without a second copy.
-- Events live only in memory. Each room keeps at most 4,096 events and 1 MiB of
+- Events live only in memory. Each room keeps at most 4,096 events and 4 MiB of
   content, event types, and transaction IDs. Each event is delivered for at
   most 30 seconds, the next send after a minute frees its memory, and a
   restart drops it. Each event takes a global count, as typing does; nothing
