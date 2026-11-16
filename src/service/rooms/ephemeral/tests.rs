@@ -122,6 +122,45 @@ fn transaction_after_its_event_expired_is_buffered_again() {
 	assert_eq!(counts(&buffer, 0, u64::MAX, T0 + 30_001), [3]);
 }
 
+/// After the clock steps back, an event that expired behind a newer one no
+/// longer answers for its transaction.
+#[test]
+fn transaction_expired_behind_a_newer_event_is_buffered_again() {
+	let mut buffer = Buffer::default();
+
+	send(&mut buffer, T0 + 1_000, 1, new(room(), "newer", 1));
+	send(&mut buffer, T0, 2, new(room(), "older", 1));
+
+	assert_eq!(
+		send(&mut buffer, T0 + 30_001, 3, new(room(), "older", 1)),
+		SendOutcome::Accepted
+	);
+	assert_eq!(counts(&buffer, 0, u64::MAX, T0 + 30_001), [1, 3]);
+
+	let held = &buffer.rooms[room()];
+
+	assert_eq!(held.txns.len(), 2, "the expired event left the transaction index");
+	assert!(!held.unordered, "the buffer is back in timestamp order");
+}
+
+/// After the clock steps back, events that expired behind a newer one no
+/// longer count toward the byte cap, so they cannot push the newer one out.
+#[test]
+fn events_expired_behind_a_newer_event_free_their_bytes() {
+	let mut buffer = Buffer::default();
+
+	send(&mut buffer, T0 + 1_000, 1, new(room(), "newer", 60 * 1024));
+	for count in 2..=16 {
+		let txn_id = count.to_string();
+
+		send(&mut buffer, T0, count, new(room(), &txn_id, 60 * 1024));
+	}
+
+	send(&mut buffer, T0 + 30_001, 17, new(room(), "last", 64 * 1024));
+
+	assert_eq!(counts(&buffer, 0, u64::MAX, T0 + 30_001), [1, 17]);
+}
+
 #[test]
 fn window_is_since_exclusive_until_inclusive() {
 	let mut buffer = Buffer::default();
@@ -205,12 +244,14 @@ fn retried_transaction_is_answered_in_a_full_window() {
 }
 
 /// What a sync saw of a stretch of streaming: the frames its senders sent, the
-/// ones the buffer refused, and the ones the sync got.
+/// ones the buffer refused, the ones the sync got, and whether those were the
+/// accepted ones, each once and in order.
 #[derive(Debug, Default, Eq, PartialEq)]
 struct Streamed {
 	sent: u64,
 	refused: u64,
 	delivered: u64,
+	exact: bool,
 }
 
 /// Streams `streams` replies from each of `senders` into one room for
@@ -235,6 +276,7 @@ fn stream(
 
 	let mut buffer = Buffer::default();
 	let mut streamed = Streamed::default();
+	let (mut accepted, mut got) = (Vec::new(), Vec::new());
 	let (mut count, mut since) = (0, 0);
 	for tick in 0..seconds * 10 {
 		let now = T0 + tick * 100;
@@ -249,20 +291,22 @@ fn stream(
 
 				count += 1;
 				streamed.sent += 1;
-				if send(&mut buffer, now, count, event) != SendOutcome::Accepted {
+				if send(&mut buffer, now, count, event) == SendOutcome::Accepted {
+					accepted.push(count);
+				} else {
 					streamed.refused += 1;
 				}
 			}
 		}
 
 		if (now - T0 + 100).is_multiple_of(read_every_ms) {
-			let read = counts(&buffer, since, count, now);
-
-			streamed.delivered += u64::try_from(read.len()).unwrap();
+			got.extend(counts(&buffer, since, count, now));
 			since = count;
 		}
 	}
 
+	streamed.delivered = u64::try_from(got.len()).unwrap();
+	streamed.exact = got == accepted;
 	streamed
 }
 
@@ -276,12 +320,13 @@ fn one_sender_streams_fifty_replies() {
 	assert_eq!(streamed, Streamed {
 		sent: 1_500,
 		refused: 0,
-		delivered: 1_500
+		delivered: 1_500,
+		exact: true,
 	});
 }
 
 /// A sync that falls 5 s behind, the runtime's time between snapshots, still
-/// gets every frame of 50 streaming replies, here from 17 senders.
+/// gets every frame of 51 streaming replies from 17 senders.
 #[test]
 fn sync_five_seconds_behind_gets_every_frame() {
 	let streamed = stream(17, 3, 10, 5_000, (300, 3_000));
@@ -289,7 +334,8 @@ fn sync_five_seconds_behind_gets_every_frame() {
 	assert_eq!(streamed, Streamed {
 		sent: 5_100,
 		refused: 0,
-		delivered: 5_100
+		delivered: 5_100,
+		exact: true,
 	});
 }
 

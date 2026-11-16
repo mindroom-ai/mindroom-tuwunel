@@ -199,42 +199,54 @@ fn refuses_non_object_body() -> Result {
 /// Once a sender's window for a room is full, a send is refused with the time
 /// until the window ends.
 #[test]
-fn rate_limits_bursts() -> Result {
+fn rate_limits_full_window() -> Result {
 	boot("ephemeral-msc2477-rate", OPTIONS, async |services, base| {
 		let (alice, _, room_id) = joined_pair(services, base).await?;
 		let alice_id = UserId::parse_with_server_name("alice", services.globals.server_name())?;
 		let content = to_raw_value(&json!({ "x": 1 }))?;
 
 		// The window fills in process, so the refusal does not depend on how fast
-		// the server answers requests.
-		let refused_at = (0..100_000).find(|n| {
-			let txn_id = format!("fill-{n}");
-			let outcome = services.ephemeral.send(
-				&room_id,
-				&alice_id,
-				None,
-				LIVE,
-				txn_id.as_str().into(),
-				content.clone(),
-			);
+		// the server answers a burst. A request that lands after the window rolled
+		// over is accepted, so the test fills it and asks again, three times at
+		// most.
+		for attempt in 0..3 {
+			let refused_at = (0..100_000).find(|n| {
+				let txn_id = format!("fill-{attempt}-{n}");
+				let outcome = services.ephemeral.send(
+					&room_id,
+					&alice_id,
+					None,
+					LIVE,
+					txn_id.as_str().into(),
+					content.clone(),
+				);
 
-			outcome != SendOutcome::Accepted
-		});
+				outcome != SendOutcome::Accepted
+			});
 
-		assert!(refused_at.is_some_and(|n| n > 0), "the window never filled: {refused_at:?}");
+			assert!(refused_at.is_some_and(|n| n > 0), "the window never filled: {refused_at:?}");
 
-		let response = alice
-			.put_ephemeral(&room_id, LIVE, "over", &json!({ "x": 1 }))
-			.await?;
+			let txn_id = format!("over-{attempt}");
+			let response = alice
+				.put_ephemeral(&room_id, LIVE, &txn_id, &json!({ "x": 1 }))
+				.await?;
 
-		let body =
-			expect_refusal(response, StatusCode::TOO_MANY_REQUESTS, "M_LIMIT_EXCEEDED").await?;
+			if response.status() == StatusCode::OK {
+				continue;
+			}
 
-		let retry_after_ms = body["retry_after_ms"].as_u64().unwrap_or(0);
+			let body =
+				expect_refusal(response, StatusCode::TOO_MANY_REQUESTS, "M_LIMIT_EXCEEDED")
+					.await?;
 
-		assert!((1..=1000).contains(&retry_after_ms), "{body}");
+			let retry_after_ms = body["retry_after_ms"].as_u64().unwrap_or(0);
 
-		Ok(())
+			assert!((1..=1000).contains(&retry_after_ms), "{body}");
+
+			return Ok(());
+		}
+
+		panic!("a full window never refused the HTTP send");
 	})
 }
 

@@ -24,9 +24,10 @@ use tuwunel_core::{Result, trace, utils::millis_since_unix_epoch};
 
 /// Most events one room holds; the oldest is evicted first. That is nearly 7 s
 /// of one sender at the rate limit, longer than the 5 s the MindRoom runtime
-/// leaves between a reply's snapshots, so a sync that falls behind by less gets
-/// every frame, and one that falls further still gets each reply's newest
-/// snapshot.
+/// leaves between a reply's snapshots. While events average under 256 bytes,
+/// as the runtime's unencrypted frames do, this cap binds before `MAX_BYTES`:
+/// a sync that falls behind by less gets every frame, and one that falls
+/// further still gets each reply's newest snapshot.
 const MAX_EVENTS: usize = 4_096;
 
 /// Most bytes of content, event types, and transaction IDs one room holds; the
@@ -94,6 +95,9 @@ struct Room {
 	entries: VecDeque<Entry>,
 	bytes: usize,
 	txns: HashMap<u64, usize>,
+	/// Whether an event is buffered behind a newer one, as after the clock
+	/// steps back, so an expired event may sit behind a live one.
+	unordered: bool,
 }
 
 struct Entry {
@@ -263,9 +267,14 @@ impl Buffer {
 
 		// A retried transaction that already landed is answered before the rate
 		// window, so a retry never turns an accepted send into a refusal. Only a
-		// send whose hash is buffered pays for the scan.
+		// send whose hash is buffered scans, comparing hashes first.
 		room.expire(now);
-		if room.txns.contains_key(&txn_hash) && room.entries.iter().any(|entry| entry.is(&new)) {
+		if room.txns.contains_key(&txn_hash)
+			&& room
+				.entries
+				.iter()
+				.any(|entry| entry.txn_hash == txn_hash && entry.is(&new))
+		{
 			return Err(SendOutcome::Duplicate);
 		}
 
@@ -336,25 +345,50 @@ impl Buffer {
 }
 
 impl Room {
-	/// Appends an event, then evicts the oldest beyond the count or byte cap.
+	/// Appends an event, evicting the oldest beyond the count or byte cap. The
+	/// count cap makes room first, so the queue never grows past it.
 	fn push(&mut self, entry: Entry) {
+		self.unordered |= self
+			.entries
+			.back()
+			.is_some_and(|last| entry.sent() < last.sent());
+
+		while self.entries.len() >= MAX_EVENTS {
+			if self.pop_oldest().is_none() {
+				break;
+			}
+		}
+
 		self.bytes = self.bytes.saturating_add(entry.bytes());
 		let held = self.txns.entry(entry.txn_hash).or_default();
 		*held = held.saturating_add(1);
 		self.entries.push_back(entry);
 
-		while self.entries.len() > MAX_EVENTS || self.bytes > MAX_BYTES {
+		while self.bytes > MAX_BYTES {
 			if self.pop_oldest().is_none() {
 				break;
 			}
 		}
 	}
 
-	/// Drops the oldest events while they are expired. Events are buffered in
-	/// the order of their timestamps, so the expired ones are at the front; if
-	/// the clock steps back, later ones wait for the front one, and reads skip
-	/// them meanwhile.
+	/// Drops expired events. They are the oldest ones unless the clock stepped
+	/// back; then every event is checked until the order holds again.
 	fn expire(&mut self, now: u64) {
+		if self.unordered {
+			let Self { entries, bytes, txns, .. } = self;
+			entries.retain(|entry| {
+				let live = !entry.expired(now);
+				if !live {
+					forget(bytes, txns, entry);
+				}
+
+				live
+			});
+
+			self.unordered = !self.entries.iter().map(Entry::sent).is_sorted();
+			return;
+		}
+
 		while self
 			.entries
 			.front()
@@ -366,16 +400,20 @@ impl Room {
 
 	fn pop_oldest(&mut self) -> Option<Entry> {
 		let evicted = self.entries.pop_front()?;
-
-		self.bytes = self.bytes.saturating_sub(evicted.bytes());
-		if let hash_map::Entry::Occupied(mut held) = self.txns.entry(evicted.txn_hash) {
-			match held.get().saturating_sub(1) {
-				| 0 => drop(held.remove()),
-				| left => drop(held.insert(left)),
-			}
-		}
+		forget(&mut self.bytes, &mut self.txns, &evicted);
 
 		Some(evicted)
+	}
+}
+
+/// Takes a dropped event out of its room's byte sum and transaction index.
+fn forget(bytes: &mut usize, txns: &mut HashMap<u64, usize>, entry: &Entry) {
+	*bytes = bytes.saturating_sub(entry.bytes());
+	if let hash_map::Entry::Occupied(mut held) = txns.entry(entry.txn_hash) {
+		match held.get().saturating_sub(1) {
+			| 0 => drop(held.remove()),
+			| left => drop(held.insert(left)),
+		}
 	}
 }
 
@@ -389,11 +427,9 @@ impl Entry {
 			.saturating_add(self.txn_id.as_str().len())
 	}
 
-	fn expired(&self, now: u64) -> bool {
-		let sent = u64::from(self.event.origin_server_ts.get());
+	fn sent(&self) -> u64 { self.event.origin_server_ts.get().into() }
 
-		now.saturating_sub(sent) > TTL_MS
-	}
+	fn expired(&self, now: u64) -> bool { now.saturating_sub(self.sent()) > TTL_MS }
 
 	/// Whether this is the same transaction as `new`.
 	fn is(&self, new: &New<'_>) -> bool {
