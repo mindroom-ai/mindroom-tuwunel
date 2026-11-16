@@ -98,8 +98,10 @@ struct Room {
 	entries: VecDeque<Entry>,
 	bytes: usize,
 	txns: HashMap<u64, usize>,
-	/// Whether an event is buffered behind a newer one, as after the clock
-	/// steps back, so an expired event may sit behind a live one.
+	/// Whether an event may be buffered behind a newer one, as after the clock
+	/// steps back, so an expired event may sit behind a live one. The flag stays
+	/// set after the caps evict that event, until an expiry finds the order
+	/// restored.
 	unordered: bool,
 }
 
