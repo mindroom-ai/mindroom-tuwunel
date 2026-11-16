@@ -29,14 +29,14 @@
 
 | ✅ `yes` | 🟨 `part` | 🟥 `no` | ⬛ `n/a` | total |
 |---:|---:|---:|---:|---:|
-| 290 | 61 | 447 | 312 | 1110 |
+| 290 | 62 | 446 | 312 | 1110 |
 
 ### Status by inventory bucket
 
 | Inv | yes | part | no | n/a | total |
 |---|---|---|---|---|---|
 | merged | 189 | 22 | 13 | 57 | 281 |
-| open | 65 | 24 | 348 | 181 | 618 |
+| open | 65 | 25 | 347 | 181 | 618 |
 | closed | 36 | 15 | 86 | 74 | 211 |
 
 ## Merged
@@ -715,7 +715,7 @@ in the [Out of scope](#out-of-scope) section.
 | MSC2513 | 🟥 ◐ | 0/10 | Allow clients to specify content for membership events | Membership endpoints accept reason only; no content body param |
 | MSC2499 | 🟨 ◐ | 10/30 | Fixes for Well-known URIs | src/service/resolver/well_known.rs follows redirects; 12288B cap; uses /versions |
 | MSC2487 | 🟥 ◐ | 0/0 | Filtering for Appservices | No filter field on appservice registration |
-| MSC2477 | 🟥 ◐ | 0/0 | User-defined ephemeral events in rooms | No PUT /rooms/{roomId}/ephemeral/{type}/{txnId} route |
+| MSC2477 | 🟨 ◐ | 50/50 | User-defined ephemeral events in rooms | PUT /unstable/org.matrix.msc2477/rooms/{roomId}/ephemeral/{type}/{txnId} buffers in memory and sync relays; no ephemeral power levels, no federation |
 | MSC2474 | ✅ ● | 100/100 | Add key backup version to SSSS account data | plaintext version in m.megolm_backup.v1 kept verbatim; client matching excluded |
 | MSC2448 | 🟨 ● | 70/80 | Using BlurHash as a Placeholder for Matrix Media | blurhash on profile, federation query, media upload, member events |
 | MSC2444 | 🟨 ● | 30/30 | Proposal for implementing peeking over federation (peek API) | world_readable allowed on some federation reads; no /peek subscription API |
