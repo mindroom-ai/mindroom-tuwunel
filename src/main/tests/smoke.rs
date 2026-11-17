@@ -22,6 +22,10 @@ mod fixture;
 // Parallel boots share one tracing registry, which holds at most 4096 threads.
 const POOL_CAP: &str = "database.pool.max_workers=64";
 
+// A room summary without an access token is answered only beside an open room
+// directory.
+const OPEN_DIRECTORY: &str = "directory.rooms.allow_without_auth=true";
+
 #[test]
 fn dummy() {}
 
@@ -59,9 +63,10 @@ fn smoke() -> Result {
 ///
 /// The room summary request names a remote alias, so answering it needs a
 /// federation query the server must refuse before any lookup or connection.
+/// It carries no access token, which the open directory admits.
 #[test]
 fn boots_with_federation_disabled() -> Result {
-	let options = ["federation.enable=false", "logging.enable=false", POOL_CAP];
+	let options = ["federation.enable=false", "logging.enable=false", OPEN_DIRECTORY, POOL_CAP];
 
 	boot("federation-disabled", options, async |services, base| {
 		let inbound = format!("{base}/_matrix/federation/v1/version");
@@ -91,6 +96,7 @@ fn unreachable_alias_server_answers_as_a_gateway() -> Result {
 		"logging.enable=false",
 		"network.http.ip_range_denylist=[]",
 		"network.http.conn_timeout=1",
+		OPEN_DIRECTORY,
 		POOL_CAP,
 	];
 

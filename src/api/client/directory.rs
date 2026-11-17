@@ -52,6 +52,7 @@ pub(crate) async fn get_public_rooms_filtered_route(
 
 	get_public_rooms_filtered_helper(
 		&services,
+		body.sender_user.as_deref(),
 		body.server.as_deref(),
 		body.limit,
 		body.since.as_deref(),
@@ -77,6 +78,7 @@ pub(crate) async fn get_public_rooms_route(
 
 	let response = get_public_rooms_filtered_helper(
 		&services,
+		body.sender_user.as_deref(),
 		body.server.as_deref(),
 		body.limit,
 		body.since.as_deref(),
@@ -205,37 +207,35 @@ pub(crate) async fn get_room_visibility_route(
 /// A remote server is queried when specified; otherwise the local directory is
 /// used. A local query with a zero or absent `limit` takes a page of 100, as
 /// Synapse does.
+///
+/// `viewer` is the local user asking, if one is. An external account is listed
+/// only the rooms it is joined or invited to, counted and paged as if the
+/// directory held no other, and no remote server is queried for it.
 pub async fn get_public_rooms_filtered_helper(
 	services: &Services,
+	viewer: Option<&UserId>,
 	server: Option<&ServerName>,
 	limit: Option<UInt>,
 	since: Option<&str>,
 	filter: &Filter,
 	_network: &RoomNetwork,
 ) -> Result<get_public_rooms_filtered::v3::Response> {
-	if let Some(other_server) = remote_server(services, server) {
-		let response = services
-			.federation
-			.execute(
-				other_server,
-				federation::directory::get_public_rooms_filtered::v1::Request {
-					limit,
-					since: since.map(ToOwned::to_owned),
-					filter: Filter {
-						generic_search_term: filter.generic_search_term.clone(),
-						room_types: filter.room_types.clone(),
-					},
-					room_network: RoomNetwork::Matrix,
-				},
-			)
-			.await?;
+	let external_viewer = match viewer {
+		| Some(viewer) if services.users.is_external(viewer).await => Some(viewer),
+		| _ => None,
+	};
 
-		return Ok(get_public_rooms_filtered::v3::Response {
-			chunk: response.chunk,
-			prev_batch: response.prev_batch,
-			next_batch: response.next_batch,
-			total_room_count_estimate: response.total_room_count_estimate,
-		});
+	if let Some(other_server) = remote_server(services, server) {
+		if external_viewer.is_some() {
+			return Ok(get_public_rooms_filtered::v3::Response {
+				chunk: Vec::new(),
+				prev_batch: None,
+				next_batch: None,
+				total_room_count_estimate: Some(uint!(0)),
+			});
+		}
+
+		return remote_public_rooms(services, other_server, limit, since, filter).await;
 	}
 
 	let limit = limit
@@ -300,6 +300,15 @@ pub async fn get_public_rooms_filtered_helper(
 		.public_rooms()
 		.map(ToOwned::to_owned)
 		.chain(meta_public_rooms)
+		.wide_filter_map(async |room_id| match external_viewer {
+			| Some(viewer)
+				if !services
+					.users
+					.external_sees_room(viewer, &room_id)
+					.await =>
+				None,
+			| _ => Some(room_id),
+		})
 		.wide_then(|room_id| public_rooms_chunk(services, room_id))
 		.ready_filter_map(|chunk| {
 			if !filter.room_types.is_empty()
@@ -372,6 +381,35 @@ pub async fn get_public_rooms_filtered_helper(
 		prev_batch,
 		next_batch,
 		total_room_count_estimate,
+	})
+}
+
+/// Asks another server for a page of its public room directory.
+async fn remote_public_rooms(
+	services: &Services,
+	other_server: &ServerName,
+	limit: Option<UInt>,
+	since: Option<&str>,
+	filter: &Filter,
+) -> Result<get_public_rooms_filtered::v3::Response> {
+	let response = services
+		.federation
+		.execute(other_server, federation::directory::get_public_rooms_filtered::v1::Request {
+			limit,
+			since: since.map(ToOwned::to_owned),
+			filter: Filter {
+				generic_search_term: filter.generic_search_term.clone(),
+				room_types: filter.room_types.clone(),
+			},
+			room_network: RoomNetwork::Matrix,
+		})
+		.await?;
+
+	Ok(get_public_rooms_filtered::v3::Response {
+		chunk: response.chunk,
+		prev_batch: response.prev_batch,
+		next_batch: response.next_batch,
+		total_room_count_estimate: response.total_room_count_estimate,
 	})
 }
 

@@ -124,8 +124,10 @@ impl Service {
 
 	/// Whether the account is external, as a registration rule with `external`
 	/// made it: it joins only rooms it is invited to, creates no rooms, invites
-	/// no one, and finds in the user directory only people it shares a room
-	/// with. The row's presence is the whole state; no client API writes it.
+	/// no one, finds in the user directory only people it shares a room with,
+	/// and is shown only the rooms it is joined or invited to
+	/// ([`Self::external_sees_room`]). The row's presence is the whole state; no
+	/// client API writes it.
 	/// Only a missing row reads as not external: a failed read counts as
 	/// external, so a storage fault never lifts the limits.
 	pub async fn is_external(&self, user_id: &UserId) -> bool {
@@ -139,6 +141,18 @@ impl Service {
 
 	/// Mark the account external. Nothing clears the mark.
 	pub fn set_external(&self, user_id: &UserId) { self.db.userid_external.insert(user_id, b""); }
+
+	/// Whether the account may be shown the room. An external account is shown
+	/// only the rooms it is joined or invited to: the room directory, a room
+	/// summary and a space hierarchy describe no other room to it, public or
+	/// not.
+	pub async fn external_sees_room(&self, user_id: &UserId, room_id: &RoomId) -> bool {
+		let state_cache = &self.services.state_cache;
+
+		!self.is_external(user_id).await
+			|| state_cache.is_joined(user_id, room_id).await
+			|| state_cache.is_invited(user_id, room_id).await
+	}
 
 	/// Refuse an external account's room creation.
 	pub async fn external_create_check(&self, user_id: &UserId) -> Result {

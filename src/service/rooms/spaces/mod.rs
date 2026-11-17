@@ -107,12 +107,30 @@ pub async fn get_summary_and_children(
 			| _ if via.is_empty() =>
 				Err!(Request(NotFound("Space room not found locally; not querying federation"))),
 
+			// No other server is asked about a room an external account is not in.
+			| _ if !self.sender_sees_room(sender, room_id).await =>
+				Ok(Accessibility::Inaccessible),
+
 			| _ =>
 				self.get_summary_and_children_federation(room_id, sender, via)
 					.boxed() // cold arm
 					.await,
 		})
 		.await
+}
+
+/// Whether the sender may be shown the room at all: false only for an external
+/// account that is neither joined nor invited.
+#[implement(Service)]
+async fn sender_sees_room(&self, sender: &Identifier<'_>, room_id: &RoomId) -> bool {
+	match sender {
+		| Identifier::UserId(user_id) =>
+			self.services
+				.users
+				.external_sees_room(user_id, room_id)
+				.await,
+		| Identifier::ServerName(_) => true,
+	}
 }
 
 /// Simply returns the stripped m.space.child events of a room
@@ -194,6 +212,12 @@ async fn is_accessible_child(
 
 		if is_joined.or(is_invited).await {
 			return true;
+		}
+
+		// An external account is shown only the rooms it is joined or invited to,
+		// whatever their join rules.
+		if self.services.users.is_external(user_id).await {
+			return false;
 		}
 	}
 
