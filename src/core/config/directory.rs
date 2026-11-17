@@ -75,6 +75,9 @@ pub struct Rooms {
 
 	/// Allows client API queries of the public room directory without an
 	/// access token, exposing it to unauthenticated `/publicRooms` spiders.
+	/// Room summaries follow it: without it, a summary is refused to a
+	/// request without an access token, which could otherwise learn a room's
+	/// name, topic and member count from its ID or alias.
 	///
 	/// reloadable: yes
 	/// legacy: allow_public_room_directory_without_auth

@@ -195,6 +195,12 @@ async fn is_accessible_child(
 		if is_joined.or(is_invited).await {
 			return true;
 		}
+
+		// An external account is shown only the rooms it is joined or invited to,
+		// whatever their join rules.
+		if self.services.users.is_external(user_id).await {
+			return false;
+		}
 	}
 
 	match join_rule {
