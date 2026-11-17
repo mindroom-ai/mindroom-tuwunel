@@ -1203,6 +1203,34 @@ Behavior:
 - The appservice filtering and the public-room and shared-room rules are
   unchanged.
 
+### A conflict with a finished delayed event is 404 on the unstable MSC4140 paths
+
+Upstream keeps a delayed event after it is sent, cancelled or failed, and
+answers an action that conflicts with that final state with 409 `M_UNKNOWN`: a
+restart of any finished event, a cancel of a sent one, and a send of a
+cancelled or failed one. The fork's earlier delayed call leave dropped a
+finished event, so those actions answered 404 `M_NOT_FOUND`, and MatrixRTC
+clients rely on that answer. matrix-js-sdk 41.7.0, which MindRoom Chat pins,
+schedules a replacement delayed leave for a call when the restart or cancel of
+the old one answers `M_NOT_FOUND`. It retries after a rate limit or a network
+error, but it does not handle 409 `M_UNKNOWN`: the restart fails with "Could
+not restart delayed event". With upstream's answer, a call whose delayed leave
+was already sent, as after a sleeping laptop or a network gap, breaks on its
+next restart of that leave instead of rejoining. The SDK calls the unstable
+`org.matrix.msc4140` paths. Those paths, in the path form and the earlier body
+form, now answer an action that conflicts with the final state with 404
+`M_NOT_FOUND`, the answer an unknown `delay_id` gets. The actions that do not
+conflict stay successful on every path, as upstream has them: a send of an
+event already sent, which sends nothing again, and a cancel of an event
+already cancelled or failed. The stable path keeps upstream's 409, and the
+finished events stay stored and readable as upstream has them. Only the
+service's conflict is translated; a send's own error, such as 403 for a
+suspended sender, passes unchanged. File:
+`src/api/client/delayed_events/update_delayed_event.rs`; test in
+`src/mindroom-tests/tests/delayed_finished_not_found.rs`. Upstream's
+`src/main/tests/delayed_events.rs` drives the unstable path, so its
+expectations for such a conflict change from 409 to 404 in two lines.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
@@ -1495,9 +1523,11 @@ concurrency, real gateway stream/invite notifications and finished-stream
 unread counts, and audience-bound
 OpenID tokens with the option on and off (`openid_audience.rs`,
 `openid_audience_disabled.rs`), OpenID userinfo room membership
-(`openid_room_membership.rs`), and deactivated accounts left out of the user
+(`openid_room_membership.rs`), deactivated accounts left out of the user
 directory with `show_all_local_users_in_user_directory` on and off
-(`user_directory_deactivated.rs`, `user_directory_deactivated_rooms.rs`).
+(`user_directory_deactivated.rs`, `user_directory_deactivated_rooms.rs`), and
+conflicts with a finished delayed event answered as missing on the unstable
+MSC4140 paths (`delayed_finished_not_found.rs`).
 Stream classification also has unit tests in `src/service/pusher/tests.rs`.
 
 The v1.9.3 rebase adds pins for its semantic overlaps:

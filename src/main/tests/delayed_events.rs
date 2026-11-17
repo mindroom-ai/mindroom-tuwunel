@@ -303,7 +303,8 @@ async fn conflicting<const N: usize>(
 	for action in actions {
 		let response = client.attempt(delay_id, action).await?;
 
-		refused(response, StatusCode::CONFLICT, "M_UNKNOWN").await?;
+		// Fork: the unstable path, used here, answers such a conflict as missing.
+		refused(response, StatusCode::NOT_FOUND, "M_NOT_FOUND").await?;
 	}
 
 	Ok(())
@@ -358,7 +359,7 @@ async fn tokenless_send_on_unstable_only(
 
 	let cancel = alice.client_url(UNSTABLE, &format!("delayed_events/{delay_id}/cancel"));
 
-	refused(tokenless(services, &cancel).await?, StatusCode::CONFLICT, "M_UNKNOWN").await?;
+	refused(tokenless(services, &cancel).await?, StatusCode::NOT_FOUND, "M_NOT_FOUND").await?;
 	let resent = call_member_id(services, room, &state_key).await?;
 
 	require(resent.eq(&sent), "a repeated send sent again")?;
