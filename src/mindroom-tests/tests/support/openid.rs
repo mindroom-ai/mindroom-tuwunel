@@ -1,4 +1,4 @@
-//! Shared helpers for the OpenID audience tests.
+//! Shared helpers for tests that drive the real router with an access token.
 
 use std::sync::Arc;
 
@@ -101,6 +101,17 @@ pub(crate) fn post(uri: &str, body: Option<Value>) -> Request<Body> {
 		.header(header::CONTENT_TYPE, "application/json")
 		.header("X-Forwarded-For", "127.0.0.1")
 		.body(body)
+		.expect("valid request")
+}
+
+pub(crate) fn put(uri: &str, body: &Value) -> Request<Body> {
+	Request::builder()
+		.method("PUT")
+		.uri(uri)
+		.header(header::AUTHORIZATION, format!("Bearer {ACCESS_TOKEN}"))
+		.header(header::CONTENT_TYPE, "application/json")
+		.header("X-Forwarded-For", "127.0.0.1")
+		.body(Body::from(body.to_string()))
 		.expect("valid request")
 }
 

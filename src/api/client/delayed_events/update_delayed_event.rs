@@ -7,7 +7,7 @@ use ruma::{
 		v1::{Request, Response},
 	},
 };
-use tuwunel_core::{Err, Result};
+use tuwunel_core::{Err, Error, Result, err};
 use tuwunel_service::Services;
 
 use super::is_stable;
@@ -34,6 +34,7 @@ pub(crate) async fn update_delayed_event_route(
 
 	update(&services, &body.delay_id, &body.action, owner)
 		.await
+		.map_err(|e| path_dialect(e, is_stable(&path)))
 		.map(|()| Response::default())
 }
 
@@ -50,6 +51,7 @@ pub(crate) async fn update_delayed_event_by_body_route(
 ) -> Result<BodyResponse> {
 	update(&services, &body.delay_id, &body.action, Some(body.sender_user()))
 		.await
+		.map_err(|e| path_dialect(e, false))
 		.map(|()| BodyResponse::new())
 }
 
@@ -70,5 +72,24 @@ async fn update(
 			.await
 			.map(|_| ()),
 		| _ => Err!(Request(NotFound("Unknown delayed event action."))),
+	}
+}
+
+/// Answers an action that conflicts with a finalised event as missing on the
+/// unstable paths.
+///
+/// Servers that drop a delayed event once it is sent or cancelled answer a
+/// later action on it with `M_NOT_FOUND`, and clients of the unstable paths
+/// rely on that: matrix-js-sdk schedules a replacement delayed leave for a
+/// call after that answer to a restart, and does not handle the conflict,
+/// which fails the call. The stable path keeps the conflict (MSC4140). Only
+/// the service's finalised refusals are conflicts, so a send's own error
+/// passes unchanged, and so does the success of a repeated send or cancel
+/// that does not conflict.
+fn path_dialect(error: Error, stable: bool) -> Error {
+	match error {
+		| Error::Conflict(_) if !stable =>
+			err!(Request(NotFound("No delayed event with this ID."))),
+		| error => error,
 	}
 }
