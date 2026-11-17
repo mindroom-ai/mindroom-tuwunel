@@ -65,8 +65,9 @@ pub(crate) async fn get_room_summary(
 ) -> Result<Response> {
 	// A summary names a room to whoever asks by ID or alias, as the room
 	// directory does, so it is open without an access token only where the
-	// directory is.
-	if body.sender_user.is_none() && !services.config.directory.rooms.allow_without_auth {
+	// directory is. An appservice's token names no user and is one all the same.
+	let signed_in = body.sender_user.is_some() || body.appservice_info.is_some();
+	if !signed_in && !services.config.directory.rooms.allow_without_auth {
 		return Err!(Request(MissingToken("Missing access token.")));
 	}
 
@@ -90,8 +91,9 @@ async fn room_summary_response(
 	servers: &[OwnedServerName],
 	sender_user: Option<&UserId>,
 ) -> Result<Response> {
-	// Before the room's servers are asked for it: an external account learns
-	// nothing of a room it is not in, local or remote.
+	// Before the room's servers are asked for its summary: an external account
+	// learns nothing of a room it is not in, local or remote. An alias of
+	// another server was resolved there to get here.
 	if let Some(sender_user) = sender_user
 		&& !services
 			.users

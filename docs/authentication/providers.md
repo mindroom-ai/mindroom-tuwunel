@@ -451,12 +451,17 @@ rule with `external = true` marks the accounts it creates as external:
 - They are shown only the rooms they are joined or invited to. The room
   directory (`/publicRooms`) lists, searches and counts no other room for them,
   and asks no other server; a room summary of another room is refused; a space
-  hierarchy leaves out every other room, and a space they are not in is
+  hierarchy describes no other room, and a space they are not in is
   inaccessible. Join rules do not matter here: a `public` room is hidden like
-  any other. What remains: a room alias still resolves to its room ID; a room
-  with `world_readable` history can still be read by that ID, so make no room
-  world-readable that these accounts must not read; and a room whose join rule
-  allows knocks shows a knocker its name, topic and avatar, as it does anyone.
+  any other. What remains: a room alias still resolves to its room ID; a space
+  they are in or invited to still names its children's room IDs (its
+  `m.space.child` events, which every member reads as state and the hierarchy
+  returns as `children_state`); a room with `world_readable` history can still
+  be read by its ID, so make no room world-readable that these accounts must
+  not read; a room whose join rule allows knocks shows a knocker its name,
+  topic and avatar, as it does anyone; and with
+  `directory.rooms.allow_without_auth` anyone reads the room directory and room
+  summaries without an access token, these accounts included.
 - They are not made the server's admin as its first account, and they join none
   of `auto_join_rooms`. An external account is never a server admin:
   `user_is_admin` is false for it even in the admin room, and the admin grant

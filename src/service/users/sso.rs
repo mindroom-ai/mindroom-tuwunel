@@ -144,7 +144,8 @@ impl Service {
 
 	/// Whether the account may be shown the room. An external account is shown
 	/// only the rooms it is joined or invited to: the room directory, a room
-	/// summary and a space hierarchy tell it of no other room, public or not.
+	/// summary and a space hierarchy describe no other room to it, public or
+	/// not.
 	pub async fn external_sees_room(&self, user_id: &UserId, room_id: &RoomId) -> bool {
 		let state_cache = &self.services.state_cache;
 

@@ -19,6 +19,9 @@ use super::{
 /// The refusal of an external account's look at a room it is not in.
 const UNSEEN: &str = "This account may see a room only when it is in it or invited to it.";
 
+/// The access token of an appservice.
+const BRIDGE_TOKEN: &str = "room-visibility-appservice-token-0123456789";
+
 /// The room directory lists an external account only the rooms it is joined
 /// or invited to, searched or not, and counts no other; another server's
 /// directory is empty to it, unasked; a staff account still lists every
@@ -94,6 +97,30 @@ fn external_account_sees_no_summary_of_other_rooms() -> Result {
 		assert_eq!(unsigned.status(), StatusCode::UNAUTHORIZED);
 		assert_eq!(unsigned.json::<Value>().await?["errcode"], "M_MISSING_TOKEN");
 
+		// An appservice's token names no user, and is no missing token.
+		let registration = json!({
+			"id": "bridge",
+			"url": null,
+			"as_token": BRIDGE_TOKEN,
+			"hs_token": "room-visibility-homeserver-token-0123456789",
+			"sender_localpart": "bridge",
+			"namespaces": {"users": [], "aliases": [], "rooms": []}
+		});
+
+		services
+			.appservice
+			.register_appservice(serde_json::from_value(registration)?)
+			.await?;
+
+		let bridge = Client { services, base, token: BRIDGE_TOKEN };
+
+		assert_eq!(
+			summary(&bridge, rooms.public.as_str())
+				.await?
+				.status(),
+			StatusCode::OK
+		);
+
 		assert_eq!(
 			summary(&guest, rooms.class.as_str())
 				.await?
@@ -149,10 +176,10 @@ fn summary_without_a_token_follows_the_directory() -> Result {
 	})
 }
 
-/// An external account walks no space it is neither in nor invited to, and
-/// in a space that invited it finds only the children it is in, although the
-/// space and another child are public; a staff account walks the space and
-/// finds its public child.
+/// An external account walks no space it is neither in nor invited to, here
+/// or on another server, and in a space that invited it finds only the
+/// children it is in, although the space and another child are public; a
+/// staff account walks the space and finds its public child.
 #[test]
 fn external_account_walks_only_its_rooms_in_a_space() -> Result {
 	run("sso-room-visibility-hierarchy", async |services, base| {
@@ -178,6 +205,12 @@ fn external_account_walks_only_its_rooms_in_a_space() -> Result {
 		let (_, amy) = sign_in_with(services, base, "amy", AMY_TOKEN).await?;
 
 		forbidden(hierarchy(&guest, &space).await?, "The requested room is inaccessible.")
+			.await?;
+
+		// No other server is asked about a room the account is not in.
+		let remote = RoomId::parse("!space:remote.example")?;
+
+		forbidden(hierarchy(&guest, &remote).await?, "The requested room is inaccessible.")
 			.await?;
 
 		let walked = async |client: &Client<'_>| -> Result<Vec<OwnedRoomId>> {
