@@ -1036,9 +1036,10 @@ account may see a room only when it is in it or invited to it.", before the
 room's servers are asked for it (an alias of another server is resolved there
 first). In a space hierarchy no join rule makes a room accessible to it
 (`spaces::is_accessible_child`), so a space it is not in is inaccessible and no
-other child is described; a room this server is not in is inaccessible to it
-without another server being asked (`spaces::get_summary_and_children`). The
-federation directory routes pass no user and are unchanged.
+other child is described; a room this server is not in, and the account is not
+invited to, is inaccessible to it without another server being asked
+(`spaces::get_summary_and_children`). The federation directory routes pass no
+user and are unchanged.
 
 A room summary also took requests without an access token, and answered them
 for any room with a public join rule, by ID or alias, asking other servers
