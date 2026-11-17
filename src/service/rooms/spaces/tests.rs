@@ -472,6 +472,26 @@ async fn child_access_respects_join_rule_and_membership() -> Result {
 			.await
 	);
 
+	// An external account is shown no room it is not in, even a public one.
+	let guest = user_id!("@guest:localhost");
+	let guest_sender = Identifier::UserId(guest);
+
+	services.users.set_external(guest);
+	assert!(
+		!services
+			.spaces
+			.is_accessible_child(room, &JoinRuleSummary::Public, &guest_sender)
+			.await
+	);
+
+	transition(services, room, guest, MembershipState::Invite).await?;
+	assert!(
+		services
+			.spaces
+			.is_accessible_child(room, &JoinRuleSummary::Public, &guest_sender)
+			.await
+	);
+
 	Ok(())
 }
 

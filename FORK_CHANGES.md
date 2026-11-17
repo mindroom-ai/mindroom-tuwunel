@@ -1018,6 +1018,57 @@ external accounts. Files: `src/core/config/{mod.rs,check.rs}`,
 `src/main/tests/sso_registration_rules/{forbidden_rooms.rs,invites.rs}`
 and `src/core/config/tests.rs`.
 
+### External accounts are shown only their rooms
+
+An external account could join no room uninvited, yet was shown every one: the
+room directory listed it each published room with its name, topic, avatar and
+member count, a room summary described any room with a `public` or knock join
+rule, and a space hierarchy walked every such child. A client's room list
+therefore told people outside an organization the names of its rooms.
+`users::external_sees_room` is true unless the account is external and neither
+joined nor invited, and is applied where a room is described to someone not in
+it. The room directory (`get_public_rooms_filtered_helper`, which now takes the
+asking local user) drops the other rooms before a chunk is built, so a search,
+a page and `total_room_count_estimate` treat the directory as holding only the
+account's rooms; a query naming another server returns an empty listing and
+asks nobody. A room summary of another room is refused with `M_FORBIDDEN` "This
+account may see a room only when it is in it or invited to it.", before the
+room's servers are asked for it (an alias of another server is resolved there
+first). In a space hierarchy no join rule makes a room accessible to it
+(`spaces::is_accessible_child`), so a space it is not in is inaccessible and no
+other child is described; a room this server is not in, and the account is not
+invited to, is inaccessible to it without another server being asked
+(`spaces::get_summary_and_children`). The federation directory routes pass no
+user and are unchanged.
+
+A room summary also took requests without an access token, and answered them
+for any room with a public join rule, by ID or alias, asking other servers
+about remote ones. It now follows the directory: without
+`directory.rooms.allow_without_auth` (off by default) a request with neither a
+user's nor an appservice's token is refused with `M_MISSING_TOKEN`.
+
+Not covered:
+
+- An alias still resolves to its room ID, and `GET /directory/list/room/{roomId}`
+  still says whether a room of a known ID is published.
+- A space the account is in or invited to names its children's room IDs: the
+  hierarchy returns the space's `m.space.child` events as `children_state`
+  unfiltered, since a member reads the same events as the space's state.
+- A room with `world_readable` history can be read by its ID by any account,
+  and a room that allows knocks shows a knocker its stripped state.
+- With `directory.rooms.allow_without_auth` the directory and summaries are
+  open without a token, to these accounts as to anyone.
+- A bridge's answer to a third-party location lookup is passed on as it is.
+
+Upstream has no such accounts and serves a summary without a token.
+Files: `src/service/users/sso.rs`, `src/api/client/directory.rs`,
+`src/api/client/room/summary.rs`, `src/service/rooms/spaces/mod.rs`,
+`src/api/federation/publicrooms.rs`, `src/core/config/{mod.rs,directory.rs}`,
+`tuwunel-example.toml`, `docs/authentication/providers.md`; tests in
+`src/main/tests/sso_registration_rules/room_visibility.rs`,
+`src/service/rooms/spaces/tests.rs`, `src/main/tests/smoke.rs` and
+`src/main/tests/federation_lookup_response_limits.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every

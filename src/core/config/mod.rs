@@ -2057,7 +2057,15 @@ pub struct IdentityProvider {
 	/// joins only rooms it is invited to (its rules' rooms invite it first,
 	/// whatever their join rule), creates no rooms or room aliases, upgrades
 	/// no rooms, invites no one (third-party invites included), and finds in
-	/// the user directory only people it shares a room with. Admins still join
+	/// the user directory only people it shares a room with. It is shown only
+	/// the rooms it is joined or invited to: the room directory, a room
+	/// summary and a space hierarchy describe no other room to it, public or
+	/// not. A world-readable room can still be read by its ID, an alias
+	/// still resolves, a space it is in or invited to names its children's
+	/// room IDs, and a room that allows knocks shows a knocker its name, so
+	/// make no room world-readable that it must not read. With
+	/// `directory.rooms.allow_without_auth` the room directory and room
+	/// summaries are open to anyone, this account included. Admins still join
 	/// it to a room by inviting it first, as the admin join API does;
 	/// `force-join-room` is refused. Do not list rooms whose members gain
 	/// privileges by membership; list them in `external_forbidden_rooms`,
@@ -2229,9 +2237,10 @@ pub struct RegistrationRule {
 
 	/// Whether a new account meeting the rule is external: it joins only
 	/// rooms it is invited to, creates no rooms or room aliases, upgrades no
-	/// rooms, invites no one, and finds in the user directory only people it
-	/// shares a room with. The mark is set when the account is created and
-	/// kept; later sign-ins and rule changes neither set nor clear it.
+	/// rooms, invites no one, finds in the user directory only people it
+	/// shares a room with, and is shown only the rooms it is joined or invited
+	/// to. The mark is set when the account is created and kept; later
+	/// sign-ins and rule changes neither set nor clear it.
 	#[serde(default)]
 	pub external: bool,
 }

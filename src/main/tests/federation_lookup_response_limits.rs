@@ -51,7 +51,13 @@ static HIERARCHY_ASKED: AtomicUsize = AtomicUsize::new(0);
 /// a server named twice in `via` once.
 #[test]
 fn oversized_lookup_answers_are_dropped_while_read() -> Result {
-	let options = ["ip_range_denylist=[]", "allow_invalid_tls_certificates=true"];
+	// A room summary is asked for without an account only where the room
+	// directory is.
+	let options = [
+		"ip_range_denylist=[]",
+		"allow_invalid_tls_certificates=true",
+		"directory.rooms.allow_without_auth=true",
+	];
 
 	boot("federation-lookup-response-limits", options, exercise)
 }

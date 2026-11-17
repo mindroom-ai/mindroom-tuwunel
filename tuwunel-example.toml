@@ -1540,6 +1540,9 @@
 
 # Allows client API queries of the public room directory without an
 # access token, exposing it to unauthenticated `/publicRooms` spiders.
+# Room summaries follow it: without it, a summary is refused to a
+# request without an access token, which could otherwise learn a room's
+# name, topic and member count from its ID or alias.
 #
 # reloadable: yes
 #
@@ -2493,7 +2496,15 @@
 # joins only rooms it is invited to (its rules' rooms invite it first,
 # whatever their join rule), creates no rooms or room aliases, upgrades
 # no rooms, invites no one (third-party invites included), and finds in
-# the user directory only people it shares a room with. Admins still join
+# the user directory only people it shares a room with. It is shown only
+# the rooms it is joined or invited to: the room directory, a room
+# summary and a space hierarchy describe no other room to it, public or
+# not. A world-readable room can still be read by its ID, an alias
+# still resolves, a space it is in or invited to names its children's
+# room IDs, and a room that allows knocks shows a knocker its name, so
+# make no room world-readable that it must not read. With
+# `directory.rooms.allow_without_auth` the room directory and room
+# summaries are open to anyone, this account included. Admins still join
 # it to a room by inviting it first, as the admin join API does;
 # `force-join-room` is refused. Do not list rooms whose members gain
 # privileges by membership; list them in `external_forbidden_rooms`,
