@@ -1018,6 +1018,43 @@ external accounts. Files: `src/core/config/{mod.rs,check.rs}`,
 `src/main/tests/sso_registration_rules/{forbidden_rooms.rs,invites.rs}`
 and `src/core/config/tests.rs`.
 
+### External accounts are shown only their rooms
+
+An external account could join no room uninvited, yet was shown every one: the
+room directory listed it each published room with its name, topic, avatar and
+member count, a room summary described any room with a `public` or knock join
+rule, and a space hierarchy walked every such child. A client's room list
+therefore told people outside an organization the names of its rooms.
+`users::external_sees_room` is true unless the account is external and neither
+joined nor invited, and is applied where a room is described to someone not in
+it. The room directory (`get_public_rooms_filtered_helper`, which now takes the
+asking local user) drops the other rooms before a chunk is built, so a search,
+a page and `total_room_count_estimate` treat the directory as holding only the
+account's rooms; a query naming another server returns an empty listing and
+asks nobody. A room summary of another room is refused with `M_FORBIDDEN` "This
+account may see a room only when it is in it or invited to it.", before the
+room's servers are asked. In a space hierarchy no join rule makes a room
+accessible to it (`spaces::is_accessible_child`), so a space it is not in is
+inaccessible and other children are left out. The federation directory routes
+pass no user and are unchanged.
+
+A room summary also took requests without an access token, and answered them
+for any room with a public join rule, by ID or alias, asking other servers
+about remote ones. It now follows the directory: without
+`directory.rooms.allow_without_auth` (off by default) such a request is refused
+with `M_MISSING_TOKEN`.
+
+Not covered: an alias still resolves to its room ID, a room with
+`world_readable` history can be read by that ID by any account, and a room
+that allows knocks shows a knocker its stripped state. Upstream has no such
+accounts and serves a summary without a token.
+Files: `src/service/users/sso.rs`, `src/api/client/directory.rs`,
+`src/api/client/room/summary.rs`, `src/service/rooms/spaces/mod.rs`,
+`src/api/federation/publicrooms.rs`, `src/core/config/{mod.rs,directory.rs}`,
+`tuwunel-example.toml`, `docs/authentication/providers.md`; tests in
+`src/main/tests/sso_registration_rules/room_visibility.rs`,
+`src/service/rooms/spaces/tests.rs` and `src/main/tests/smoke.rs`.
+
 ### Sliding sync receipts and typing only for joined rooms
 
 Simplified sliding sync sent other users' read receipts and typing for every
