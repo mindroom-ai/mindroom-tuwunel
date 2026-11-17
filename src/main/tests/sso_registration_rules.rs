@@ -16,6 +16,8 @@ mod invites;
 mod membership;
 #[path = "client/put.rs"]
 mod put;
+#[path = "sso_registration_rules/room_visibility.rs"]
+mod room_visibility;
 
 use std::{collections::HashMap, net::TcpListener, pin::pin, time::Duration};
 
