@@ -121,9 +121,8 @@ does not contain, in merge order (#15 to #171), with the v1.9.3 and 2026-10-06
 upstream main rebase records after #64, the v1.9.4 record after #105, the
 2026-11-08 upstream main record after #156, and then the two delayed-event
 commits and this rebase's documentation last. No upstream backports are
-carried. See the [current ownership and rebase
-procedure](docs/rebase-v2.0.0-2026-11-17.md). Earlier rebase records remain
-historical snapshots.
+carried. The [v2.0.0 rebase record](docs/rebase-v2.0.0-2026-11-17.md)
+describes this rebase. Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
 
@@ -1830,10 +1829,10 @@ Behavior:
   (`a3feae1a2`) unchanged; upstream CI floats `nightly`. The locked Fenix
   formatter in `flake.lock` (nightly-2026-08-05) reports fourteen upstream
   files and `nightly-2026-10-04` one, so the development shell's `cargo fmt`
+  must not be used to reformat. Keep the two CI formatter commands aligned.
 - Frees about 30 GB on the GitHub runner before building (preinstalled .NET,
   Android, GHC and CodeQL), because the v2.0.0 debug test build and the
   release build together no longer fit in its free disk.
-  must not be used to reformat. Keep the two CI formatter commands aligned.
 - Runs tests with `TMPDIR` set to the CI runner's temporary directory. This
   environment setting remains in the CI owner after dropping the full-state
   sync fix now supplied by upstream.

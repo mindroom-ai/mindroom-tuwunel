@@ -19,14 +19,20 @@ before the replay. Both reviewers then reviewed the replay and this record
 and approved; what they found is corrected in this record's text, and one
 email-pusher point is listed under "Points not changed here".
 
-The old fork tip is preserved locally as
-`backup/main-b36477915-before-v2.0.0-20261117`. No upstream commit or
+The fork main that this branch replaces, `8923561c8` (`v1.9.4-mindroom.49`),
+is preserved on origin as `backup/main-8923561c8-before-v2.0.0-20261117`.
+The rebase started from `b36477915` (`v1.9.4-mindroom.48`), preserved locally
+as `backup/main-b36477915-before-v2.0.0-20261117`. No upstream commit or
 published release tag is rewritten. The workspace version is now `2.0.0`, so
 the release tooling previews `v2.0.0-mindroom.1`.
 
 The result is 104 commits on `v2.0.0`: 100 of the 102 fork commits carried
 over, #156 reduced to what upstream lacks, #131 dropped, two new commits for
 delayed events, and this record.
+
+Two commits follow the record. One frees disk on the GitHub runner, because
+the PR's first CI run ran out of space in the release build after its tests
+passed. The other corrects this record after a final review by Fable 5.2.
 
 ## What upstream changed
 
@@ -78,8 +84,11 @@ Everything it pinned still holds (restarts postpone the leave, it is sent once
 they stop, another user's send is 404, cancel, send at once, an oversized
 event, a suspended sender) except three policies:
 
-1. Any event can be delayed, where the fork refused all but
-   `org.matrix.msc3401.call.member` with 403.
+1. Any event can be delayed. The fork refused a delayed `/state` event other
+   than `org.matrix.msc3401.call.member` with 403, and ignored the delay on
+   `/send`, sending the message at once. With the scope commit a delayed
+   `/send` now answers 403 instead, a behaviour change for a client that
+   asked for a delayed message.
 2. A restart after the leave was sent answers 409 `M_UNKNOWN`, where the fork
    answered 404 `M_NOT_FOUND`.
 3. A restart after a cancel answers 409 `M_UNKNOWN`, where the fork answered
