@@ -1858,6 +1858,13 @@ delayed events limited to the sender's own MatrixRTC call leave
 answered as missing on the unstable MSC4140 paths
 (`delayed_finished_not_found.rs`).
 Stream classification also has unit tests in `src/service/pusher/tests.rs`.
+Watch probes in service tests (`poll_once` in `src/service/test_utils.rs`)
+poll outside tokio's cooperative budget. With the budget spent, a tokio
+watch returns `Pending` without registering the probe's waker, and the
+runtime wakes that waker at its next yield, which upstream's
+`accepting_an_invite_installs_state_before_publishing_the_join` took for an
+early state write. The fork's extra cached reads on create, join and invite
+(#162) made that budget run out in about 2% of runs.
 
 The v1.9.3 rebase adds pins for its semantic overlaps:
 `uiaa_sso_policy.rs` (the advertised UIAA flows per account origin and
