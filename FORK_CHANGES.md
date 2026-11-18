@@ -1592,6 +1592,9 @@ Behavior:
   (`a3feae1a2`) unchanged; upstream CI floats `nightly`. The locked Fenix
   formatter in `flake.lock` (nightly-2026-08-05) reports fourteen upstream
   files and `nightly-2026-10-04` one, so the development shell's `cargo fmt`
+- Frees about 30 GB on the GitHub runner before building (preinstalled .NET,
+  Android, GHC and CodeQL), because the v2.0.0 debug test build and the
+  release build together no longer fit in its free disk.
   must not be used to reformat. Keep the two CI formatter commands aligned.
 - Runs tests with `TMPDIR` set to the CI runner's temporary directory. This
   environment setting remains in the CI owner after dropping the full-state
