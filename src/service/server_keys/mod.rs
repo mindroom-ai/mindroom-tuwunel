@@ -123,25 +123,35 @@ pub fn active_verify_key(&self) -> (&ServerSigningKeyId, &VerifyKey) {
 		.expect("missing active verify_key")
 }
 
-/// Merges a fetched signing-key document into the local cache.
+/// Merges a fetched signing-key document into the local cache and returns the
+/// keys stored for its server afterwards.
 ///
 /// Only current and old verify-key maps are retained from the incoming document;
 /// its signatures and validity timestamp are not preserved. When the merged
-/// document would exceed [`MAX_STORED_KEYS_BYTES`], only the fetched maps are
-/// kept, and a fetched document over that size is not stored. The read, merge,
-/// and write sequence is not atomic.
+/// document would exceed [`MAX_STORED_KEYS_BYTES`], the stored keys are dropped
+/// except those in `wanted`, the keys the caller is acquiring, so a later
+/// document of one acquisition keeps the keys an earlier one brought. When
+/// that is still too large, only the fetched maps are kept, and a fetched
+/// document over that size is not stored. The read, merge, and write sequence
+/// is not atomic.
 #[implement(Service)]
-async fn add_signing_keys(&self, new_keys: ServerSigningKeys) {
+async fn add_signing_keys(
+	&self,
+	new_keys: ServerSigningKeys,
+	wanted: &[OwnedServerSigningKeyId],
+) -> ServerSigningKeys {
 	let origin = &new_keys.server_name;
+	let stored = async || {
+		// Just insert "now", it doesn't matter
+		self.signing_keys_for(origin)
+			.await
+			.unwrap_or_else(|_| {
+				ServerSigningKeys::new(origin.to_owned(), MilliSecondsSinceUnixEpoch::now())
+			})
+	};
 
 	// (timo) Not atomic, but this is not critical
-	let mut keys = self
-		.signing_keys_for(origin)
-		.await
-		.unwrap_or_else(|_| {
-			// Just insert "now", it doesn't matter
-			ServerSigningKeys::new(origin.to_owned(), MilliSecondsSinceUnixEpoch::now())
-		});
+	let mut keys = stored().await;
 
 	keys.verify_keys
 		.extend(new_keys.verify_keys.clone());
@@ -150,14 +160,28 @@ async fn add_signing_keys(&self, new_keys: ServerSigningKeys) {
 
 	let mut json = serde_json::to_vec(&keys).expect("signing keys should serialize");
 	if json.len() > MAX_STORED_KEYS_BYTES {
+		keys.verify_keys.retain(|key_id, _| {
+			new_keys.verify_keys.contains_key(key_id) || wanted.contains(key_id)
+		});
+		keys.old_verify_keys.retain(|key_id, _| {
+			new_keys.old_verify_keys.contains_key(key_id) || wanted.contains(key_id)
+		});
+		json = serde_json::to_vec(&keys).expect("signing keys should serialize");
+	}
+
+	if json.len() > MAX_STORED_KEYS_BYTES {
 		keys.verify_keys = new_keys.verify_keys;
 		keys.old_verify_keys = new_keys.old_verify_keys;
 		json = serde_json::to_vec(&keys).expect("signing keys should serialize");
 	}
 
-	if json.len() <= MAX_STORED_KEYS_BYTES {
-		self.db.server_signingkeys.insert(origin, json);
+	if json.len() > MAX_STORED_KEYS_BYTES {
+		return stored().await;
 	}
+
+	self.db.server_signingkeys.insert(origin, json);
+
+	keys
 }
 
 /// Checks whether every signature key required by an event is cached.

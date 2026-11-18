@@ -133,12 +133,19 @@ from a notary, was merged into the one row stored for that server, and nothing
 removed keys from it. A server that answered each fetch with new key ids grew
 that row without bound, and every key lookup for the server parsed the whole
 row, including the lookup for each incoming federation request it signs. A
-merge that would make the row larger than 64 KiB now keeps only the fetched
-keys, and a fetched document over 64 KiB on its own is not stored. A stored row
-over 64 KiB, left from before this change, is treated as absent: lookups do not
-parse it, and the next fetch for the server replaces it. Servers publish a few
-keys in a few hundred bytes. Upstream has the same bug. Files:
-`src/service/server_keys/mod.rs`; test in `src/service/server_keys/tests.rs`.
+merge that would make the row larger than 64 KiB now keeps the fetched keys and
+the stored keys the running acquisition asked for, so two notary documents of
+one batch, each with a requested retired key, keep both (#174). If that is
+still over 64 KiB, only the fetched keys are kept, and a fetched document over
+64 KiB on its own is not stored. The acquisition counts a key as found only
+when the stored row holds it, so a key dropped this way is still missing and
+is asked for from the next source. A stored row over 64 KiB, left from before
+this change, is treated as absent: lookups do not parse it, and the next fetch
+for the server replaces it. Servers publish a few keys in a few hundred bytes.
+Upstream has the same bug. Files:
+`src/service/server_keys/{mod.rs,acquire.rs,get.rs}`; tests in
+`src/service/server_keys/tests.rs` and
+`src/main/tests/federation_notary_key_batch.rs`.
 
 ### Lookups on a named server read small answers
 

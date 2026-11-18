@@ -105,10 +105,15 @@ where
 		return;
 	}
 
+	// Storing a later document keeps these, so one acquisition keeps every key it fetched.
+	let wanted = missing.clone();
+
 	info!("{missing_keys} keys for {missing_servers} servers will be acquired");
 
 	if notary_first_always || notary_first_on_join {
-		missing = self.acquire_notary(missing.into_iter()).await;
+		missing = self
+			.acquire_notary(missing.into_iter(), &wanted)
+			.await;
 		missing_keys = keys_count(&missing);
 		missing_servers = missing.len();
 		if missing_keys == 0 {
@@ -121,7 +126,9 @@ where
 	}
 
 	if !notary_only {
-		missing = self.acquire_origins(missing.into_iter()).await;
+		missing = self
+			.acquire_origins(missing.into_iter(), &wanted)
+			.await;
 		missing_keys = keys_count(&missing);
 		missing_servers = missing.len();
 		if missing_keys == 0 {
@@ -132,7 +139,9 @@ where
 	}
 
 	if !notary_first_always && !notary_first_on_join {
-		missing = self.acquire_notary(missing.into_iter()).await;
+		missing = self
+			.acquire_notary(missing.into_iter(), &wanted)
+			.await;
 		missing_keys = keys_count(&missing);
 		missing_servers = missing.len();
 		if missing_keys == 0 {
@@ -178,7 +187,7 @@ where
 }
 
 #[implement(super::Service)]
-async fn acquire_origins<I>(&self, batch: I) -> Batch
+async fn acquire_origins<I>(&self, batch: I, wanted: &Batch) -> Batch
 where
 	I: Iterator<Item = (OwnedServerName, Vec<OwnedServerSigningKeyId>)> + Send,
 {
@@ -187,7 +196,7 @@ where
 		.expect("timeout overflows");
 
 	let mut requests: FuturesUnordered<_> = batch
-		.map(|(origin, key_ids)| self.acquire_origin(origin, key_ids, timeout))
+		.map(|(origin, key_ids)| self.acquire_origin(origin, key_ids, wanted, timeout))
 		.collect();
 
 	let mut missing = Batch::new();
@@ -205,6 +214,7 @@ async fn acquire_origin(
 	&self,
 	origin: OwnedServerName,
 	mut key_ids: Vec<OwnedServerSigningKeyId>,
+	wanted: &Batch,
 	timeout: Instant,
 ) -> (OwnedServerName, Vec<OwnedServerSigningKeyId>) {
 	match timeout_at(timeout, self.server_request(&origin)).await {
@@ -218,8 +228,9 @@ async fn acquire_origin(
 				"received server_keys"
 			);
 
-			self.add_signing_keys(server_keys.clone()).await;
-			key_ids.retain(|key_id| !key_exists(&server_keys, key_id));
+			let wanted = wanted_from(wanted, &origin);
+			let stored = self.add_signing_keys(server_keys, wanted).await;
+			key_ids = lacking(wanted, &stored);
 		},
 	}
 
@@ -227,7 +238,7 @@ async fn acquire_origin(
 }
 
 #[implement(super::Service)]
-async fn acquire_notary<I>(&self, batch: I) -> Batch
+async fn acquire_notary<I>(&self, batch: I, wanted: &Batch) -> Batch
 where
 	I: Iterator<Item = (OwnedServerName, Vec<OwnedServerSigningKeyId>)> + Send,
 {
@@ -255,7 +266,7 @@ where
 			| Err(e) => error!("Failed to contact notary {notary:?}: {e}"),
 			| Ok(results) =>
 				for server_keys in results {
-					self.acquire_notary_result(&mut missing, server_keys)
+					self.acquire_notary_result(&mut missing, wanted, server_keys)
 						.await;
 				},
 		}
@@ -264,17 +275,46 @@ where
 	missing
 }
 
+/// Stores one notary document and recounts its server's missing keys.
+///
+/// The count reads the stored row, not the document: storing it may drop keys
+/// when the row would grow too large, and a dropped key is still missing.
 #[implement(super::Service)]
-async fn acquire_notary_result(&self, missing: &mut Batch, server_keys: ServerSigningKeys) {
-	let server = &server_keys.server_name;
-	self.add_signing_keys(server_keys.clone()).await;
+async fn acquire_notary_result(
+	&self,
+	missing: &mut Batch,
+	wanted: &Batch,
+	server_keys: ServerSigningKeys,
+) {
+	let server = server_keys.server_name.clone();
+	let wanted = wanted_from(wanted, &server);
+	let stored = self.add_signing_keys(server_keys, wanted).await;
+	let key_ids = lacking(wanted, &stored);
 
-	if let Some(key_ids) = missing.get_mut(server) {
-		key_ids.retain(|key_id| !key_exists(&server_keys, key_id));
-		if key_ids.is_empty() {
-			missing.remove(server);
-		}
+	if key_ids.is_empty() {
+		missing.remove(&server);
+	} else {
+		missing.insert(server, key_ids);
 	}
+}
+
+fn wanted_from<'a>(wanted: &'a Batch, server: &ServerName) -> &'a [OwnedServerSigningKeyId] {
+	wanted
+		.get(server)
+		.map(Vec::as_slice)
+		.unwrap_or_default()
+}
+
+/// The wanted keys the stored row lacks.
+fn lacking(
+	wanted: &[OwnedServerSigningKeyId],
+	stored: &ServerSigningKeys,
+) -> Vec<OwnedServerSigningKeyId> {
+	wanted
+		.iter()
+		.filter(|key_id| !key_exists(stored, key_id))
+		.cloned()
+		.collect()
 }
 
 fn keys_count(batch: &Batch) -> usize {
