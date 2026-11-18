@@ -2,13 +2,13 @@
 
 This document describes the current MindRoom fork behavior on top of upstream
 `tuwunel`. The fork is rebased directly onto upstream commits; see
-`docs/rebase-*.md` for the per-rebase log. As of the 2026-11-08 rebase the base
-is upstream `main` at `8c6c4a210`, 294 commits past the `v1.9.4` release
-(`f473d9a4a`). Earlier changes merged upstream and dropped from the fork
-include the room-creation default power-level override and the SSO grant-cookie
-path hardening (2026-07-07 rebase; the cookie's name and path now differ
-again), and the drained/zero one-time-key counts fix and public MatrixRTC
-transport discovery (2026-07-21 rebase, upstream
+`docs/rebase-*.md` for the per-rebase log. As of the 2026-11-17 rebase the base
+is the upstream `v2.0.0` release (`a3feae1a2`), 121 commits past the previous
+base, upstream `main` at `8c6c4a210`. Earlier changes merged upstream and
+dropped from the fork include the room-creation default power-level override
+and the SSO grant-cookie path hardening (2026-07-07 rebase; the cookie's name
+and path now differ again), and the drained/zero one-time-key counts fix and
+public MatrixRTC transport discovery (2026-07-21 rebase, upstream
 `164b8da61`/`007033cd5` and `a1776c368`). The Sliding Sync `num_live`
 correction was dropped at v1.9.0 because upstream now contains the same
 implementation and tests (`6acc3a7d1`, `942dd66e3`, and `a508c7331`).
@@ -87,6 +87,24 @@ top-level, and `bundle_edit_relations` is now `rooms.relations.bundle_edits`,
 still on by default in the fork.
 See the [upstream main rebase record](docs/rebase-upstream-main-2026-11-08.md).
 
+At v2.0.0, upstream implements delayed events (MSC4140) in full: any event can
+be delayed, scheduled events are stored and survive a restart, and finished
+ones are kept for lookup. The fork's delayed MatrixRTC call leave (#131), which
+upstream first took as it was, is dropped with its routes, in-memory service
+and entry. Two of its policies stay, as small commits on upstream's
+implementation: a client can delay only its own call leave, and on the
+unstable paths an action that conflicts with a finished delayed event answers
+404, which MatrixRTC clients rely on. Upstream also binds the UIAA SSO stage
+to a provider the account's sessions link (`c045fae4d`), so #156 keeps only
+what upstream lacks: a provider is linked by a finished sign-in, and one whose
+ID a sign-in records exactly is preferred to one matched by brand. The other
+fork commits are carried, 27 of them and the CI owner adapted to upstream's
+changes: the scheme-aware `parse_json`, the notification dispatch helpers of
+the new email pusher, account creation in `write_credentials` and
+`create_account`, sender-private unsigned fields, the admin crate's feature
+table, and the CI formatter pin.
+See the [v2.0.0 rebase record](docs/rebase-v2.0.0-2026-11-17.md).
+
 ## How To Inspect
 - Fork commits: `git log --reverse --oneline <upstream-base>..HEAD`
 - Files changed in the fork: `git diff --stat <upstream-base>..HEAD`
@@ -99,12 +117,13 @@ verification needs in the test environment instead of carrying extra patches.
 The history keeps the v1.9.1 ownership layout of eight commits (shared test
 infrastructure, five runtime features with their tests and compatibility
 changes, CI, and docs), followed by the squash-merged fork PRs that upstream
-does not contain, in merge order (#15 to #156), with the v1.9.3 and 2026-10-06
-upstream main rebase records after #64, the v1.9.4 record after #105, and this
-rebase's documentation last. No upstream backports are carried. See the
-[current ownership and rebase
-procedure](docs/rebase-upstream-main-2026-11-08.md). Earlier rebase records
-remain historical snapshots.
+does not contain, in merge order (#15 to #171), with the v1.9.3 and 2026-10-06
+upstream main rebase records after #64, the v1.9.4 record after #105, the
+2026-11-08 upstream main record after #156, and then the two delayed-event
+commits and this rebase's documentation last. No upstream backports are
+carried. See the [current ownership and rebase
+procedure](docs/rebase-v2.0.0-2026-11-17.md). Earlier rebase records remain
+historical snapshots.
 
 ## Runtime Changes
 
@@ -1807,11 +1826,11 @@ Behavior:
 - Computes `v<base_version>-mindroom.<n>` tags on `main`, creates/reuses the
   matching GitHub Release, publishes Linux `x86_64`/`aarch64` binaries, and
   dispatches container publication. Runs the fork's own GitHub-hosted checks.
-- Pins CI rustfmt to `nightly-2026-10-04`, which passes upstream `main`
-  (`8c6c4a210`) unchanged; upstream CI floats `nightly`. The locked Fenix
-  formatter in `flake.lock` (nightly-2026-08-05) reports ten upstream files, so
-  the development shell's `cargo fmt` must not be used to reformat. Keep the
-  two CI formatter commands aligned.
+- Pins CI rustfmt to `nightly-2026-11-03`, which passes upstream `v2.0.0`
+  (`a3feae1a2`) unchanged; upstream CI floats `nightly`. The locked Fenix
+  formatter in `flake.lock` (nightly-2026-08-05) reports fourteen upstream
+  files and `nightly-2026-10-04` one, so the development shell's `cargo fmt`
+  must not be used to reformat. Keep the two CI formatter commands aligned.
 - Runs tests with `TMPDIR` set to the CI runner's temporary directory. This
   environment setting remains in the CI owner after dropping the full-state
   sync fix now supplied by upstream.
