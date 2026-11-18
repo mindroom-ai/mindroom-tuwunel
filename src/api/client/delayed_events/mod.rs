@@ -3,6 +3,13 @@
 //! Scheduling applies the policy an ordinary send would at the time of the
 //! request, then checks the event against room auth without storing it. The
 //! service sends it once due through the ordinary append path.
+//!
+//! MindRoom: a client can delay only its own MatrixRTC call leave, the one
+//! delayed event its clients send. The send path rechecks suspension alone, so
+//! any other event would skip what a send at that time is held to: the
+//! account's lock, a deactivation that raced the scheduling, and the state
+//! route's checks on memberships and aliases. A leave that skips them only
+//! takes its sender out of a call, and its record holds no content.
 
 mod delay_query;
 mod get_delayed_event;
@@ -23,7 +30,7 @@ use ruma::{
 		AnyMessageLikeEventContent, AnyStateEventContent, MessageLikeEventType, StateEventType,
 		TimelineEventType,
 	},
-	serde::Raw,
+	serde::{JsonObject, Raw},
 };
 use serde_json::{from_str, value::RawValue as RawJsonValue};
 use tuwunel_core::{
@@ -49,6 +56,9 @@ use crate::{
 	send::{check_send_content, check_send_policy},
 	state::{allowed_to_send_state_event, check_member_content_size},
 };
+
+/// The type of the only event a client can delay, a MatrixRTC call membership.
+const CALL_MEMBER: &str = "org.matrix.msc3401.call.member";
 
 struct Schedule<'a> {
 	sender: &'a UserId,
@@ -78,6 +88,8 @@ enum Kind<'a> {
 
 /// Schedules an event and returns its `delay_id`.
 ///
+/// Anything but the sender's own call leave is refused first.
+///
 /// A retried transaction returns the `delay_id` it first produced before the
 /// sender policy runs, so a policy change since cannot fail it. The user's lock
 /// is held from the capacity check through the insert, and the room's lock
@@ -97,6 +109,10 @@ async fn schedule(
 		stable,
 	}: Schedule<'_>,
 ) -> Result<DelayId> {
+	if !kind.is_own_call_leave(sender) {
+		return Err!(Request(Forbidden("Only the sender's own call leave can be delayed.")));
+	}
+
 	let limits = services
 		.delayed_events
 		.limits()
@@ -205,6 +221,34 @@ fn check_delay(delay: Duration, limits: Limits, stable: bool) -> Result<u64> {
 		| true => Err!(Request(DelayTooLarge("The delay exceeds the maximum allowed."))),
 		| false => Err!(Request(UnstableDelayTooLarge("The delay exceeds the maximum allowed."))),
 	}
+}
+
+/// Whether this is the sender's own call leave, as a MatrixRTC client delays
+/// it: a call membership state event with empty content, in the sender's own
+/// slot.
+///
+/// A slot's state key is the sender's user ID, an underscore and the rest
+/// (matrix-js-sdk appends the device ID and the call). matrix-js-sdk puts
+/// another underscore in front, except in the MSC3757 and MSC3779 room
+/// versions, whose auth rules keep such a key for that user. Room auth does
+/// not tie the key with the underscore in front to its sender, so it is tied
+/// here.
+#[implement(Kind, generics = "<'a>", params = "<'a>")]
+fn is_own_call_leave(self, sender: &UserId) -> bool {
+	let Self::State { event_type, state_key, content } = self else {
+		return false;
+	};
+
+	let own_slot = state_key
+		.strip_prefix('_')
+		.unwrap_or(state_key)
+		.strip_prefix(sender.as_str())
+		.is_some_and(|rest| rest.starts_with('_'));
+
+	let leave =
+		from_str::<JsonObject>(content.json().get()).is_ok_and(|content| content.is_empty());
+
+	event_type.to_cow_str() == CALL_MEMBER && own_slot && leave
 }
 
 #[implement(Kind, generics = "<'a>", params = "<'a>")]

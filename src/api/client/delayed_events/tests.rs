@@ -1,9 +1,10 @@
 use std::time::Duration;
 
-use ruma::api::error::ErrorKind;
+use ruma::{api::error::ErrorKind, events::StateEventType, user_id};
+use serde_json::from_str;
 use tuwunel_service::delayed_events::Limits;
 
-use super::{check_delay, delay_query::parse_delay};
+use super::{CALL_MEMBER, Kind, check_delay, delay_query::parse_delay};
 
 const LIMITS: Limits = Limits { max_delay_ms: 1_000, max_scheduled: 1 };
 
@@ -63,4 +64,43 @@ fn delay_over_limit_uses_the_path_dialect() {
 
 	assert_eq!(stable.kind(), ErrorKind::DelayTooLarge);
 	assert_eq!(unstable.kind(), ErrorKind::UnstableDelayTooLarge);
+}
+
+/// MindRoom: of the state events a client names, only the sender's own call
+/// leave can be delayed: a call membership with empty content, under a state
+/// key in one of the forms matrix-js-sdk gives the sender's slot.
+#[test]
+fn only_own_call_leave_is_delayed() {
+	let sender = user_id!("@alice:example.org");
+	let call_member = StateEventType::from(CALL_MEMBER);
+	let delayed = |event_type: &StateEventType, state_key: &str, content: &str| {
+		let content = from_str(content).expect("JSON content");
+
+		Kind::State { event_type, state_key, content: &content }.is_own_call_leave(sender)
+	};
+
+	let own = [
+		"_@alice:example.org_DEVICE_m.call",
+		"@alice:example.org_DEVICE_m.call",
+		"_@alice:example.org_DEVICE",
+	];
+
+	for state_key in own {
+		assert!(delayed(&call_member, state_key, "{}"), "{state_key}");
+		assert!(!delayed(&call_member, state_key, r#"{"application":"m.call"}"#), "{state_key}");
+		assert!(!delayed(&StateEventType::RoomTopic, state_key, "{}"), "{state_key}");
+	}
+
+	let foreign = [
+		"",
+		"@alice:example.org",
+		"_@alice:example.org",
+		"__@alice:example.org_DEVICE",
+		"_@alice:example.org2_DEVICE",
+		"_@bob:example.org_DEVICE_m.call",
+	];
+
+	for state_key in foreign {
+		assert!(!delayed(&call_member, state_key, "{}"), "{state_key}");
+	}
 }

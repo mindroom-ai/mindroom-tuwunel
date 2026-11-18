@@ -29,13 +29,13 @@
 
 | ✅ `yes` | 🟨 `part` | 🟥 `no` | ⬛ `n/a` | total |
 |---:|---:|---:|---:|---:|
-| 290 | 62 | 446 | 312 | 1110 |
+| 289 | 63 | 446 | 312 | 1110 |
 
 ### Status by inventory bucket
 
 | Inv | yes | part | no | n/a | total |
 |---|---|---|---|---|---|
-| merged | 189 | 22 | 13 | 57 | 281 |
+| merged | 188 | 23 | 13 | 57 | 281 |
 | open | 65 | 25 | 347 | 181 | 618 |
 | closed | 36 | 15 | 86 | 74 | 211 |
 
@@ -99,7 +99,7 @@ in the [Out of scope](#out-of-scope) section.
 | MSC4156 | ✅ ● | 100/100 | Migrate `server_name` to `via` | via parameter handled via Ruma |
 | MSC4151 | ✅ ● | 100/100 | Reporting rooms (Client-Server API) | POST /rooms/{roomId}/report implemented and routed |
 | MSC4143 | 🟨 ◐ | 70/90 | MatrixRTC | Discovery, upgrade slot copy, delayed leave; no sticky member or transport auth |
-| MSC4140 | ✅ ● | 80/80 | Cancellable delayed events | Full lifecycle, finalised records, sender-only delay_id; no rate limits |
+| MSC4140 | 🟨 ● | 50/80 | Cancellable delayed events | Only the sender's own call leave (an empty org.matrix.msc3401.call.member state event in the sender's slot) can be delayed, the rest is refused; full lifecycle, finalised records, sender-only delay_id; no rate limits |
 | MSC4138 | ✅ ● | 100/100 | Update allowed HTTP methods in CORS responses | CORS METHODS list includes HEAD and PATCH; excludes CONNECT/TRACE |
 | MSC4133 | ✅ ● | 85/95 | Extending User Profile API with Custom Key:Value Pairs | endpoints + caps/errcodes; unset legacy 200 omit by choice, 404 key-scoped |
 | MSC4127 | 🟥 ● | 0/0 | Removal of query string auth | src/api/router/auth.rs:78 still falls back to request.query.access_token |

@@ -1430,6 +1430,74 @@ Behavior:
 - The appservice filtering and the public-room and shared-room rules are
   unchanged.
 
+### Only a MatrixRTC call leave can be delayed
+
+Upstream's MSC4140 lets a client delay any event. The fork lets a client delay
+only its own MatrixRTC call leave: an `org.matrix.msc3401.call.member` state
+event with empty content (`{}`), under a state key that names the sender's own
+call slot. That key is the sender's user ID, an underscore and the rest, with
+or without one more underscore in front, as in
+`_@alice:example.org_DEVICE_m.call`. Every other delayed event is refused with
+403 `M_FORBIDDEN` before anything else is read, whether it comes with the
+`org.matrix.msc4140.delay` query on `/send` or `/state` or through the
+`delayed_event` route, stable or unstable: a message, any other state event, a
+call membership with content, such as a join, and a leave under any other
+state key, such as another user's slot.
+
+A MatrixRTC client schedules its own call leave and keeps postponing it, and
+that is the only delayed event MindRoom's clients send: matrix-js-sdk 41.7.0,
+which MindRoom Chat pins, delays that state event from its `MembershipManager`
+(`clientSendDelayedDisconnectMembership`), with `{}` as its content and its
+own slot as its state key. Its `StickyEventMembershipManager` delays an
+`org.matrix.msc4143.rtc.member` message instead, but only for a client that
+opts in to MSC4354 sticky events, which MindRoom Chat does not and this server
+does not have. matrix-rust-sdk delays only what a widget such as Element Call
+asks it to. ruma reads `m.call.member` as another name of the allowed type, so
+a leave that names it is delayed, and sent, as an
+`org.matrix.msc3401.call.member` event.
+
+A delayed event is sent later, without the request an ordinary send passes
+through, and upstream's send path rechecks suspension alone. For other events
+that leaves four gaps:
+
+- A locked account's delayed message or state event is still sent after the
+  lock.
+- A scheduling request that authenticated before a deactivation can store its
+  event after the deactivation removed the account's scheduled events.
+- The state route's checks, such as the recipient's invite preferences for a
+  membership and alias resolution for a canonical alias, run when the event
+  is scheduled, not when it is sent.
+- The record kept of a sent delayed event serves the original content to its
+  sender after the event was redacted or purged.
+
+The fork does not close these gaps: the send path, its checks and their order
+are upstream's. It limits what can pass through them. The type alone is not
+enough for that: a delayed call join, or any other content under that type,
+would still be sent after a lock and read back from its record, and room auth
+does not tie a state key with an underscore in front to its sender, so a
+delayed leave could empty another user's slot. With its own call leave alone,
+all that a locked or deactivated account can still have sent takes one of its
+own devices out of a call, and the record kept of it holds empty content. Room auth still decides, when the leave is scheduled and when
+it is sent, whether the sender may write that state. Upstream's limits,
+persistence, management routes and finalised records are unchanged, and the
+feature flags and capabilities stay advertised. File:
+`src/api/client/delayed_events/mod.rs`; tests in
+`src/mindroom-tests/tests/delayed_call_membership.rs` and, for the forms of
+the state key, `only_own_call_leave_is_delayed` in
+`src/api/client/delayed_events/tests.rs`.
+
+Upstream's `src/main/tests/delayed_events.rs` and the delayed case of
+`src/main/tests/profile_legacy_member.rs` delayed messages, topics and room
+memberships. The cases about the routes now delay a call leave and keep what
+they check. Three cases are about what the service does with an event the
+routes now refuse: an empty-key state event that falls due, a send that is
+stored before a later step fails, and a scheduled event that survives a
+restart. They schedule upstream's event in the service, which is not held to
+this scope. `every_form_schedules` expects the refusal of a message, of a call
+membership with content and of one outside the sender's slot, and the delayed
+room membership is refused too: upstream's check that it is held to the member
+limits when scheduled cannot be reached by a client any more.
+
 ### A conflict with a finished delayed event is 404 on the unstable MSC4140 paths
 
 Upstream keeps a delayed event after it is sent, cancelled or failed, and
@@ -1763,9 +1831,11 @@ OpenID tokens with the option on and off (`openid_audience.rs`,
 `openid_audience_disabled.rs`), OpenID userinfo room membership
 (`openid_room_membership.rs`), deactivated accounts left out of the user
 directory with `show_all_local_users_in_user_directory` on and off
-(`user_directory_deactivated.rs`, `user_directory_deactivated_rooms.rs`), and
-conflicts with a finished delayed event answered as missing on the unstable
-MSC4140 paths (`delayed_finished_not_found.rs`).
+(`user_directory_deactivated.rs`, `user_directory_deactivated_rooms.rs`),
+delayed events limited to the sender's own MatrixRTC call leave
+(`delayed_call_membership.rs`), and conflicts with a finished delayed event
+answered as missing on the unstable MSC4140 paths
+(`delayed_finished_not_found.rs`).
 Stream classification also has unit tests in `src/service/pusher/tests.rs`.
 
 The v1.9.3 rebase adds pins for its semantic overlaps:

@@ -452,6 +452,11 @@ the server sends the leave, so the caller drops out of the call instead of
 lingering in it. lk-jwt-service can postpone and send that leave on a caller's
 behalf.
 
+Only that leave can be delayed: an `org.matrix.msc3401.call.member` state
+event with empty content, under the caller's own state key (their user ID, an
+underscore, and their device and call, with or without one more underscore in
+front). A request to delay any other event is refused with `M_FORBIDDEN`.
+
 The limits are in the `[global.rooms.delayed_events]` section of your
 `tuwunel.toml` configuration file.
 
