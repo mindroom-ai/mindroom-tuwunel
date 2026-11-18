@@ -490,8 +490,10 @@ fn participant(&self, user_id: &UserId, member_id: &str) -> (String, String) {
 #[tracing::instrument(level = "debug", skip(self))]
 async fn schedule(&self, member: &str) -> Result<String> {
 	let room_id = self.room_id;
+	// MindRoom fork: delayed call leaves must use the sender's own slot state key.
+	let state_key = format!("_{}_{member}", self.owner_id);
 	let path = format!(
-		"rooms/{room_id}/state/{CALL_MEMBER}/{member}?org.matrix.msc4140.delay={HOUR_MS}"
+		"rooms/{room_id}/state/{CALL_MEMBER}/{state_key}?org.matrix.msc4140.delay={HOUR_MS}"
 	);
 
 	let response = self
