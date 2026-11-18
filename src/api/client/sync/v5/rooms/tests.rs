@@ -14,7 +14,6 @@ use ruma::{
 	room_id, uint, user_id,
 };
 use tuwunel_matrix::pdu::PduCount;
-use tuwunel_service::sync::REQUIRED_STATE_MAX;
 
 use super::{
 	Candidate, Collected, Connection, ListIds, StateMode, TIMELINE_LIMIT_MAX, UnreadState,
@@ -273,25 +272,35 @@ fn timeline_limit_is_capped() {
 	}
 }
 
+/// A room uses every selector of the lists covering it. The request limits
+/// bound their union, so a selector the first list repeats does not crowd out
+/// one only the second list names.
 #[test]
-fn required_state_is_capped() {
+fn required_state_merges_every_list_selector() {
 	let room_id = room_id!("!room:example.com");
 	let lists: ListIds = ["a", "b"].into_iter().map(ListId::from).collect();
+	let selector = |key: String| (StateEventType::RoomMember, key.into());
 	let mut conn = Connection::default();
 
-	for list in &lists {
-		conn.lists
-			.entry(list.clone())
-			.or_default()
-			.room_details
-			.required_state = (0..REQUIRED_STATE_MAX)
-			.map(|key| (StateEventType::RoomMember, format!("{list}{key}").into()))
-			.collect();
-	}
+	conn.lists
+		.entry(lists[0].clone())
+		.or_default()
+		.room_details
+		.required_state = (0..200)
+		.map(|key| selector(key.to_string()))
+		.collect();
+	conn.lists
+		.entry(lists[1].clone())
+		.or_default()
+		.room_details
+		.required_state = (0..150)
+		.map(|key| selector(key.to_string()))
+		.chain((0..50).map(|key| selector(format!("b{key}"))))
+		.collect();
 
 	let (_, required_state) = merged_room_details(&conn, &lists, room_id);
 
-	assert_eq!(required_state.len(), REQUIRED_STATE_MAX);
+	assert_eq!(required_state.len(), 250);
 }
 
 #[test]

@@ -52,7 +52,7 @@ use tuwunel_matrix::{
 use tuwunel_service::{
 	Services,
 	rooms::short::ShortStateHash,
-	sync::{REQUIRED_STATE_MAX, RequiredState, Room, RoomConfig, UnreadState},
+	sync::{RequiredState, Room, RoomConfig, UnreadState},
 };
 
 use self::{
@@ -373,10 +373,9 @@ pub(super) fn merged_room_details(
 				TIMELINE_LIMIT_MAX,
 			));
 
-			let remaining = REQUIRED_STATE_MAX.saturating_sub(details.1.len());
-			let selectors = config.required_state.iter().take(remaining);
-
-			details.1.extend(selectors.cloned());
+			details
+				.1
+				.extend(config.required_state.iter().cloned());
 
 			details
 		})
