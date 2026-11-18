@@ -7,8 +7,8 @@ use minicbor_serde::{from_slice, to_vec};
 use ruma::{
 	DeviceId, OwnedRoomId, RoomId, UInt, UserId,
 	api::client::sync::sync_events::v5::{
-		ListId, Ranges, Request,
-		request::{self, List, ListConfig, ListFilters},
+		ListId, ListIds, Ranges, Request,
+		request::{self, ExtensionRoomConfig, List, ListConfig, ListFilters},
 	},
 	device_id,
 	directory::RoomTypeFilter,
@@ -22,7 +22,8 @@ use tuwunel_core::{Err, Result, config::Figment};
 use tuwunel_database::{Cbor, deserialize_from_slice};
 
 use super::{
-	Connection, ConnectionId, ConnectionKey, Lists, RequiredState, Room, RoomUpdate,
+	Connection, ConnectionId, ConnectionKey, EXTENSION_ROOMS_MAX, LIST_FILTER_MAX, LIST_ID_MAX,
+	LISTS_MAX, Lists, RANGES_MAX, REQUIRED_STATE_MAX, RequiredState, Room, RoomUpdate,
 	Subscriptions, UnreadState, confirmed_removed, connection_matches, into_connection_key,
 };
 use crate::test_utils::{create_devices, fixture};
@@ -525,6 +526,171 @@ fn update_cache_tracks_subscription_changes() {
 	assert!(!conn.update_cache(&request_with_subscription(room_id, expanded)));
 	assert!(conn.update_cache(&Request::new()));
 	assert!(!conn.update_cache(&Request::new()));
+}
+
+#[test]
+fn update_cache_keeps_only_the_first_required_state_selectors() {
+	let room_id = room_id!("!subscription:example.com");
+	let required_state: Vec<_> = (0..=REQUIRED_STATE_MAX)
+		.map(|key| (StateEventType::RoomMember, key.to_string().into()))
+		.collect();
+
+	let list = list_with_required_state(&[], required_state.clone());
+	let subscription = ListConfig {
+		required_state: required_state.clone(),
+		..Default::default()
+	};
+
+	let mut request = request_with_list(list.clone());
+
+	request.lists.insert("new".into(), list);
+	request.room_subscriptions = [(room_id.to_owned(), subscription)].into();
+
+	let mut conn = Connection::default();
+
+	assert!(conn.update_cache(&request_with_list(List::default())));
+	assert!(conn.update_cache(&request));
+	assert!(!conn.update_cache(&request));
+
+	let configs = conn
+		.lists
+		.values()
+		.map(|list| &list.room_details)
+		.chain(conn.subscriptions.values());
+
+	for config in configs {
+		assert_eq!(config.required_state, &required_state[..REQUIRED_STATE_MAX]);
+	}
+}
+
+#[test]
+fn update_cache_keeps_only_the_first_lists_and_ranges() {
+	let ranges: Vec<_> = (0..)
+		.take(RANGES_MAX + 1)
+		.map(|start| (start, start))
+		.collect();
+
+	let mut request = Request::new();
+
+	request.lists = (0..=LISTS_MAX)
+		.map(|i| (i.to_string().as_str().into(), list_with_ranges(&ranges)))
+		.collect();
+
+	let mut conn = Connection::default();
+
+	assert!(conn.update_cache(&request));
+	assert!(!conn.update_cache(&request));
+	assert_eq!(conn.lists.len(), LISTS_MAX);
+
+	for list in conn.lists.values() {
+		assert_eq!(list.ranges, ranges_from_u64(&ranges[..RANGES_MAX]));
+	}
+}
+
+#[test]
+fn update_cache_keeps_only_the_first_distinct_ranges() {
+	let ranges: Vec<_> = once(0)
+		.chain(0..)
+		.take(RANGES_MAX + 1)
+		.map(|start| (start, start))
+		.collect();
+
+	let request = request_with_list(list_with_ranges(&ranges));
+	let mut conn = Connection::default();
+
+	assert!(conn.update_cache(&request));
+	assert!(!conn.update_cache(&request));
+	assert_cached_ranges(&conn, &ranges[1..]);
+}
+
+#[test]
+fn update_cache_keeps_only_the_first_extension_filters() {
+	let room_id = room_id!("!extension:example.com");
+	let lists: ListIds = (0..=LISTS_MAX)
+		.map(|i| ListId::from(i.to_string().as_str()))
+		.collect();
+	let names: Vec<_> = lists.iter().map(ToString::to_string).collect();
+	let rooms = vec![ExtensionRoomConfig::Room(room_id.to_owned()); EXTENSION_ROOMS_MAX + 1];
+
+	let mut request = Request::new();
+	let extensions = &mut request.extensions;
+
+	extensions.account_data.lists = Some(lists.clone());
+	extensions.account_data.rooms = Some(rooms.clone());
+	extensions.receipts.lists = Some(lists.clone());
+	extensions.receipts.rooms = Some(rooms.clone());
+	extensions.typing.lists = Some(lists.clone());
+	extensions.typing.rooms = Some(rooms.clone());
+	extensions.profiles.lists = Some(lists.clone());
+	extensions.profiles.rooms = Some(rooms.clone());
+	extensions.sticky_events.lists = Some(names.clone());
+	extensions.sticky_events.rooms = Some(rooms.clone());
+
+	let mut conn = Connection::default();
+
+	conn.update_cache(&request);
+
+	let cached = &conn.extensions;
+	assert_eq!(cached.sticky_events.lists.as_deref(), Some(&names[..LISTS_MAX]));
+	assert_eq!(cached.sticky_events.rooms.as_deref(), Some(&rooms[..EXTENSION_ROOMS_MAX]));
+	let filters = [
+		(&cached.account_data.lists, &cached.account_data.rooms),
+		(&cached.receipts.lists, &cached.receipts.rooms),
+		(&cached.typing.lists, &cached.typing.rooms),
+		(&cached.profiles.lists, &cached.profiles.rooms),
+	];
+
+	for (cached_lists, cached_rooms) in filters {
+		assert_eq!(cached_lists.as_deref(), Some(&lists[..LISTS_MAX]));
+		assert_eq!(cached_rooms.as_deref(), Some(&rooms[..EXTENSION_ROOMS_MAX]));
+	}
+}
+
+#[test]
+fn update_cache_ignores_overlong_list_ids() {
+	let kept = ListId::from("k".repeat(LIST_ID_MAX).as_str());
+	let ignored = ListId::from("i".repeat(LIST_ID_MAX + 1).as_str());
+
+	let mut request = Request::new();
+
+	request.lists = [&kept, &ignored]
+		.map(|list_id| (list_id.clone(), List::default()))
+		.into();
+
+	request.extensions.sticky_events.lists = Some(vec![ignored.to_string(), kept.to_string()]);
+	request.extensions.receipts.lists = Some([kept.clone(), ignored].into_iter().collect());
+
+	let mut conn = Connection::default();
+
+	conn.update_cache(&request);
+
+	assert_eq!(conn.lists.keys().collect::<Vec<_>>(), [&kept]);
+	assert_eq!(conn.extensions.sticky_events.lists, Some(vec![kept.to_string()]));
+	assert_eq!(conn.extensions.receipts.lists.as_deref(), Some(&[kept][..]));
+}
+
+#[test]
+fn update_cache_keeps_only_the_first_distinct_list_filter_entries() {
+	let spaces: Vec<OwnedRoomId> = once(0)
+		.chain(0..=LIST_FILTER_MAX)
+		.map(|i| {
+			format!("!space{i}:example.com")
+				.try_into()
+				.expect("room ID must be valid")
+		})
+		.collect();
+
+	let filters = ListFilters {
+		spaces: spaces.clone(),
+		..Default::default()
+	};
+
+	let request = request_with_list(list_with_filters(filters));
+	let mut conn = Connection::default();
+
+	assert!(conn.update_cache(&request));
+	assert!(!conn.update_cache(&request));
+	assert_eq!(cached_filters(&conn).spaces, &spaces[1..=LIST_FILTER_MAX]);
 }
 
 #[test]

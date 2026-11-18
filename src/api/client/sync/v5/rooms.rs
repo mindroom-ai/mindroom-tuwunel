@@ -53,7 +53,7 @@ use tuwunel_matrix::{
 use tuwunel_service::{
 	Services,
 	rooms::short::ShortStateHash,
-	sync::{RequiredState, Room, RoomConfig, UnreadState},
+	sync::{REQUIRED_STATE_MAX, RequiredState, Room, RoomConfig, UnreadState},
 };
 
 use self::{
@@ -454,9 +454,12 @@ pub(super) fn merged_room_details(
 				TIMELINE_LIMIT_MAX,
 			));
 
-			details
-				.1
-				.extend(config.required_state.iter().cloned());
+			for selector in &config.required_state {
+				if details.1.len() == REQUIRED_STATE_MAX {
+					break;
+				}
+				details.1.insert(selector.clone());
+			}
 
 			details
 		})
