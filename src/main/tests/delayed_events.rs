@@ -7,6 +7,14 @@
 //! send, owner checks, finalised records and their replay, the delay ID shown
 //! to the sender alone, limits, deactivation, and a scheduled event surviving
 //! a restart.
+//!
+//! MindRoom: a client can delay only its own MatrixRTC call leave, a call
+//! membership with empty content in the sender's slot. The cases about the
+//! routes delay that leave instead of a message, a topic or a room membership,
+//! and keep what they check; `every_form_schedules` expects the refusal of the
+//! rest. The cases about what the service does with an event the routes now
+//! refuse (`empty_key_query_fires`, `stored_send_stands` and the restart)
+//! schedule upstream's event in the service, which is not held to that scope.
 
 use std::{
 	env::{current_exe, var},
@@ -18,17 +26,14 @@ use std::{
 
 use futures::{StreamExt, future::join3};
 use reqwest::{Method, Response, StatusCode, header::RETRY_AFTER};
-use serde_json::{Value, json};
+use serde_json::{Value, from_value, json};
 use tokio::time::{sleep, timeout};
 use tuwunel::Args;
 use tuwunel_core::{
-	Err, Result, err, implement, is_equal_to,
+	Err, Result, err, implement,
 	ruma::{
 		OwnedRoomId, RoomAliasId, RoomId, UserId,
-		events::{
-			StateEventType,
-			room::{member::RoomMemberEventContent, topic::RoomTopicEventContent},
-		},
+		events::{StateEventType, room::topic::RoomTopicEventContent},
 	},
 	utils::{BoolExt, stream::ReadyExt, time::now_millis},
 };
@@ -124,7 +129,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	stored_send_stands(&alice, &room).await?;
 	refused_before_storage(&alice, &bob).await?;
 	room_auth_checked_at_schedule(&bob, &room).await?;
-	delay_id_reaches_only_its_sender(services, &alice, &bob, &alice_id).await?;
+	delay_id_reaches_only_its_sender(services, &alice, &bob).await?;
 	deactivation_removes_scheduled(services, &bob, &bob_id).await
 }
 
@@ -149,15 +154,20 @@ async fn discovery_advertised(alice: &Client<'_>) -> Result {
 	Ok(())
 }
 
+/// MindRoom: the query is refused, and the service schedules the same topic.
 async fn empty_key_query_fires(services: &Services, alice: &Client<'_>, room: &RoomId) -> Result {
 	let delay = 300;
 	let path = format!("rooms/{room}/state/m.room.topic?org.matrix.msc4140.delay={delay}");
 	let scheduled_at = now_millis();
-	let reply = alice
-		.put_json(&alice.url(&path), &json!({ "topic": "later" }))
+	let content = json!({ "topic": "later" });
+	let response = alice
+		.request(Method::PUT, &alice.url(&path), &content)
 		.await?;
 
-	field(&reply, "delay_id")?;
+	refused(response, StatusCode::FORBIDDEN, "M_FORBIDDEN").await?;
+	alice
+		.schedule_in_service(room, "m.room.topic", Some(""), &content, delay)
+		.await?;
 
 	let fired = poll_until(FIRE_DEADLINE, async || {
 		topic(services, room).await.as_deref() == Some("later")
@@ -175,25 +185,36 @@ async fn empty_key_query_fires(services: &Services, alice: &Client<'_>, room: &R
 
 async fn every_form_schedules(alice: &Client<'_>, room: &RoomId) -> Result {
 	let delay = format!("org.matrix.msc4140.delay={LONG}");
+	let slot = alice.slot("form").await?;
 	let message = alice.url(&format!("rooms/{room}/send/m.room.message/query?{delay}"));
-	let state = alice.url(&format!("rooms/{room}/state/m.room.topic/?{delay}"));
-	let stable = alice.url(&format!("rooms/{room}/delayed_event/m.room.message/stable"));
+	let empty_key = alice.url(&format!("rooms/{room}/state/{CALL_MEMBER}/?{delay}"));
+	let state = alice.url(&format!("rooms/{room}/state/{CALL_MEMBER}/{slot}?{delay}"));
+	let stable_message = alice.url(&format!("rooms/{room}/delayed_event/m.room.message/stable"));
+	let stable = alice.url(&format!("rooms/{room}/delayed_event/{CALL_MEMBER}/stable"));
 	let dedicated = json!({ "delay_ms": LONG, "content": { "body": "x" } });
+	let dedicated_state = json!({ "delay_ms": LONG, "state_key": slot, "content": {} });
+	let join = json!({ "delay_ms": LONG, "state_key": slot, "content": { "body": "x" } });
 
-	let message = alice
-		.put_json(&message, &json!({ "body": "x" }))
-		.await?;
-
-	let state = alice
-		.put_json(&state, &json!({ "topic": "x" }))
-		.await?;
-
-	let stable = alice.put_json(&stable, &dedicated).await?;
-	let forms = [
-		(message, "m.room.message", None),
-		(state, "m.room.topic", Some("")),
-		(stable, "m.room.message", None),
+	// MindRoom: a message, a call membership outside the sender's slot and one
+	// with content are refused.
+	let refusals = [
+		(&message, json!({ "body": "x" })),
+		(&stable_message, dedicated),
+		(&empty_key, json!({})),
+		(&state, json!({ "body": "x" })),
+		(&stable, join),
 	];
+
+	for (url, body) in &refusals {
+		let response = alice.request(Method::PUT, url, body).await?;
+
+		refused(response, StatusCode::FORBIDDEN, "M_FORBIDDEN").await?;
+	}
+
+	let state = alice.put_json(&state, &json!({})).await?;
+	let stable = alice.put_json(&stable, &dedicated_state).await?;
+	let key = Some(slot.as_str());
+	let forms = [(state, CALL_MEMBER, key), (stable, CALL_MEMBER, key)];
 
 	for (reply, event_type, state_key) in forms {
 		let delay_id = field(&reply, "delay_id")?;
@@ -237,13 +258,13 @@ async fn bare_delay_refused(alice: &Client<'_>, room: &RoomId) -> Result {
 
 async fn restart_and_cancel(services: &Services, alice: &Client<'_>, room: &RoomId) -> Result {
 	let delay_id = alice
-		.schedule_dedicated(room, "m.room.message", "restart", &json!({ "body": "x" }))
+		.schedule_dedicated(room, CALL_MEMBER, "restart", &json!({}))
 		.await?;
 
 	let event = alice.delayed(&delay_id).await?;
 
 	assert_eq!(event["delay_ms"], json!(LONG), "{event}");
-	assert_eq!(event["type"], "m.room.message", "{event}");
+	assert_eq!(event["type"], CALL_MEMBER, "{event}");
 
 	let scheduled_at = event["delayed_since_ts"].as_u64();
 
@@ -386,7 +407,7 @@ async fn owner_mismatch_is_not_found(
 	room: &RoomId,
 ) -> Result {
 	let delay_id = alice
-		.schedule_dedicated(room, "m.room.message", "owner", &json!({ "body": "x" }))
+		.schedule_dedicated(room, CALL_MEMBER, "owner", &json!({}))
 		.await?;
 
 	let url = alice.client_url(UNSTABLE, &format!("delayed_events/{delay_id}"));
@@ -416,18 +437,18 @@ async fn transaction_retry_returns_one_delay(
 	room: &RoomId,
 	alice_id: &UserId,
 ) -> Result {
-	let content = json!({ "body": "once" });
+	let content = json!({});
 	let first = alice
-		.schedule_dedicated(room, "m.room.message", "retry", &content)
+		.schedule_dedicated(room, CALL_MEMBER, "retry", &content)
 		.await?;
 
-	// Suspension fails the message policy, which a retry must not reach.
+	// Suspension fails the send policy, which a retry must not reach.
 	services
 		.users
 		.set_suspended(alice_id, &services.globals.server_user);
 
 	let retry = alice
-		.schedule_dedicated(room, "m.room.message", "retry", &content)
+		.schedule_dedicated(room, CALL_MEMBER, "retry", &content)
 		.await;
 
 	services.users.clear_suspended(alice_id);
@@ -447,14 +468,15 @@ async fn failed_sends_are_kept(
 	room: &RoomId,
 	alice_id: &UserId,
 ) -> Result {
-	let path = format!("rooms/{room}/send/m.room.message/fails?org.matrix.msc4140.delay=300");
+	let slot = alice.slot("fails").await?;
+	let path = format!("rooms/{room}/state/{CALL_MEMBER}/{slot}?org.matrix.msc4140.delay=300");
 	let reply = alice
-		.put_json(&alice.url(&path), &json!({ "body": "x" }))
+		.put_json(&alice.url(&path), &json!({}))
 		.await?;
 
 	let due = field(&reply, "delay_id")?;
 	let explicit = alice
-		.schedule_dedicated(room, "m.room.message", "explicit", &json!({ "body": "x" }))
+		.schedule_dedicated(room, CALL_MEMBER, "explicit", &json!({}))
 		.await?;
 
 	services
@@ -493,6 +515,8 @@ async fn failed_sends_are_kept(
 ///
 /// The reply names a thread root this server lacks, so thread indexing fails
 /// once the event is already in the room.
+///
+/// MindRoom: the service schedules the reply, which the routes refuse.
 async fn stored_send_stands(alice: &Client<'_>, room: &RoomId) -> Result {
 	let content = json!({
 		"body": "x",
@@ -500,7 +524,7 @@ async fn stored_send_stands(alice: &Client<'_>, room: &RoomId) -> Result {
 	});
 
 	let delay_id = alice
-		.schedule_dedicated(room, "m.room.message", "orphan", &content)
+		.schedule_in_service(room, "m.room.message", None, &content, LONG)
 		.await?;
 
 	alice.act(&delay_id, "send").await?;
@@ -521,20 +545,27 @@ async fn stored_send_stands(alice: &Client<'_>, room: &RoomId) -> Result {
 
 /// A send refused before the event is stored stays a failed send.
 ///
-/// Room auth lets Bob schedule a redaction of Alice's message, but the
-/// timeline refuses it at send time, before anything is stored.
+/// MindRoom: the room's power levels let Bob schedule his call leave. Alice
+/// then raises the level it takes, so room auth refuses it at send time,
+/// before anything is stored.
 async fn refused_before_storage(alice: &Client<'_>, bob: &Client<'_>) -> Result {
-	let room = shared_room(alice, bob).await?;
-
-	let path = format!("rooms/{room}/send/m.room.message/target");
-	let sent = alice
-		.put_json(&alice.url(&path), &json!({ "body": "x" }))
+	let open = json!({ "events": { CALL_MEMBER: 0 } });
+	let room = alice
+		.create_room(&json!({ "preset": "public_chat", "power_level_content_override": open }))
 		.await?;
 
-	let redacts = json!({ "redacts": field(&sent, "event_id")? });
+	bob.post_json(&bob.url(&format!("rooms/{room}/join")), &json!({}))
+		.await?;
+
 	let delay_id = bob
-		.schedule_dedicated(&room, "m.room.redaction", "redact", &redacts)
+		.schedule_dedicated(&room, CALL_MEMBER, "refused", &json!({}))
 		.await?;
+
+	let levels = alice.url(&format!("rooms/{room}/state/m.room.power_levels"));
+	let mut closed = alice.get_json(&levels).await?;
+
+	closed["events"][CALL_MEMBER] = json!(50);
+	alice.put_json(&levels, &closed).await?;
 
 	let refusal = bob.attempt(&delay_id, "send").await?;
 
@@ -565,9 +596,11 @@ async fn shared_room(alice: &Client<'_>, bob: &Client<'_>) -> Result<OwnedRoomId
 }
 
 async fn room_auth_checked_at_schedule(bob: &Client<'_>, room: &RoomId) -> Result {
-	let path = format!("rooms/{room}/state/m.room.topic?org.matrix.msc4140.delay={LONG}");
+	let slot = bob.slot("intruder").await?;
+	let path = format!("rooms/{room}/state/{CALL_MEMBER}/{slot}?org.matrix.msc4140.delay={LONG}");
+
 	let response = bob
-		.request(Method::PUT, &bob.url(&path), &json!({ "topic": "intruder" }))
+		.request(Method::PUT, &bob.url(&path), &json!({}))
 		.await?;
 
 	refused(response, StatusCode::FORBIDDEN, "M_FORBIDDEN").await
@@ -578,40 +611,34 @@ async fn delay_id_reaches_only_its_sender(
 	services: &Services,
 	alice: &Client<'_>,
 	bob: &Client<'_>,
-	alice_id: &UserId,
 ) -> Result {
 	let room = shared_room(alice, bob).await?;
 
-	let path =
-		format!("rooms/{room}/state/m.room.member/{alice_id}?org.matrix.msc4140.delay=300");
+	let slot = alice.slot("later").await?;
+	let path = format!("rooms/{room}/state/{CALL_MEMBER}/{slot}?org.matrix.msc4140.delay=300");
 
-	let content = json!({ "membership": "join", "displayname": "later" });
 	let reply = alice
-		.put_json(&alice.url(&path), &content)
+		.put_json(&alice.url(&path), &json!({}))
 		.await?;
 
 	let delay_id = field(&reply, "delay_id")?;
-	let fired = poll_until(FIRE_DEADLINE, async || {
-		displayname(services, &room, alice_id)
-			.await
-			.is_some_and(is_equal_to!("later"))
-	})
-	.await;
+	let fired =
+		poll_until(FIRE_DEADLINE, async || call_member_sent(services, &room, &slot).await).await;
 
-	require(fired, "the delayed member event was never sent")?;
+	require(fired, "the delayed call leave was never sent")?;
 
 	let event_id = services
 		.state_accessor
-		.room_state_get(&room, &StateEventType::RoomMember, alice_id.as_str())
+		.room_state_get(&room, &CALL_MEMBER.into(), &slot)
 		.await?
 		.event_id;
 
+	// MindRoom: `/members` lists room memberships only, so it is not read.
 	let named = format!(r#""{DELAY_ID}":"{delay_id}""#);
 	let paths = [
 		format!("rooms/{room}/event/{event_id}"),
-		format!("rooms/{room}/state/m.room.member/{alice_id}?format=event"),
+		format!("rooms/{room}/state/{CALL_MEMBER}/{slot}?format=event"),
 		format!("rooms/{room}/state"),
-		format!("rooms/{room}/members"),
 		format!("rooms/{room}/messages?dir=b"),
 	];
 
@@ -632,16 +659,6 @@ async fn delay_id_reaches_only_its_sender(
 	Ok(())
 }
 
-#[tracing::instrument(level = "debug", skip_all)]
-async fn displayname(services: &Services, room: &RoomId, user_id: &UserId) -> Option<String> {
-	services
-		.state_accessor
-		.room_state_get_content(room, &StateEventType::RoomMember, user_id.as_str())
-		.await
-		.ok()
-		.and_then(|content: RoomMemberEventContent| content.displayname)
-}
-
 async fn deactivation_removes_scheduled(
 	services: &Services,
 	bob: &Client<'_>,
@@ -650,10 +667,11 @@ async fn deactivation_removes_scheduled(
 	let room = bob.create_room(&json!({})).await?;
 
 	let room_lock = services.state.mutex.lock(&room).await;
-	let url = bob
-		.client_url(UNSTABLE, &format!("rooms/{room}/delayed_event/m.room.message/deactivate"));
+	let url =
+		bob.client_url(UNSTABLE, &format!("rooms/{room}/delayed_event/{CALL_MEMBER}/deactivate"));
 
-	let body = json!({ "delay_ms": LONG, "content": { "body": "x" } });
+	let slot = bob.slot("x").await?;
+	let body = json!({ "delay_ms": LONG, "state_key": slot, "content": {} });
 	let (reply, deactivated, released) = join3(
 		bob.request(Method::PUT, &url, &body),
 		async {
@@ -723,11 +741,12 @@ async fn limits(services: &Services, base: &str) -> Result {
 	let room = alice.create_room(&json!({})).await?;
 	let too_long = 120_001;
 
+	let slot = alice.slot("x").await?;
 	let path =
-		format!("rooms/{room}/send/m.room.message/long?org.matrix.msc4140.delay={too_long}");
+		format!("rooms/{room}/state/{CALL_MEMBER}/{slot}?org.matrix.msc4140.delay={too_long}");
 
 	let query = alice
-		.request(Method::PUT, &alice.url(&path), &json!({ "body": "x" }))
+		.request(Method::PUT, &alice.url(&path), &json!({}))
 		.await?;
 
 	refused(query, StatusCode::BAD_REQUEST, "ORG.MATRIX.MSC4140_DELAY_TOO_LARGE").await?;
@@ -735,8 +754,8 @@ async fn limits(services: &Services, base: &str) -> Result {
 	let stable = alice
 		.request(
 			Method::PUT,
-			&alice.url(&format!("rooms/{room}/delayed_event/m.room.message/long")),
-			&json!({ "delay_ms": too_long, "content": { "body": "x" } }),
+			&alice.url(&format!("rooms/{room}/delayed_event/{CALL_MEMBER}/long")),
+			&json!({ "delay_ms": too_long, "state_key": slot, "content": {} }),
 		)
 		.await?;
 
@@ -746,12 +765,12 @@ async fn limits(services: &Services, base: &str) -> Result {
 	let room_lock = services.state.mutex.lock(&room).await;
 	let other_lock = services.state.mutex.lock(&other_room).await;
 	let first =
-		alice.client_url(UNSTABLE, &format!("rooms/{room}/delayed_event/m.room.message/first"));
+		alice.client_url(UNSTABLE, &format!("rooms/{room}/delayed_event/{CALL_MEMBER}/first"));
 
 	let rival = alice
-		.client_url(UNSTABLE, &format!("rooms/{other_room}/delayed_event/m.room.message/rival"));
+		.client_url(UNSTABLE, &format!("rooms/{other_room}/delayed_event/{CALL_MEMBER}/rival"));
 
-	let body = json!({ "delay_ms": LONG, "content": { "body": "x" } });
+	let body = json!({ "delay_ms": LONG, "state_key": slot, "content": {} });
 	let (first, rival, released) = join3(
 		alice.request(Method::PUT, &first, &body),
 		alice.request(Method::PUT, &rival, &body),
@@ -790,11 +809,9 @@ async fn limits(services: &Services, base: &str) -> Result {
 	assert_eq!(scheduled, 1);
 
 	let second =
-		alice.client_url(UNSTABLE, &format!("rooms/{room}/delayed_event/m.room.message/second"));
+		alice.client_url(UNSTABLE, &format!("rooms/{room}/delayed_event/{CALL_MEMBER}/second"));
 
-	let over = alice
-		.request(Method::PUT, &second, &json!({ "delay_ms": LONG, "content": { "body": "x" } }))
-		.await?;
+	let over = alice.request(Method::PUT, &second, &body).await?;
 
 	let retry_after = over
 		.headers()
@@ -829,9 +846,10 @@ async fn disabled(services: &Services, base: &str) -> Result {
 		assert_eq!(capabilities["capabilities"].get(name), None, "{name}: {capabilities}");
 	}
 
-	let path = format!("rooms/{room}/send/m.room.message/off?org.matrix.msc4140.delay=1000");
+	let slot = alice.slot("off").await?;
+	let path = format!("rooms/{room}/state/{CALL_MEMBER}/{slot}?org.matrix.msc4140.delay=1000");
 	let response = alice
-		.request(Method::PUT, &alice.url(&path), &json!({ "body": "x" }))
+		.request(Method::PUT, &alice.url(&path), &json!({}))
 		.await?;
 
 	refused(response, StatusCode::FORBIDDEN, "M_FORBIDDEN").await
@@ -873,14 +891,13 @@ async fn schedule_before_restart(services: &Services, base: &str) -> Result {
 		.create_room(&json!({ "room_alias_name": "restart" }))
 		.await?;
 
-	let path = format!("rooms/{room}/state/m.room.topic?org.matrix.msc4140.delay=3000");
-	let reply = alice
-		.put_json(&alice.url(&path), &json!({ "topic": "after restart" }))
+	// MindRoom: the service schedules the topic, which the routes refuse.
+	let content = json!({ "topic": "after restart" });
+	let delay_id = alice
+		.schedule_in_service(&room, "m.room.topic", Some(""), &content, 3000)
 		.await?;
 
-	let delay_id = field(&reply, "delay_id")?;
-
-	alice.delayed(delay_id).await.map(|_| ())
+	alice.delayed(&delay_id).await.map(|_| ())
 }
 
 async fn fired_after_restart(services: &Services, started: u64) -> Result {
@@ -975,13 +992,54 @@ async fn schedule_dedicated(
 	txn_id: &str,
 	content: &Value,
 ) -> Result<String> {
+	// MindRoom: the state key makes it a state event in the sender's call slot.
 	let path = format!("rooms/{room}/delayed_event/{event_type}/{txn_id}");
-	let body = json!({ "delay_ms": LONG, "content": content });
+	let slot = self.slot(txn_id).await?;
+	let body = json!({ "delay_ms": LONG, "state_key": slot, "content": content });
 	let reply = self
 		.put_json(&self.client_url(UNSTABLE, &path), &body)
 		.await?;
 
 	field(&reply, "delay_id").map(ToOwned::to_owned)
+}
+
+/// MindRoom: the state key of a call slot of this user's, as matrix-js-sdk
+/// forms it.
+#[implement(Client, params = "<'_>")]
+async fn slot(&self, name: &str) -> Result<String> {
+	let whoami = self.get_json(&self.url("account/whoami")).await?;
+
+	Ok(format!("_{}_{name}", field(&whoami, "user_id")?))
+}
+
+/// MindRoom: schedules an event in the service, which is not held to the scope
+/// of the client routes, and returns its `delay_id`.
+#[implement(Client, params = "<'_>")]
+async fn schedule_in_service(
+	&self,
+	room: &RoomId,
+	event_type: &str,
+	state_key: Option<&str>,
+	content: &Value,
+	delay_ms: u64,
+) -> Result<String> {
+	let whoami = self.get_json(&self.url("account/whoami")).await?;
+	let event = json!({
+		"user_id": field(&whoami, "user_id")?,
+		"room_id": room,
+		"type": event_type,
+		"state_key": state_key,
+		"content": content,
+		"delay_ms": delay_ms,
+		"due_ms": now_millis().saturating_add(delay_ms),
+	});
+
+	let delay_id = self
+		.services
+		.delayed_events
+		.schedule(&from_value(event)?, None);
+
+	Ok(delay_id.to_string())
 }
 
 #[implement(Client, params = "<'_>")]

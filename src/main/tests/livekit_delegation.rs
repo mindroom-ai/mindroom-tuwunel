@@ -762,8 +762,10 @@ fn without(object: &Value, key: &str) -> Value {
 #[tracing::instrument(level = "debug", skip(self))]
 async fn schedule(&self, member: &str, delay_ms: u64) -> Result<String> {
 	let room_id = self.room_id;
+	// MindRoom fork: delayed call leaves must use the sender's own slot state key.
+	let state_key = format!("_{}_{member}", self.user_id);
 	let path = format!(
-		"rooms/{room_id}/state/{CALL_MEMBER}/{member}?org.matrix.msc4140.delay={delay_ms}"
+		"rooms/{room_id}/state/{CALL_MEMBER}/{state_key}?org.matrix.msc4140.delay={delay_ms}"
 	);
 
 	let response = self

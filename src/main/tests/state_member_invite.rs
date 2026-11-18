@@ -33,7 +33,7 @@ use tuwunel_service::{Services, membership::RemoteInvite};
 
 use self::{
 	appservice::{Bridge, register_appservice},
-	client::{Client, accepted, field, register},
+	client::{Client, register},
 	fixture::boot,
 	state_cache::membership_update,
 	stub::{Peer, serve},
@@ -42,9 +42,6 @@ use self::{
 mod appservice;
 mod client;
 mod fixture;
-
-#[path = "client/get.rs"]
-mod get;
 
 #[path = "fixture/server_keys.rs"]
 mod server_keys;
@@ -72,11 +69,9 @@ const BOB_TOKEN: &str = "state-member-invite-bob-access-token";
 const BRIDGE_TOKEN: &str = "state-member-invite-bridge-access-token";
 const TIMESTAMP: u64 = 1_234_567_890_123;
 const QUIET: [&str; 2] = ["logging.enable=false", "database.pool.max_workers=64"];
-const DELAY_PREFIX: &str = "unstable/org.matrix.msc4140/";
 const DELAY_PARAM: &str = "org.matrix.msc4140.delay";
-const DELAY_ID: &str = "org.matrix.msc4140.delay_id";
 
-// Long enough that no delayed invite goes out before its case sends it.
+// Long enough that a delayed invite would not fire before the check finishes.
 const LONG_DELAY: u64 = 60_000;
 
 const ANSWER_WITHIN: Duration = Duration::from_secs(1);
@@ -146,10 +141,8 @@ async fn remote_invites(services: &Services, base: &str, listener: TcpListener) 
 	appservice_invite(services, base, &peer).await?;
 	disabled_room_invite(&client, &peer).await?;
 	parked_invite(&client, &peer).await?;
-	delayed_invite(&client, &alice, &peer).await?;
-	delayed_refusal(&client, &peer).await?;
-	stalled_invite(&client, &alice, &peer).await?;
-	delayed_stalled_invite(&client, &peer).await
+	delayed_invite_refused(&client, &peer).await?;
+	stalled_invite(&client, &alice, &peer).await
 }
 
 /// A notary's answer yields a key only from a document naming the server
@@ -464,60 +457,18 @@ async fn parked_invite(client: &Client<'_>, peer: &Peer) -> Result {
 	received(peer).map(drop)
 }
 
-/// A delayed member invite to a user on the stub reaches it when sent.
-///
-/// The delayed send goes through the invite handshake, since an invite only
-/// stored locally never reaches the invitee's server. The stored event still
-/// names its delay ID to its sender.
-async fn delayed_invite(client: &Client<'_>, alice: &UserId, peer: &Peer) -> Result {
+/// MindRoom fork: delayed events are restricted to the sender's own call
+/// leave, so scheduling a delayed member invite is refused before federation.
+async fn delayed_invite_refused(client: &Client<'_>, peer: &Peer) -> Result {
 	let room_id = client.create_room(&json!({})).await?;
 	let dave = format!("@dave:{}", peer.name);
-	let delay_id = schedule_invite(client, &room_id, &dave).await?;
-	let response = send_delayed(client, &delay_id).await?;
+	let query = format!("?{DELAY_PARAM}={LONG_DELAY}");
+	let body = json!({ "membership": "invite" });
+	let response = put_invite(client, &room_id, &dave, &query, &body).await?;
+	let error = answered(response, StatusCode::FORBIDDEN).await?;
 
-	accepted(response).await?;
-
-	let invite = received(peer)?;
-	let stored = client
-		.services
-		.state_accessor
-		.room_state_get(&room_id, &StateEventType::RoomMember, &dave)
-		.await?;
-
-	let event_id = stored.event_id();
-	let event = client
-		.get(&format!("rooms/{room_id}/event/{event_id}"))
-		.await?;
-
-	let delayed = delayed(client, &delay_id).await?;
-
-	assert_eq!(invite["event"]["sender"], alice.as_str());
-	assert_eq!(invite["event"]["state_key"], dave.as_str());
-	assert_eq!(stored.get_content_as_value()["membership"], "invite");
-	assert_eq!(delayed["finalised"]["event_id"], event_id.as_str(), "{delayed}");
-	assert_eq!(event["unsigned"][DELAY_ID], delay_id.as_str(), "{event}");
-
-	Ok(())
-}
-
-/// A delayed member invite the invitee's server refuses ends as that refusal.
-///
-/// The send answers with the stub's error, nothing is stored, and the
-/// finalised record keeps the stub's error code.
-async fn delayed_refusal(client: &Client<'_>, peer: &Peer) -> Result {
-	let room_id = client.create_room(&json!({})).await?;
-	let refused_user = format!("{REFUSED}{}", peer.name);
-	let delay_id = schedule_invite(client, &room_id, &refused_user).await?;
-	let response = send_delayed(client, &delay_id).await?;
-
-	refused(response, client.services, &room_id, &refused_user).await?;
-	received(peer)?;
-
-	let delayed = delayed(client, &delay_id).await?;
-	let finalised = &delayed["finalised"];
-
-	assert_eq!(finalised["error"]["errcode"], "M_FORBIDDEN", "{delayed}");
-	assert_eq!(finalised.get("event_id"), None, "{delayed}");
+	assert_eq!(error["errcode"], "M_FORBIDDEN", "{error}");
+	assert!(absent(client.services, &room_id, &dave).await, "the invite was stored");
 
 	Ok(())
 }
@@ -555,33 +506,6 @@ async fn stalled_invite(client: &Client<'_>, alice: &UserId, peer: &Peer) -> Res
 	);
 
 	assert!(absent(services, &room_id, user_id.as_str()).await, "the invite was stored");
-
-	Ok(())
-}
-
-/// A delayed invite the invitee's server does not answer within 30 seconds
-/// ends in the error saying the server did not answer the invite.
-///
-/// The send answers with that error, nothing is stored, and the finalised
-/// record keeps it in place of an event ID.
-async fn delayed_stalled_invite(client: &Client<'_>, peer: &Peer) -> Result {
-	let room_id = client.create_room(&json!({})).await?;
-	let user_id = format!("{STALLED}{}", peer.name);
-	let delay_id = schedule_invite(client, &room_id, &user_id).await?;
-	let response = send_delayed(client, &delay_id).await?;
-	let error = answered(response, StatusCode::INTERNAL_SERVER_ERROR).await?;
-	let record = delayed(client, &delay_id).await?;
-	let finalised = &record["finalised"];
-	let stalled = |error: &Value| {
-		error["error"]
-			.as_str()
-			.is_some_and(|message| message.contains(&format!("{NO_ANSWER} within 30s")))
-	};
-
-	assert!(stalled(&error), "{error}");
-	assert!(stalled(&finalised["error"]), "{record}");
-	assert_eq!(finalised.get("event_id"), None, "{record}");
-	assert!(absent(client.services, &room_id, &user_id).await, "the invite was stored");
 
 	Ok(())
 }
@@ -695,35 +619,4 @@ async fn refused(
 	assert!(absent(services, room_id, user_id).await, "the invite was stored");
 
 	Ok(())
-}
-
-/// Schedules a member invite through the state route's delay parameter.
-///
-/// The delay outlasts the case, so only an explicit send releases the invite.
-async fn schedule_invite(client: &Client<'_>, room_id: &RoomId, user_id: &str) -> Result<String> {
-	let query = format!("?{DELAY_PARAM}={LONG_DELAY}");
-	let body = json!({ "membership": "invite" });
-	let response = put_invite(client, room_id, user_id, &query, &body).await?;
-	let reply = accepted(response).await?;
-
-	field(&reply, "delay_id").map(ToOwned::to_owned)
-}
-
-/// Sends a scheduled event now.
-///
-/// The status stays the caller's to judge, since a refused send answers with
-/// the refusal.
-async fn send_delayed(client: &Client<'_>, delay_id: &str) -> Result<Response> {
-	let url = client.client_url(DELAY_PREFIX, &format!("delayed_events/{delay_id}/send"));
-
-	client.post_url(&url, &json!({})).await
-}
-
-/// Reads a scheduled event's record, finalised or not.
-///
-/// A finalised record names the event it sent or the error that ended it.
-async fn delayed(client: &Client<'_>, delay_id: &str) -> Result<Value> {
-	let url = client.client_url(DELAY_PREFIX, &format!("delayed_events/{delay_id}"));
-
-	accepted(client.get_url(&url).await?).await
 }

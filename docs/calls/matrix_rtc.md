@@ -456,6 +456,13 @@ The client can also ask lk-jwt-service, or Tuwunel in
 
 Delayed events work with Tuwunel's default settings.
 
+Only that leave can be delayed: either an `org.matrix.msc3401.call.member`
+state event with empty content under the caller's own state key (their user ID,
+an underscore, and their device and call, with or without one more underscore
+in front), or an MSC4354 sticky `m.rtc.member` / `org.matrix.msc4143.rtc.member`
+leave for the caller. A request to delay any other event is refused with
+`M_FORBIDDEN`.
+
 The limits are in the `[global.rooms.delayed_events]` section of your
 `tuwunel.toml` configuration file.
 

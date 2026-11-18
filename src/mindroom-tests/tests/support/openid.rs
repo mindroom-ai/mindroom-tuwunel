@@ -91,13 +91,27 @@ pub(crate) fn get(uri: &str) -> Request<Body> {
 		.expect("valid request")
 }
 
+pub(crate) fn authed_get(uri: &str) -> Request<Body> {
+	Request::builder()
+		.method("GET")
+		.uri(uri)
+		.header(header::AUTHORIZATION, format!("Bearer {ACCESS_TOKEN}"))
+		.header("X-Forwarded-For", "127.0.0.1")
+		.body(Body::empty())
+		.expect("valid request")
+}
+
 pub(crate) fn post(uri: &str, body: Option<Value>) -> Request<Body> {
+	post_as(ACCESS_TOKEN, uri, body)
+}
+
+pub(crate) fn post_as(access_token: &str, uri: &str, body: Option<Value>) -> Request<Body> {
 	let body = body.map_or_else(Body::empty, |body| Body::from(body.to_string()));
 
 	Request::builder()
 		.method("POST")
 		.uri(uri)
-		.header(header::AUTHORIZATION, format!("Bearer {ACCESS_TOKEN}"))
+		.header(header::AUTHORIZATION, format!("Bearer {access_token}"))
 		.header(header::CONTENT_TYPE, "application/json")
 		.header("X-Forwarded-For", "127.0.0.1")
 		.body(body)

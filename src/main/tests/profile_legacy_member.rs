@@ -265,10 +265,13 @@ async fn member_only_invalid_avatar(services: &Services, base: &str) -> Result {
 	expect_refused(&owner, &room, &user_id, &new_invalid).await
 }
 
-/// A delayed member event is held to the member limits when it is scheduled.
+/// A delayed member event is refused, whether or not it is within the member
+/// limits.
 ///
-/// A refusal at scheduling leaves nothing to be sent when the delay ends, and a valid
-/// event is still scheduled.
+/// MindRoom: upstream holds a delayed member event to the member limits when
+/// it is scheduled. Here a room membership cannot be delayed, so the invalid
+/// and the valid event are both refused as forbidden, before the member limits
+/// are read.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn delayed_invalid_avatar(services: &Services, base: &str) -> Result {
 	let user_id = register(services, "delayedmember", DELAYED_TOKEN).await?;
@@ -283,14 +286,19 @@ async fn delayed_invalid_avatar(services: &Services, base: &str) -> Result {
 	));
 
 	let invalid = member_content("after", ESCAPED_AVATAR);
-	let refused = owner.request(Method::PUT, &url, &invalid).await?;
-
-	expect_bad_json(refused, "delayed member event with an invalid avatar").await?;
-
 	let valid = member_content("after", &avatar_url('r', 40));
-	let scheduled = owner.request(Method::PUT, &url, &valid).await?;
 
-	accepted(scheduled).await?;
+	for content in [invalid, valid] {
+		let response = owner.request(Method::PUT, &url, &content).await?;
+		let status = response.status();
+		let body: Value = response.json().await?;
+		let errcode = body.get("errcode").and_then(Value::as_str);
+
+		BoolExt::ok_or_else(
+			status == StatusCode::FORBIDDEN && errcode == Some("M_FORBIDDEN"),
+			|| err!("delayed member event was answered {status} with {errcode:?}, expected 403"),
+		)?;
+	}
 
 	Ok(())
 }

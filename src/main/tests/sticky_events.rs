@@ -180,7 +180,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		}))
 		.await?;
 
-	refused_durations(&alice, &room).await?;
+	refused_durations(&alice, &alice_id, &room).await?;
 
 	let hidden = alice.send_text(&room, "hidden", "before").await?;
 	let early = alice.send_sticky(&room, "early").await?;
@@ -235,11 +235,14 @@ async fn advertised(alice: &Client<'_>) -> Result {
 	)
 }
 
-/// A zero duration, and a duration on a delayed state event, are refused.
+/// A zero duration, a sticky duration on a delayed state event, and an
+/// out-of-scope delayed topic are refused.
 ///
-/// Both are refused with M_INVALID_PARAM before any event is built.
+/// The own-leave guard refuses the delayed topic with `M_FORBIDDEN` before the
+/// sticky-plus-state check, while an own-slot delayed call leave with a sticky
+/// duration reaches that check and is refused with `M_INVALID_PARAM`.
 #[tracing::instrument(level = "debug", skip_all)]
-async fn refused_durations(alice: &Client<'_>, room: &RoomId) -> Result {
+async fn refused_durations(alice: &Client<'_>, alice_id: &UserId, room: &RoomId) -> Result {
 	let zero = alice.url(&format!("rooms/{room}/send/{CALL_MEMBER}/zero?{DURATION}=0"));
 	let zero = alice
 		.request(Method::PUT, &zero, &json!({}))
@@ -263,7 +266,25 @@ async fn refused_durations(alice: &Client<'_>, room: &RoomId) -> Result {
 		.request(Method::PUT, &delayed, &body)
 		.await?;
 
-	require(invalid_param(delayed).await?, "a sticky delayed state event was accepted")
+	require(forbidden(delayed).await?, "a sticky delayed topic was not forbidden")?;
+
+	let delayed_call = alice.client_url(
+		"unstable/org.matrix.msc4140/",
+		&format!("rooms/{room}/delayed_event/{CALL_MEMBER}/sticky-call-state"),
+	);
+
+	let body = json!({
+		"delay_ms": 60_000,
+		"state_key": format!("_{alice_id}_STICKY"),
+		"content": {},
+		"org.matrix.msc4354.sticky_duration_ms": DURATION_MS,
+	});
+
+	let delayed_call = alice
+		.request(Method::PUT, &delayed_call, &body)
+		.await?;
+
+	require(invalid_param(delayed_call).await?, "a sticky delayed state event was accepted")
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
@@ -533,33 +554,74 @@ fn fresh_copy_of(event: &Value, content: &Value) -> bool {
 	fresh_copy(event) && event["content"] == *content
 }
 
-/// A delayed sticky event of either membership type, from either route, is
-/// sent with its sticky object and a remaining time counted from when it fires.
-///
-/// Each is scheduled well in the future and fired at once through its send
-/// action, then read back from the timeline.
+/// A delayed sticky `rtc.member` leave, from either route, is sent with its
+/// sticky object and a remaining time counted from when it fires; legacy
+/// `call.member` messages and `rtc.member` joins stay refused with 403.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn delayed_sticky_events_fire(alice: &Client<'_>, room: &RoomId) -> Result {
-	for (event_type, label) in MEMBER_TYPES {
-		fire_delayed_sticky_events(alice, room, event_type, label).await?;
-	}
+	fire_delayed_sticky_events(alice, room, RTC_MEMBER, "rtc").await?;
 
 	let sync = alice.get("sync?timeout=0").await?;
 	let timeline = &joined_room(&sync, room)?["timeline"]["events"];
 
-	for (event_type, label) in MEMBER_TYPES {
-		for route in ["delayed-query", "delayed-body"] {
-			let key = format!("{label}-{route}");
-			let expected = member_content(event_type, &key, "leave");
+	for route in ["delayed-query", "delayed-body"] {
+		let key = format!("rtc-{route}");
+		let expected = member_content(RTC_MEMBER, &key, "leave");
 
-			require(
-				find_keyed(timeline, &key).is_some_and(|event| fresh_copy_of(event, &expected)),
-				"a fired delayed event lacks the sticky key, its remaining time or its content",
-			)?;
-		}
+		require(
+			find_keyed(timeline, &key).is_some_and(|event| fresh_copy_of(event, &expected)),
+			"a fired delayed event lacks the sticky key, its remaining time or its content",
+		)?;
 	}
 
-	Ok(())
+	let refused_query = format!(
+		"rooms/{room}/send/{CALL_MEMBER}/call-delayed-query?org.matrix.msc4140.delay=60000&\
+		 {DURATION}={DURATION_MS}"
+	);
+	let response = alice
+		.request(
+			Method::PUT,
+			&alice.url(&refused_query),
+			&member_content(CALL_MEMBER, "call-delayed-query", "leave"),
+		)
+		.await?;
+
+	require(
+		forbidden(response).await?,
+		"delayed sticky call.member via query was not forbidden",
+	)?;
+
+	let refused_body = alice.client_url(
+		UNSTABLE,
+		&format!("rooms/{room}/delayed_event/{CALL_MEMBER}/call-delayed-body"),
+	);
+	let body = json!({
+		"delay_ms": 60_000,
+		"content": member_content(CALL_MEMBER, "call-delayed-body", "leave"),
+		DURATION: DURATION_MS,
+	});
+	let response = alice
+		.request(Method::PUT, &refused_body, &body)
+		.await?;
+
+	require(
+		forbidden(response).await?,
+		"delayed sticky call.member via body was not forbidden",
+	)?;
+
+	let refused_join = format!(
+		"rooms/{room}/send/{RTC_MEMBER}/rtc-delayed-join?org.matrix.msc4140.delay=60000&\
+		 {DURATION}={DURATION_MS}"
+	);
+	let response = alice
+		.request(
+			Method::PUT,
+			&alice.url(&refused_join),
+			&member_content(RTC_MEMBER, "rtc-delayed-join", "join"),
+		)
+		.await?;
+
+	require(forbidden(response).await?, "delayed sticky rtc.member join was not forbidden")
 }
 
 /// Schedule one delayed sticky event of a type through each route, then fire
@@ -1101,6 +1163,14 @@ async fn invalid_param(response: Response) -> Result<bool> {
 	let body: Value = response.json().await?;
 
 	Ok(status == StatusCode::BAD_REQUEST && body["errcode"] == "M_INVALID_PARAM")
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn forbidden(response: Response) -> Result<bool> {
+	let status = response.status();
+	let body: Value = response.json().await?;
+
+	Ok(status == StatusCode::FORBIDDEN && body["errcode"] == "M_FORBIDDEN")
 }
 
 fn find<'a>(events: &'a Value, event_id: &EventId) -> Option<&'a Value> {
