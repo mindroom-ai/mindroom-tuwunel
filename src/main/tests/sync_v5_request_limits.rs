@@ -2,7 +2,7 @@
 
 use reqwest::StatusCode;
 use serde_json::{Map, Value, json, to_value};
-use tuwunel_core::Result;
+use tuwunel_core::{Result, ruma::presence::PresenceState};
 use tuwunel_service::{Services, sync::into_connection_key};
 
 use self::client::{Client, field, register};
@@ -33,7 +33,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.await?;
 	let pos = field(&opened, "pos")?;
 	let (user, device, _) = services.users.find_from_token(TOKEN).await?;
-	let key = into_connection_key(user, Some(device), Some(CONN));
+	let key = into_connection_key(user.clone(), Some(device.clone()), Some(CONN));
 	let conn = services
 		.sync
 		.load_or_init_connection(&key)
@@ -58,6 +58,20 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		assert_eq!(to_value(&*conn.lock().await)?, before);
 		assert_eq!(stored.qry(&key).await?.as_ref(), bytes.as_slice());
 	}
+
+	// A rejected resume caches no connection it read from storage and leaves
+	// presence as it was, although it asks for another presence.
+	let cold = into_connection_key(user.clone(), Some(device), Some("cold"));
+	stored.put_raw(&cold, bytes.as_slice());
+	let away = format!("{}&set_presence=unavailable", client.sliding_sync_url(Some(pos), 0));
+	let reply = client
+		.post_url(&away, &json!({"conn_id": "cold", "lists": {"extra": list}}))
+		.await?;
+	assert_eq!(reply.status(), StatusCode::BAD_REQUEST);
+	assert!(!services.sync.is_connection_loaded(&cold).await);
+	let presence = services.presence.get_presence(&user).await?;
+	assert_eq!(presence.content.presence, PresenceState::Online);
+
 	let resumed = client
 		.sliding_sync(Some(pos), 0, &json!({"conn_id": CONN}))
 		.await?;

@@ -257,6 +257,24 @@ pub async fn drop_connection(&self, key: &ConnectionKey) {
 #[implement(Service)]
 #[tracing::instrument(level = "debug", skip(self))]
 pub async fn load_or_init_connection(&self, key: &ConnectionKey) -> Result<ConnectionVal> {
+	self.load_or_init_connection_checked(key, |_| Ok(()))
+		.await
+}
+
+/// Like [`Self::load_or_init_connection`], but a connection read from storage
+/// is cached only once `admit` accepts it; its error is returned instead. A
+/// connection already cached is returned unchecked, for the caller to check
+/// under its lock.
+#[implement(Service)]
+#[tracing::instrument(level = "debug", skip(self, admit))]
+pub async fn load_or_init_connection_checked<F>(
+	&self,
+	key: &ConnectionKey,
+	admit: F,
+) -> Result<ConnectionVal>
+where
+	F: FnOnce(&Connection) -> Result + Send,
+{
 	let mut cache = self.connections.lock().await;
 
 	if let Some(conn) = cache.get(key) {
@@ -268,17 +286,17 @@ pub async fn load_or_init_connection(&self, key: &ConnectionKey) -> Result<Conne
 		return Ok(ConnectionVal::default());
 	}
 
-	let conn: ConnectionVal = self
+	let conn: Connection = self
 		.db
 		.userdeviceconnid_conn
 		.qry(key)
 		.await
 		.deserialized()
 		.map(|Cbor(conn)| conn)
-		.map(TokioMutex::new)
-		.map(Arc::new)
 		.unwrap_or_default();
 
+	admit(&conn)?;
+	let conn = ConnectionVal::new(TokioMutex::new(conn));
 	cache.insert(key.clone(), conn.clone());
 
 	Ok(conn)
@@ -615,7 +633,8 @@ fn update_cache_list(request: &request::List, cached: &mut request::List) -> boo
 	let required_state_changed = !request.room_details.required_state.is_empty()
 		&& request.room_details.required_state != cached.room_details.required_state;
 
-	let filters_changed = request.filters.as_ref().is_some_and(|request| {
+	let filters = request.filters.as_ref().map(distinct_filters);
+	let filters_changed = filters.as_ref().is_some_and(|request| {
 		cached
 			.filters
 			.as_ref()
@@ -639,7 +658,7 @@ fn update_cache_list(request: &request::List, cached: &mut request::List) -> boo
 	}
 
 	if filters_changed {
-		cached.filters.clone_from(&request.filters);
+		cached.filters = filters;
 	}
 
 	changed
@@ -684,6 +703,20 @@ fn distinct<T: Clone + PartialEq>(entries: &[T]) -> Vec<T> {
 
 			kept
 		})
+}
+
+/// A list's filters with each entry kept once, in its first order.
+fn distinct_filters(filters: &request::ListFilters) -> request::ListFilters {
+	request::ListFilters {
+		is_dm: filters.is_dm,
+		is_encrypted: filters.is_encrypted,
+		is_invite: filters.is_invite,
+		room_types: distinct(&filters.room_types),
+		not_room_types: distinct(&filters.not_room_types),
+		tags: distinct(&filters.tags),
+		not_tags: distinct(&filters.not_tags),
+		spaces: distinct(&filters.spaces),
+	}
 }
 
 fn list_filters_are_equal(request: &request::ListFilters, cached: &request::ListFilters) -> bool {

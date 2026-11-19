@@ -221,22 +221,37 @@ lookup and a stored fingerprint per room, and each `spaces` entry a state
 read. None of these had a length limit, so one request could keep a worker
 busy for minutes. A request is now refused with 400 `M_INVALID_PARAM` when it
 names more than 64 lists, a list ID longer than 64 bytes (the limit Synapse
-documents), more than 16 ranges in a list, more than 16 entries in a list's
-`spaces`, `tags`, `not_tags`, `room_types` or `not_room_types`, more than 256
-`required_state` selectors in a list or subscription, more than 256 distinct
-selectors across the lists, or with one subscription, or more than 64 list IDs
-or 256 rooms in an account data, receipts, typing or profiles filter. On a
+documents), more than 16 distinct ranges in a list, more than 16 distinct
+entries in a list's `spaces`, `tags`, `not_tags`, `room_types` or
+`not_room_types`, more than 256 `required_state` selectors in a list or
+subscription, more than 256 distinct selectors across the lists one room can
+match, or with one subscription, or more than 64 list IDs or 256 rooms in an
+account data, receipts, typing or profiles filter. Lists budget apart when no
+room can match both: opposite `is_dm`, `is_encrypted` or `is_invite`, or a
+required tag or room type the other excludes or does not admit. Lists are
+compared in pairs, so three lists no one room matches together can still share
+one budget (an unfiltered list beside a favourites list and a not-favourites
+list). Repeated ranges and filter entries count, and are kept, once. On a
 resumed connection the check counts the lists and settings the request
-inherits, and both checks run before the connection is reset, advanced or
-stored, so a client can correct the request and retry at the same position.
+inherits; a connection read from storage is checked before it is cached, and
+both checks run before presence is updated and before the connection is reset,
+advanced or stored, so a client can correct the request and retry at the same
+position. A connection stored before this change can hold selections that are
+now refused; a request without `pos` starts it afresh. Each pass numbers the
+lists' distinct selectors once, so a room merges each selector once however
+many of its lists repeat it.
 The fork first kept only the first entries instead, which could drop a
 `not_tags` or `not_room_types` exclusion and let a room the user can see into
 a list that excluded it (#174). A `spaces` entry also looks up the one
 `m.space.child` event naming the room instead of reading the space's whole
 state. Upstream has the same bug; the check follows the upstream proposal
 matrix-construct/tuwunel#732, without its sticky events scope, which the
-fork's Ruma lacks. Files: `src/api/client/sync/v5/{limits.rs,filter.rs}`,
-`src/api/client/sync/v5.rs`, `docs/troubleshooting.md`; tests in
+fork's Ruma lacks, and with the grouping and distinct counting above, so that
+it refuses little the fork accepted before: only the three-list case above
+and selections it used to cut. Files:
+`src/api/client/sync/v5/{limits.rs,selection.rs,rooms.rs,range.rs,filter.rs}`,
+`src/api/client/sync/v5.rs`, `src/service/sync/mod.rs`,
+`docs/troubleshooting.md`; tests in
 `src/api/client/sync/v5/limits/tests.rs`,
 `src/api/client/sync/v5/rooms/tests.rs`, `src/service/sync/tests.rs`,
 `src/main/tests/sync_v5_request_limits.rs` and

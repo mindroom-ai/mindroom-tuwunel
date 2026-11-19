@@ -504,6 +504,28 @@ fn update_cache_keeps_list_filters_whole() {
 	assert_eq!(cached_filters(&conn).not_tags, not_tags);
 }
 
+/// A filter keeps each entry once, in its first order, so resending it with
+/// repeated entries is no change.
+#[test]
+fn update_cache_keeps_each_list_filter_entry_once() {
+	let tag = |name: &str| TagName::from(name.to_owned());
+	let filters = |not_tags: Vec<TagName>| ListFilters { not_tags, ..Default::default() };
+	let repeated = [tag("u.b"), tag("u.a"), tag("u.b")]
+		.into_iter()
+		.cycle()
+		.take(17)
+		.collect();
+
+	let mut conn = Connection::default();
+
+	assert!(conn.update_cache(&request_with_list(list_with_filters(filters(repeated)))));
+	assert_eq!(cached_filters(&conn).not_tags, [tag("u.b"), tag("u.a")]);
+	assert!(!conn.update_cache(&request_with_list(list_with_filters(filters(vec![
+		tag("u.b"),
+		tag("u.a"),
+	])))));
+}
+
 #[test]
 fn epilogue_leaves_configuration_for_extension_only_range() {
 	let room_id = room_id!("!extension:example.com");

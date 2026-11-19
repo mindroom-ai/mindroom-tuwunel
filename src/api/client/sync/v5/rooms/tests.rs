@@ -16,6 +16,7 @@ use ruma::{
 use tuwunel_matrix::pdu::PduCount;
 
 use super::{
+	super::selection::ListSelections,
 	Candidate, Collected, Connection, ListIds, StateMode, TIMELINE_LIMIT_MAX, UnreadState,
 	collected::{recorded_snapshot, unread_state},
 	fingerprints_cover, membership_allows_required_state, merged_room_details,
@@ -261,7 +262,9 @@ fn timeline_limit_is_capped() {
 		};
 
 		let lists: ListIds = once(list).collect();
-		let (timeline_limit, required_state) = merged_room_details(&conn, &lists, room_id);
+		let selections = ListSelections::new(&conn);
+		let (timeline_limit, required_state) =
+			merged_room_details(&conn, &selections, &lists, room_id);
 		let expected_state = HashSet::from([
 			(StateEventType::RoomName, "".into()),
 			(StateEventType::RoomTopic, "".into()),
@@ -298,9 +301,38 @@ fn required_state_merges_every_list_selector() {
 		.chain((0..50).map(|key| selector(format!("b{key}"))))
 		.collect();
 
-	let (_, required_state) = merged_room_details(&conn, &lists, room_id);
+	let selections = ListSelections::new(&conn);
+	let (_, required_state) = merged_room_details(&conn, &selections, &lists, room_id);
 
 	assert_eq!(required_state.len(), 250);
+}
+
+/// Lists repeating one selection are numbered once per pass, so a room of all
+/// of them merges each distinct selector once.
+#[test]
+fn required_state_numbers_each_distinct_selector_once() {
+	let room_id = room_id!("!room:example.com");
+	let lists: ListIds = (0..64)
+		.map(|i| ListId::from(i.to_string().as_str()))
+		.collect();
+	let required_state: Vec<_> = (0..256)
+		.map(|key| (StateEventType::RoomMember, key.to_string().into()))
+		.collect();
+	let mut conn = Connection::default();
+	for list in &lists {
+		conn.lists
+			.entry(list.clone())
+			.or_default()
+			.room_details
+			.required_state
+			.clone_from(&required_state);
+	}
+
+	let selections = ListSelections::new(&conn);
+	let (_, merged) = merged_room_details(&conn, &selections, &lists, room_id);
+
+	assert_eq!(selections.distinct(), 256);
+	assert_eq!(merged, required_state.into_iter().collect());
 }
 
 #[test]
