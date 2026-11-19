@@ -1,4 +1,4 @@
-use ruma::room_id;
+use ruma::{api::client::sync::sync_events::v5::request::ListConfig, room_id};
 use serde_json::{Value, from_value, json};
 
 use super::{Connection, Request, check};
@@ -247,4 +247,44 @@ fn required_state_budgets_lists_that_can_share_a_room() {
 			.insert(room.clone(), from_value(subscription).expect("subscription"));
 		assert_eq!(check(&request, None).is_ok(), fits);
 	}
+}
+
+/// Subscriptions with independent selectors are counted on their own, and a
+/// subscription still counts the group selectors it does not repeat.
+#[test]
+fn subscriptions_count_their_own_selectors_against_each_group() {
+	let named = |prefix: String, n: usize| -> Vec<Value> {
+		(0..n)
+			.map(|i| json!(["m.room.member", format!("{prefix}{i}")]))
+			.collect()
+	};
+	let mut request = Request::new();
+	for room in 0..512 {
+		let subscription =
+			json!({"required_state": named(format!("s{room}x"), 256), "timeline_limit": 0});
+		request.room_subscriptions.insert(
+			format!("!r{room}:example.com")
+				.try_into()
+				.expect("room ID"),
+			from_value(subscription).expect("subscription"),
+		);
+	}
+	check(&request, None).expect("independent subscriptions fit");
+
+	let mut request = list(json!({"required_state": named("l".into(), 200)}));
+	let shared = named("l".into(), 200)
+		.into_iter()
+		.chain(named("s".into(), 56));
+	let room = room_id!("!sub:example.com").to_owned();
+	let subscribe = |keys: Vec<Value>| -> ListConfig {
+		from_value(json!({"required_state": keys, "timeline_limit": 0})).expect("subscription")
+	};
+	request
+		.room_subscriptions
+		.insert(room.clone(), subscribe(shared.collect()));
+	check(&request, None).expect("repeated group selectors count once");
+	request
+		.room_subscriptions
+		.insert(room, subscribe(named("s".into(), 57)));
+	assert!(check(&request, None).is_err());
 }

@@ -47,6 +47,13 @@ impl<'a> Numbered<'a> {
 			})
 	}
 
+	/// Whether a set holds the number of a selector.
+	pub(super) fn contains(&self, bits: &Bits, selector: &Selector) -> bool {
+		self.numbers
+			.get(selector)
+			.is_some_and(|&number| bits.contains(number))
+	}
+
 	fn selectors<'b>(&'b self, bits: &'b Bits) -> impl Iterator<Item = &'a Selector> + 'b {
 		bits.iter()
 			.filter_map(|number| self.selectors.get(number).copied())
@@ -63,6 +70,12 @@ impl Bits {
 		if let Some(bits) = self.0.get_mut(word) {
 			*bits |= 1_u64.wrapping_shl(expect_into(number % 64));
 		}
+	}
+
+	fn contains(&self, number: usize) -> bool {
+		self.0
+			.get(number / 64)
+			.is_some_and(|bits| bits & 1_u64.wrapping_shl(expect_into(number % 64)) != 0)
 	}
 
 	pub(super) fn union(&mut self, other: &Self) {

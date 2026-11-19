@@ -127,15 +127,16 @@ pub(crate) async fn sync_events_v5_route(
 		services.profile.check_requested_fields(fields)?;
 	}
 
-	// Refuse an invalid request before allocating or resetting its connection.
-	limits::check(request, None)?;
-	check_to_device(&request.extensions.to_device)?;
-
 	let since = request
 		.pos
 		.as_ref()
 		.and_then(|string| string.parse().ok())
 		.unwrap_or(0);
+
+	// Refuse an invalid request before allocating or resetting its connection.
+	// A resume inherits sticky filters, so its combined budget waits for them.
+	limits::check_wire(request, since != 0)?;
+	check_to_device(&request.extensions.to_device)?;
 
 	let timeout = poll_timeout(request, services.config.client.sync.timeout_max);
 

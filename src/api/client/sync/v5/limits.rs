@@ -25,6 +25,16 @@ const EXTENSION_ROOMS_MAX: usize = 256;
 /// Check the configuration the request would use, without modifying the connection.
 /// With no cached connection this checks just the wire request.
 pub(super) fn check(request: &Request, cached: Option<&Connection>) -> Result {
+	check_with(request, cached, true)
+}
+
+/// Check the wire request alone. For a resume this skips the combined budget,
+/// which depends on the sticky filters its connection inherits.
+pub(super) fn check_wire(request: &Request, resume: bool) -> Result {
+	check_with(request, None, !resume)
+}
+
+fn check_with(request: &Request, cached: Option<&Connection>, combined: bool) -> Result {
 	let updated = request
 		.lists
 		.iter()
@@ -63,7 +73,11 @@ pub(super) fn check(request: &Request, cached: Option<&Connection>) -> Result {
 		selections.push((filters, numbered.add(keys)));
 	}
 
-	let groups = co_applicable(&selections);
+	let groups = if combined {
+		co_applicable(&selections)
+	} else {
+		HashSet::new()
+	};
 	for group in &groups {
 		bounded(
 			"distinct required_state of lists one room can match",
@@ -74,19 +88,26 @@ pub(super) fn check(request: &Request, cached: Option<&Connection>) -> Result {
 
 	// A room can enter every list, but it can have only one explicit subscription.
 	// Do not charge different rooms' subscription selectors against one another.
+	// Only list selectors are numbered; a subscription's are counted against
+	// each group in their own scratch set of at most 256.
+	let largest = groups.iter().map(Bits::len).max().unwrap_or(0);
 	for sub in request.room_subscriptions.values() {
 		let keys = &sub.required_state;
 		bounded("required_state per subscription", keys.len(), REQUIRED_STATE_MAX)?;
-		let keys = numbered.add(keys);
-		for group in groups
-			.iter()
-			.filter(|group| group.len().saturating_add(keys.len()) > REQUIRED_STATE_MAX)
-		{
-			let mut merged = keys.clone();
-			merged.union(group);
+		let keys: HashSet<_> = keys.iter().collect();
+		if largest.saturating_add(keys.len()) <= REQUIRED_STATE_MAX {
+			continue;
+		}
+
+		for group in &groups {
+			let extra = keys
+				.iter()
+				.filter(|key| !numbered.contains(group, key))
+				.count();
+
 			bounded(
 				"distinct list and subscription required_state",
-				merged.len(),
+				group.len().saturating_add(extra),
 				REQUIRED_STATE_MAX,
 			)?;
 		}
