@@ -98,15 +98,25 @@ where
 
 	debug!("acquire {requested_keys} keys from {requested_servers}");
 
+	// Storing a document keeps every requested key, so one acquisition keeps the
+	// keys it found cached as well as those it fetched.
+	let wanted = batch
+		.clone()
+		.fold(Batch::new(), |mut wanted, (server, key_ids)| {
+			wanted
+				.entry(server.into())
+				.or_default()
+				.extend(key_ids.map(Into::into));
+
+			wanted
+		});
+
 	let mut missing = self.acquire_locals(batch).await;
 	let mut missing_keys = keys_count(&missing);
 	let mut missing_servers = missing.len();
 	if missing_servers == 0 {
 		return;
 	}
-
-	// Storing a later document keeps these, so one acquisition keeps every key it fetched.
-	let wanted = missing.clone();
 
 	info!("{missing_keys} keys for {missing_servers} servers will be acquired");
 
@@ -277,8 +287,9 @@ where
 
 /// Stores one notary document and recounts its server's missing keys.
 ///
-/// The count reads the stored row, not the document: storing it may drop keys
-/// when the row would grow too large, and a dropped key is still missing.
+/// The count covers every key the batch requested for the server and reads the
+/// stored row, not the document: storing it may drop keys when the row would
+/// grow too large, and a dropped key is missing again, even one found cached.
 #[implement(super::Service)]
 async fn acquire_notary_result(
 	&self,
