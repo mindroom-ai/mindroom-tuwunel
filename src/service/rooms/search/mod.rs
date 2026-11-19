@@ -1,4 +1,7 @@
-use std::sync::Arc;
+#[cfg(test)]
+mod tests;
+
+use std::{collections::HashSet, sync::Arc};
 
 use futures::{Stream, StreamExt};
 use ruma::{RoomId, UserId, api::client::search::search_events::v3::Criteria};
@@ -7,7 +10,7 @@ use tuwunel_core::{
 	arrayvec::ArrayVec,
 	implement, trace,
 	utils::{
-		ArrayVecExt, IterStream, ReadyExt, set,
+		ArrayVecExt, IterStream, ReadyExt,
 		stream::{TryIgnore, WidebandExt},
 	},
 };
@@ -148,9 +151,29 @@ pub async fn search_pdu_ids(
 		.search_pdu_ids_query_room(query, shortroomid)
 		.await;
 
-	let iters = pdu_ids.into_iter().map(IntoIterator::into_iter);
+	Ok(intersect_hits(pdu_ids).into_iter().stream())
+}
 
-	Ok(set::intersection(iters).stream())
+/// Keeps the ids every word's hit list holds, in the shortest list's order.
+///
+/// Each list is newest first, so the result is too. The shortest list is
+/// checked against a hash set of each other list, which costs the lists' total
+/// length rather than a scan of every other list per candidate. No words give
+/// no hits.
+fn intersect_hits(mut lists: Vec<Vec<RawPduId>>) -> Vec<RawPduId> {
+	lists.sort_unstable_by_key(Vec::len);
+	let mut lists = lists.into_iter();
+	let mut hits = lists.next().unwrap_or_default();
+	for list in lists {
+		if hits.is_empty() {
+			break;
+		}
+
+		let list: HashSet<_> = list.into_iter().collect();
+		hits.retain(|id| list.contains(id));
+	}
+
+	hits
 }
 
 #[implement(Service)]
