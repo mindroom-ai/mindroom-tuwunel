@@ -182,7 +182,7 @@ async fn search_pdu_ids_query_room(
 	query: &RoomQuery<'_>,
 	shortroomid: ShortRoomId,
 ) -> Vec<Vec<RawPduId>> {
-	tokenize(&query.criteria.search_term)
+	query_words(&query.criteria.search_term)
 		.stream()
 		.wide_then(async |word| {
 			self.search_pdu_ids_query_words(shortroomid, &word)
@@ -248,6 +248,15 @@ pub async fn delete_all_search_tokenids_for_room(&self, room_id: &RoomId) -> Res
 	txn.execute();
 
 	Ok(())
+}
+
+/// The distinct words of a search term, in first-seen order.
+///
+/// A repeated word holds the same events as its first use, so its hit list is
+/// read once.
+fn query_words(search_term: &str) -> impl Iterator<Item = String> + Send + '_ {
+	let mut seen = HashSet::new();
+	tokenize(search_term).filter(move |word| seen.insert(word.clone()))
 }
 
 /// Splits a string into tokens used as keys in the search inverted index

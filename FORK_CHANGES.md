@@ -257,13 +257,15 @@ first time a range selects it. Upstream has the same bug. Files:
 A room search for several words read each word's hits, newest first, and kept
 those of the first word that every other word's list held. Each candidate
 copied the other lists and scanned them, so a sentence of common words, with
-hit lists of up to 200,000 events, took about 47 seconds in one room while a
+hit lists of roughly 200,000 events, took about 47 seconds in one room while a
 single word took under a second. The shortest list is now checked against a
-hash set of each other list, which keeps its newest-first order for paging.
-Upstream has the same bug. File: `src/service/rooms/search/mod.rs`; tests in
+hash set of each other list, which keeps its newest-first order for paging,
+and a word repeated in the query is read once. Reading the hit lists and
+loading and filtering events are unchanged. Upstream has the same bug. File:
+`src/service/rooms/search/mod.rs`; tests in
 `src/service/rooms/search/tests.rs`, `src/service/rooms/search/tests/timing.rs`
-(production-sized lists in under a second of CPU time) and
-`src/main/tests/search_multi_word.rs`.
+(synthetic production-sized lists intersect in under one second of Linux
+thread CPU time) and `src/main/tests/search_multi_word.rs`.
 
 ### Uploaded device and cross-signing keys are bounded in size
 

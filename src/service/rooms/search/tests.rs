@@ -5,7 +5,7 @@ mod timing;
 
 use tuwunel_matrix::PduCount;
 
-use super::intersect_hits;
+use super::{intersect_hits, query_words};
 use crate::rooms::timeline::{PduId, RawPduId};
 
 /// The hits are those in every list, newest first, whichever list is shortest.
@@ -18,6 +18,15 @@ fn hits_are_in_every_list_newest_first() {
 	assert_eq!(intersect_hits(vec![ids(&[2, 1])]), ids(&[2, 1]));
 	assert!(intersect_hits(vec![ids(&[2]), Vec::new()]).is_empty());
 	assert!(intersect_hits(Vec::new()).is_empty());
+}
+
+/// A repeated word, in any case, is read once, where it first appears.
+#[test]
+fn query_words_are_distinct_in_first_seen_order() {
+	let words: Vec<_> = query_words("Be nice to be, able to BE!").collect();
+
+	assert_eq!(words, ["be", "nice", "to", "able"]);
+	assert_eq!(query_words("?! ...").count(), 0);
 }
 
 fn ids(counts: &[u64]) -> Vec<RawPduId> { counts.iter().copied().map(id).collect() }

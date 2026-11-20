@@ -20,12 +20,14 @@ const SHARED_EVERY: u64 = 4_000;
 const WORD_HITS: [u64; 10] =
 	[3_837, 171_950, 32_715, 84_557, 1_267, 206_178, 84_557, 1_496, 206_178, 20_941];
 
-/// A sentence whose words have production-sized hit lists intersects fast.
+/// Production-sized hit lists, already read, intersect fast.
 ///
 /// The words' hits are spread pseudo-randomly over the room, and every
 /// `SHARED_EVERY`th message holds them all. Scanning every other list per
 /// candidate took about 47 seconds for these sizes in production. The bound is
-/// on this thread's CPU time, which other tests' load does not stretch.
+/// on the Linux thread CPU time of the intersection alone, which excludes time
+/// descheduled; it is not the endpoint's latency, since reading the hit lists
+/// and loading and filtering events are not measured.
 #[test]
 fn production_sized_hit_lists_intersect_quickly() {
 	let lists = WORD_HITS

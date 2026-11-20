@@ -21,7 +21,10 @@ mod message;
 const TOKEN: &str = "search-multi-word-user-access-token";
 
 /// The room's messages, oldest first.
-const MESSAGES: [&str; 9] = [
+///
+/// The last holds only `alpha`, so its list is longer than the later words'
+/// in the searches for all three.
+const MESSAGES: [&str; 10] = [
 	"alpha beta gamma",
 	"alpha only",
 	"beta gamma",
@@ -31,23 +34,26 @@ const MESSAGES: [&str; 9] = [
 	"alpha gamma beta delta",
 	"be quiet",
 	"gamma",
+	"alpha",
 ];
 
 /// Each search term with the indices of the messages it finds, newest first.
-const SEARCHES: [(&str, &[usize]); 6] = [
+const SEARCHES: [(&str, &[usize]); 8] = [
 	("alpha beta gamma", &[6, 3, 0]),
 	("gamma ALPHA", &[6, 3, 0]),
 	("be able to be", &[5]),
-	("alpha alpha", &[6, 4, 3, 1, 0]),
+	("alpha alpha", &[9, 6, 4, 3, 1, 0]),
 	("gamma", &[8, 6, 3, 2, 0]),
+	("Beta, BETA beta", &[6, 4, 3, 2, 0]),
 	("alpha zeta", &[]),
+	("?! ...", &[]),
 ];
 
 /// A multi-word search finds the messages holding every word, newest first.
 ///
 /// Each search is paged at several limits. A repeated word counts once, a
-/// single word finds every message holding it, and a word no message holds
-/// leaves no hits.
+/// single word finds every message holding it, and a word no message holds,
+/// or a term without words, leaves no hits.
 #[test]
 fn multi_word_search_finds_messages_with_every_word() -> Result {
 	boot("search-multi-word", [], exercise)
