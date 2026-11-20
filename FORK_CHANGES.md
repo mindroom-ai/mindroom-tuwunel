@@ -1049,10 +1049,10 @@ which `decide_user_id` now reads too), lowercased in ASCII only, so a
 non-ASCII lookalike that lowercases to a name names no account.
 `claimed_account` gives it only when the record names the configured
 appservice, which is registered and has the account in its `users` namespace
-now; the name is in no registered appservice's exclusive namespace (read in the
-same appservices read as the record's check), so an import appservice's ghost
-accounts there are never claimed, as ordinary sign-in naming never picks such a
-name; the account is no appservice's own user, not a server
+now; the name is in no registered appservice's exclusive namespace, so an
+import appservice's ghost accounts there are never claimed, as ordinary
+sign-in naming never picks such a name; the account is no appservice's own
+user, not a server
 admin, not locked, not of a forbidden name (matched on the local part) and
 not listed in an `assigned_accounts`; the sign-in holds every claim of
 `assigned_accounts_claims`; the provider does not say the address is
@@ -1060,11 +1060,14 @@ unverified, and says it is verified when the name is read from the `email`
 claim; and, by the assignment's own checks (`sso_assignment`, split from
 `assign_sso_account`), the account exists, has an empty password, no recorded
 deactivation and no linked identity. The record and the appservices are read
-first, and the appservices released, before the account is held: registering
-an appservice holds them while it takes its own user's lock, so a claim that
-held the account and then waited for them could wait on such a registration
-for ever. The account's password lock is then taken and held until the link
-is stored, and the account gets the sentinel and origin `sso` in the same
+first, before the account is held: registering an appservice holds them while
+it takes its own user's lock, so a claim that held the account and then
+waited for them could wait on such a registration for ever. A claim that
+succeeds keeps its read of the appservices until the link is stored, so no
+appservice registered meanwhile makes the name exclusive or its own user;
+nothing from that read to the link reads them again, which, with a
+registration waiting, would wait for ever. The account's password lock is
+then taken and held until the link is stored, and the account gets the sentinel and origin `sso` in the same
 write batch, as an assigned account does. The admin and lock reads are made
 under that lock, which a promotion or an account lock does not take. A first
 claim that is not a valid name claims nothing; no later claim is tried, as
