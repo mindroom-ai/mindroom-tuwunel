@@ -1179,7 +1179,7 @@ async fn registry_held(services: &Services, base: &str, client: &Client) -> Resu
 	};
 
 	// The timeout is only a watchdog.
-	let (response, registered) = timeout(Duration::from_secs(60), join(signing, registering))
+	let (response, registered) = timeout(Duration::from_mins(1), join(signing, registering))
 		.await
 		.map_err(|_| err!("the claim and the registration finish"))?;
 
