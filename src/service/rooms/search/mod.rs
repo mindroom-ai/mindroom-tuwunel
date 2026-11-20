@@ -207,6 +207,7 @@ pub async fn search_pdu_ids(&self, query: &RoomQuery<'_>) -> Result<Vec<RawPduId
 			intersect_hits(vec![hits, list])
 		} else {
 			drop(scan);
+			drop(list);
 			let found: Vec<_> = hits
 				.into_iter()
 				.stream()

@@ -61,8 +61,9 @@ const FILLERS: usize = 16;
 /// Postings of `common` and `most` indexed directly in the room of skewed
 /// lists, for ids of no event, so that their lists are longer than the
 /// search's probe factor times two hits. Sending that many messages would be
-/// slow.
-const SEEDED: usize = 2 * PROBE_FACTOR;
+/// slow. A term of only `common` and `most` would count these ids; every term
+/// here also holds a word only real messages have.
+const SEEDED: usize = 2 * PROBE_FACTOR + 1;
 
 /// The count of the first seeded id, above every event's, so that a scan of
 /// `common` or `most` reads the seeded ids before any message.

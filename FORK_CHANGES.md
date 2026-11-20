@@ -252,7 +252,7 @@ first time a range selects it. Upstream has the same bug. Files:
 `src/service/sync/mod.rs`, `src/api/client/sync/v5/selector.rs`; test in
 `src/service/sync/tests.rs`.
 
-### A multi-word search reads the shortest list and looks up the rest
+### A multi-word search reads the shortest list first and looks up rare hits
 
 A room search for several words read each word's hits, newest first, and kept
 those of the first word that every other word's list held. Each candidate
@@ -276,7 +276,9 @@ other than a missing key is logged and leaves that room out of the results,
 where a failed scan item was skipped. In a release benchmark on synthetic
 production-sized lists, with the factor at 8, that sentence's id search fell
 from 163 ms to 4 ms with a warm block cache, and from about 9 s to under 0.4 s
-on its first run after opening the database. Upstream has the
+on its first run after opening the database. At 4096 that sentence reads
+every list whole again, so those gains no longer apply to it; lookups now
+help only a room with very few hits against a huge list. Upstream has the
 same bug. Files: `src/service/rooms/search/mod.rs`,
 `src/api/client/search.rs`; tests in
 `src/service/rooms/search/tests.rs`, `src/service/rooms/search/tests/timing.rs`
