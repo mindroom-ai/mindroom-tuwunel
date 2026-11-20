@@ -20,7 +20,7 @@ use tuwunel_core::{
 use tuwunel_service::{Services, sync::Connection};
 
 use super::{
-	super::{range::Results, rooms::merged_room_details},
+	super::{range::Results, rooms::merged_room_details, selection::ListSelections},
 	SyncInfo, Window, selector,
 };
 use crate::sync::profiles::{Changes, Fields, fold_change, read_field, visible};
@@ -108,6 +108,7 @@ async fn room_bases(
 	ranges: &Results,
 ) -> Result<impl Iterator<Item = OwnedUserId>> {
 	let config = &conn.extensions.profiles;
+	let selections = ListSelections::new(conn);
 
 	let subjects = selector(
 		conn,
@@ -129,7 +130,7 @@ async fn room_bases(
 			return Ok(bases);
 		};
 
-		let (_, state) = merged_room_details(conn, &selected.lists, room_id);
+		let (_, state) = merged_room_details(conn, &selections, &selected.lists, room_id);
 		let lazy = state
 			.iter()
 			.any(|(kind, key)| kind == &StateEventType::RoomMember && key == "$LAZY");

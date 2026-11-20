@@ -1,7 +1,9 @@
 mod extensions;
 mod filter;
+mod limits;
 mod range;
 mod rooms;
+mod selection;
 mod selector;
 
 #[cfg(test)]
@@ -16,7 +18,7 @@ use std::{
 };
 
 use axum::extract::{Extension, State};
-use futures::{TryFutureExt, future::join};
+use futures::future::join;
 use ruma::{
 	DeviceId, OwnedRoomId, RoomId, UserId,
 	api::client::sync::sync_events::v5::{ListId, Request, Response, response},
@@ -33,7 +35,6 @@ use tuwunel_core::{
 	smallvec::SmallVec,
 	trace,
 	utils::{
-		TryFutureExtExt,
 		result::{FlatOk, NotFound},
 		time::millis,
 	},
@@ -126,23 +127,41 @@ pub(crate) async fn sync_events_v5_route(
 		services.profile.check_requested_fields(fields)?;
 	}
 
-	check_to_device(&request.extensions.to_device)?;
-
 	let since = request
 		.pos
 		.as_ref()
 		.and_then(|string| string.parse().ok())
 		.unwrap_or(0);
 
+	// Refuse an invalid request before allocating or resetting its connection.
+	// A resume inherits sticky filters, so its combined budget waits for them.
+	limits::check_wire(request, since != 0)?;
+	check_to_device(&request.extensions.to_device)?;
+
 	let timeout = poll_timeout(request, services.config.client.sync.timeout_max);
 
 	let conn_key = into_connection_key(sender_user, sender_device, request.conn_id.as_deref());
+
+	// A valid delta can exceed a limit together with the retained selections.
+	// A stored connection is checked before it is cached, a cached one under
+	// its lock, and both before presence or the connection change.
+	let admit = |conn: &Connection| -> Result {
+		if since != 0 {
+			limits::check(request, Some(conn))?;
+			check_profile_selection(services, request, conn)?;
+		}
+
+		Ok(())
+	};
+
 	let conn_val = services
 		.sync
-		.load_or_init_connection(&conn_key)
+		.load_or_init_connection_checked(&conn_key, admit)
 		.await?;
 
-	let conn = conn_val.lock();
+	let mut conn = conn_val.lock().await;
+	admit(&conn)?;
+
 	let ping = Ping {
 		device_id: sender_device,
 		client_ip: Some(client),
@@ -150,17 +169,12 @@ pub(crate) async fn sync_events_v5_route(
 		appservice: body.appservice_info.as_ref(),
 	};
 
-	let ping_presence = services
+	services
 		.presence
 		.maybe_ping_presence(sender_user, ping)
+		.await
 		.inspect_err(inspect_log)
 		.ok();
-
-	let (mut conn, _) = join(conn, ping_presence).await;
-
-	if since != 0 {
-		check_profile_selection(services, request, &conn)?;
-	}
 
 	if since != 0 && conn.next_batch == 0 {
 		return Err!(Request(UnknownPos(warn!("Connection lost; restarting sync stream."))));

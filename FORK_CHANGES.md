@@ -133,12 +133,24 @@ from a notary, was merged into the one row stored for that server, and nothing
 removed keys from it. A server that answered each fetch with new key ids grew
 that row without bound, and every key lookup for the server parsed the whole
 row, including the lookup for each incoming federation request it signs. A
-merge that would make the row larger than 64 KiB now keeps only the fetched
-keys, and a fetched document over 64 KiB on its own is not stored. A stored row
-over 64 KiB, left from before this change, is treated as absent: lookups do not
-parse it, and the next fetch for the server replaces it. Servers publish a few
-keys in a few hundred bytes. Upstream has the same bug. Files:
-`src/service/server_keys/mod.rs`; test in `src/service/server_keys/tests.rs`.
+merge that would make the row larger than 64 KiB of serialized JSON now keeps
+the fetched keys and the stored keys the running acquisition asked for, those
+it fetched and those it found cached, so two notary documents of one batch,
+each with a requested retired key, keep both (#174). Retention is bounded by
+total serialized size, not by a number of keys: if the fetched keys and the
+requested ones are still over 64 KiB, only the fetched keys are kept, which can
+drop a requested key, and a fetched document over 64 KiB on its own is not
+stored. A batch acquisition counts a key as found only when the stored row
+holds it after each write, so a key dropped this way is missing again and is
+asked for from the next source. (A single lookup that fetches a key to verify
+one signature still uses the key it fetched even when the row could not keep
+it.) A stored row over 64 KiB, left from before
+this change, is treated as absent: lookups do not parse it, and the next fetch
+for the server replaces it. Servers publish a few keys in a few hundred bytes.
+Upstream has the same bug. Files:
+`src/service/server_keys/{mod.rs,acquire.rs,get.rs}`; tests in
+`src/service/server_keys/tests.rs` and
+`src/main/tests/federation_notary_key_batch.rs`.
 
 ### Lookups on a named server read small answers
 
@@ -200,44 +212,49 @@ minutes. The stored selectors are now collected into a hash set once per room.
 Upstream has the same bug. File: `src/api/client/sync/v5/rooms.rs`; test in
 `src/api/client/sync/v5/rooms/tests.rs`.
 
-### Sliding sync caps the required state selectors
+### Sliding sync refuses oversized selections
 
-The `required_state` list of a sliding sync list or room subscription had no
-length limit. Each request copied, hashed and, on a room's initial pass, looked
-up every selector for every room in the window, and the connection kept a
-fingerprint of each selector per room and was stored after every response, so
-the cost grew with the rooms times the selectors. The connection now keeps only
-the first 256 selectors of each list and subscription, and a room uses at most
-256 selectors across the lists and the subscription that cover it. Upstream has
-the same bug. Files: `src/service/sync/mod.rs`,
-`src/api/client/sync/v5/rooms.rs`; tests in `src/service/sync/tests.rs` and
-`src/api/client/sync/v5/rooms/tests.rs`.
-
-### Sliding sync caps the lists, ranges and extension filters
-
-A sliding sync connection kept every list a request named with all of its
-ranges, and the account data, receipts, typing and profiles extensions kept
-their `lists` and `rooms` filters as sent. Each pass matched every room in the
-window against every list for each range, and every room an extension filter
-named against every list ID of that filter, without yielding, so a request
-with many lists, ranges or filter entries kept a worker busy for minutes. A
-connection now keeps at most 64 lists and the first 16 ranges of each, and an
-extension filter keeps its first 64 list IDs and its first 256 rooms. Upstream
-has the same bug. File: `src/service/sync/mod.rs`; tests in
-`src/service/sync/tests.rs`.
-
-### Sliding sync caps list IDs and list filters
-
-A sliding sync list ID had no length limit, and a list kept its `spaces`,
-`tags`, `not_tags`, `room_types` and `not_room_types` filters as sent. Each
-pass copied a room with the IDs of the lists it matched for every range it was
-selected in, and matched every room against every filter entry, where each
-`spaces` entry read the whole state of the named room. A connection now ignores
-lists with an ID longer than 64 bytes, the limit Synapse documents, and drops
-such IDs from extension filters. Each list keeps the first 16 distinct entries
-of each filter, and a `spaces` entry looks up the one `m.space.child` event
-naming the room. Upstream has the same bug. Files: `src/service/sync/mod.rs`,
-`src/api/client/sync/v5/filter.rs`; tests in `src/service/sync/tests.rs` and
+A sliding sync connection keeps the lists, room subscriptions and extension
+filters a request names for later requests, and each pass matches every room
+in the window against all of them: each `required_state` selector costs a
+lookup and a stored fingerprint per room, and each `spaces` entry a state
+read. None of these had a length limit, so one request could keep a worker
+busy for minutes. A request is now refused with 400 `M_INVALID_PARAM` when it
+names more than 64 lists, a list ID longer than 64 bytes (the limit Synapse
+documents), more than 16 distinct ranges in a list, more than 16 distinct
+entries in a list's `spaces`, `tags`, `not_tags`, `room_types` or
+`not_room_types`, more than 256 `required_state` selectors in a list or
+subscription, more than 256 distinct selectors across the lists one room can
+match, or with one subscription, or more than 64 list IDs or 256 rooms in an
+account data, receipts, typing or profiles filter. Lists budget apart when no
+room can match both: opposite `is_dm`, `is_encrypted` or `is_invite`, or a
+required tag or room type the other excludes or does not admit. Lists are
+compared in pairs, so three lists no one room matches together can still share
+one budget (an unfiltered list beside a favourites list and a not-favourites
+list). Repeated ranges and filter entries count, and are kept, once. On a
+resumed connection the check counts the lists and settings the request
+inherits; a connection read from storage is checked before it is cached, and
+both checks run before presence is updated and before the connection is reset,
+advanced or stored, so a client can correct the request and retry at the same
+position. A connection stored before this change can hold selections that are
+now refused; a request without `pos` starts it afresh. Each pass numbers the
+lists' distinct selectors once, so a room merges each selector once however
+many of its lists repeat it.
+The fork first kept only the first entries instead, which could drop a
+`not_tags` or `not_room_types` exclusion and let a room the user can see into
+a list that excluded it (#174). A `spaces` entry also looks up the one
+`m.space.child` event naming the room instead of reading the space's whole
+state. Upstream has the same bug; the check follows the upstream proposal
+matrix-construct/tuwunel#732, without its sticky events scope, which the
+fork's Ruma lacks, and with the grouping and distinct counting above, so that
+it refuses little the fork accepted before: only the three-list case above
+and selections it used to cut. Files:
+`src/api/client/sync/v5/{limits.rs,selection.rs,rooms.rs,range.rs,filter.rs}`,
+`src/api/client/sync/v5.rs`, `src/service/sync/mod.rs`,
+`docs/troubleshooting.md`; tests in
+`src/api/client/sync/v5/limits/tests.rs`,
+`src/api/client/sync/v5/rooms/tests.rs`, `src/service/sync/tests.rs`,
+`src/main/tests/sync_v5_request_limits.rs` and
 `src/main/tests/sync_v5_list_filters.rs`.
 
 ### Sliding sync copies each window room once
