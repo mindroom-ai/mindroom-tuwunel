@@ -59,6 +59,8 @@ pub(crate) mod well_known;
 
 mod utils;
 
+#[cfg(feature = "sso_link_pause")]
+pub use self::session::link_pause;
 pub(crate) use self::{
 	account::{
 		add_3pid_route, change_password_route, deactivate_route, delete_3pid_route,
@@ -185,8 +187,6 @@ pub(crate) use self::{
 	voip::turn_server_route,
 	well_known::{well_known_client, well_known_support},
 };
-#[cfg(feature = "sso_link_pause")]
-pub use self::session::link_pause;
 pub use self::{
 	context::{ContextArgs, event_context},
 	directory::get_public_rooms_filtered_helper,

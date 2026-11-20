@@ -1159,7 +1159,11 @@ async fn registry_held(services: &Services, base: &str, client: &Client) -> Resu
 
 		let mut registration = pin!(register_one(services, name, AS_TOKEN, name, exclusive));
 		let first = registration.as_mut().now_or_never();
-		let reads_wait = services.appservice.read().now_or_never().is_none();
+		let reads_wait = services
+			.appservice
+			.read()
+			.now_or_never()
+			.is_none();
 
 		drop(resume);
 
