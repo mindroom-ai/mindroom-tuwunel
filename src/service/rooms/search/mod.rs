@@ -9,7 +9,7 @@ use tuwunel_core::{
 	Result, implement, trace,
 	utils::{
 		IterStream, ReadyExt,
-		result::NotFound,
+		result::{LogErr, NotFound},
 		stream::{TryIgnore, WidebandExt},
 	},
 };
@@ -207,7 +207,13 @@ pub async fn search_pdu_ids(&self, query: &RoomQuery<'_>) -> Result<Vec<RawPduId
 				.stream()
 				.wide_then(async |id| -> Result<Option<RawPduId>> {
 					let key = make_tokenid(shortroomid, word, &id);
-					let found = self.db.tokenids.exists(&key).await.present()?;
+					let found = self
+						.db
+						.tokenids
+						.exists(&key)
+						.await
+						.present()
+						.log_err()?;
 					Ok(found.map(|()| id))
 				})
 				.try_collect()
