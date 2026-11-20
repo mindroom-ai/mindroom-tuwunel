@@ -1049,7 +1049,10 @@ which `decide_user_id` now reads too), lowercased in ASCII only, so a
 non-ASCII lookalike that lowercases to a name names no account.
 `claimed_account` gives it only when the record names the configured
 appservice, which is registered and has the account in its `users` namespace
-now (exclusive or not); the account is no appservice's own user, not a server
+now; the name is in no registered appservice's exclusive namespace (read in the
+same appservices read as the record's check), so an import appservice's ghost
+accounts there are never claimed, as ordinary sign-in naming never picks such a
+name; the account is no appservice's own user, not a server
 admin, not locked, not of a forbidden name (matched on the local part) and
 not listed in an `assigned_accounts`; the sign-in holds every claim of
 `assigned_accounts_claims`; the provider does not say the address is

@@ -2036,7 +2036,9 @@ pub struct IdentityProvider {
 	/// no later claim is tried, as one is for a new account's name. It gets
 	/// it only when that appservice registered the account with
 	/// `m.login.application_service`, which the server records as it creates
-	/// the account, and still has the name in its `users` namespace; the
+	/// the account, and still has the name in its `users` namespace; the name
+	/// is in no appservice's exclusive namespace, such as one for its ghost
+	/// accounts, where a sign-in never names a new account either; the
 	/// account is no appservice's own user, has no password, and is not
 	/// deactivated, locked, a server admin, linked to any identity or listed
 	/// in an `assigned_accounts`; the sign-in holds every claim of
