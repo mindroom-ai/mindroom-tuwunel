@@ -354,10 +354,7 @@ impl Service {
 
 	/// The assignment of an account to a signing-in identity that has none
 	/// yet, or the reason the account cannot be linked.
-	pub async fn sso_assignment(
-		&self,
-		user_id: &UserId,
-	) -> Result<SsoAssignment, &'static str> {
+	pub async fn sso_assignment(&self, user_id: &UserId) -> Result<SsoAssignment, &'static str> {
 		let guard = self.changing_password.lock(user_id).await;
 		let password = self.password_hash(user_id).await;
 		let empty = password.as_deref().is_ok_and(str::is_empty);

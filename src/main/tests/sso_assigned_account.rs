@@ -976,13 +976,15 @@ async fn premade(services: &Services, base: &str, client: &Client) -> Result {
 	let sam = user("made-sam")?;
 	let tom = user("made-tom")?;
 	let admin = client::register(services, "premade-admin", ADMIN_TOKEN).await?;
-	let login_type = |localpart: &str| {
-		json!({ "type": "m.login.application_service", "username": localpart })
-	};
+	let login_type =
+		|localpart: &str| json!({ "type": "m.login.application_service", "username": localpart });
 
 	services
 		.users
-		.full_register(Register { user_id: Some(&sam), ..Default::default() })
+		.full_register(Register {
+			user_id: Some(&sam),
+			..Default::default()
+		})
 		.await?;
 
 	services.admin.make_user_admin(&admin).await?;
@@ -1000,7 +1002,13 @@ async fn premade(services: &Services, base: &str, client: &Client) -> Result {
 	let users = &services.users;
 
 	assert_eq!(users.registering_appservice(ann).await.as_deref(), Some(APPSERVICE));
-	assert_eq!(users.registering_appservice(&uri).await.as_deref(), Some(OTHER));
+	assert_eq!(
+		users
+			.registering_appservice(&uri)
+			.await
+			.as_deref(),
+		Some(OTHER)
+	);
 
 	for account in [&sam, &tom, &vic, &sender] {
 		assert_eq!(users.registering_appservice(account).await, None, "{account}");
@@ -1106,7 +1114,10 @@ async fn register_appservice(services: &Services) -> Result {
 	let assigned = "^@(alice|carol|dave|gina|hank|kim|rita|uma|vera|wes):.*$";
 	let made = || Namespace::new(false, "^@made-[a-z]+:.*$".to_owned());
 	let appservices = [
-		(APPSERVICE, AS_TOKEN, "migration", vec![Namespace::new(true, assigned.to_owned()), made()]),
+		(APPSERVICE, AS_TOKEN, "migration", vec![
+			Namespace::new(true, assigned.to_owned()),
+			made(),
+		]),
 		(OTHER, OTHER_TOKEN, "other-migration", vec![made()]),
 	];
 

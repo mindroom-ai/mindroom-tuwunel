@@ -1295,7 +1295,12 @@ async fn claimed_account(
 				.get(appservice)
 				.is_some_and(|info| info.is_user_match(&user_id));
 
-		(made, appservices.values().any(|info| info.sender == user_id))
+		(
+			made,
+			appservices
+				.values()
+				.any(|info| info.sender == user_id),
+		)
 	};
 
 	let forbidden = &services.config.registration.forbidden_usernames;
