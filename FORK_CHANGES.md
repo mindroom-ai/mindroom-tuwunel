@@ -252,6 +252,23 @@ first time a range selects it. Upstream has the same bug. Files:
 `src/service/sync/mod.rs`, `src/api/client/sync/v5/selector.rs`; test in
 `src/service/sync/tests.rs`.
 
+### A multi-word search intersects its hit lists by hash set
+
+A room search for several words read each word's hits, newest first, and kept
+those of the first word that every other word's list held. Each candidate
+copied all the other lists before scanning them, about 3.1 billion ids for a
+ten-word sentence of common words with hit lists of roughly 200,000 events,
+and the whole search request took about 47 seconds in one room while a
+single word took under a second. The shortest list is now checked against a
+hash set of each other list, which keeps its newest-first order for paging,
+and a word repeated in the query is read once. Reading the hit lists and
+loading and filtering events are unchanged. Upstream has the same bug. File:
+`src/service/rooms/search/mod.rs`; tests in
+`src/service/rooms/search/tests.rs`, `src/service/rooms/search/tests/timing.rs`
+(synthetic production-sized lists intersect in under five seconds of Linux
+thread CPU time, where the old code took 35 to 49 seconds) and
+`src/main/tests/search_multi_word.rs`.
+
 ### Uploaded device and cross-signing keys are bounded in size
 
 Device keys a local client uploaded, and its master and self-signing keys,
