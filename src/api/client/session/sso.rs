@@ -1268,9 +1268,11 @@ async fn claimed_account(
 		.find_config(provider.id())
 		.ok()?;
 
-	// The names are read from the live configuration too: the provider is as
-	// it was first used, with the `userid_claims` it had then.
-	let appservice = config.claim_accounts_of_appservice.as_deref()?;
+	// All that the configuration says is read here, at one point and before
+	// anything is awaited, so a reload meanwhile changes none of it. The names
+	// are read from it too: the provider is as it was first used, with the
+	// `userid_claims` it had then.
+	let appservice = config.claim_accounts_of_appservice.clone()?;
 	let choices = userid_choices(config, userinfo);
 	let (claim, name) = choices
 		.iter()
@@ -1278,6 +1280,11 @@ async fn claimed_account(
 		.find_map(|(claim, name)| Some((claim, name.as_ref()?.to_ascii_lowercase())))?;
 
 	let user_id = parse_user_id(services.globals.server_name(), &name).ok()?;
+	let claims = &config.assigned_accounts_claims;
+	let unclaimed = !claims.is_empty() && !userinfo.meets(claims, config.trusted);
+	let reserved = listed(services, &user_id);
+	let forbidden = &services.config.registration.forbidden_usernames;
+	let forbidden = forbidden.is_match(user_id.localpart());
 	let associated = services
 		.oauth
 		.sessions
@@ -1292,7 +1299,10 @@ async fn claimed_account(
 	// verified; any other name still fails on an address said to be unverified.
 	let by_address = claim == choices.len().saturating_sub(1);
 	let verified = userinfo.email_verified.unwrap_or(!by_address);
-	let claims = &config.assigned_accounts_claims;
+
+	// Every appservice is loaded before any is asked about, and before the
+	// account is held.
+	services.appservice.loaded().await;
 
 	// The account's own checks, and its password lock, which a claim holds
 	// until its link is stored; the checks below are made under it.
@@ -1308,9 +1318,9 @@ async fn claimed_account(
 
 	let (made, owned) = {
 		let appservices = services.appservice.read().await;
-		let made = recorded.as_deref() == Some(appservice)
+		let made = recorded.as_deref() == Some(appservice.as_str())
 			&& appservices
-				.get(appservice)
+				.get(&appservice)
 				.is_some_and(|info| info.is_user_match(&user_id));
 
 		(
@@ -1321,15 +1331,13 @@ async fn claimed_account(
 		)
 	};
 
-	let forbidden = &services.config.registration.forbidden_usernames;
-	let unclaimed = !claims.is_empty() && !userinfo.meets(claims, config.trusted);
 	let refusals = [
-		(listed(services, &user_id), "is listed in an assigned_accounts"),
+		(reserved, "is listed in an assigned_accounts"),
 		(unclaimed, "is claimed without the assigned_accounts_claims"),
 		(!verified, "is claimed by an address not known to be verified"),
 		(!made, "the appservice did not register, or no longer has in its namespace"),
 		(owned, "is an appservice's own user"),
-		(forbidden.is_match(user_id.localpart()), "has a forbidden name"),
+		(forbidden, "has a forbidden name"),
 		(services.admin.user_is_admin(&user_id).await, "is a server admin"),
 		(services.users.is_locked(&user_id).await, "is locked"),
 	];

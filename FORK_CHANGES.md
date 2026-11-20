@@ -1060,10 +1060,14 @@ provider a sign-in carries is cached as it was first used, so a reload that
 set `userid_claims` would otherwise still claim by a name the identity's user
 chose. The fallback after a refused claim reads the cached provider, as it
 does without the option: a provider that was `trusted` when first used stays
-so until a restart. The config check refuses the option without
-`userid_claims`, so no claim a provider lets its users choose names an
-account, and with `trusted`, whose matching by name would give out an account
-a claim was refused. The record proves the
+so until a restart. `claimed_account` reads all of that before it awaits
+anything, so a reload during a sign-in changes none of it, and waits for the
+appservices to be loaded, so one loaded later at startup is still asked
+whether the account is its own user. The config check refuses the option
+without `userid_claims`, so only claims the operator lists there name an
+account (list only claims the organization assigns), and with `trusted`,
+whose matching by name would give out an account a claim was refused. The
+record proves the
 appservice, not the person: only the name is compared, not the address's
 domain, and the appservice can still act as an account in its namespace after
 it is claimed. Unset, the default, sign-in works as before. Upstream has no
