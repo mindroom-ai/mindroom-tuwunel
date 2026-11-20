@@ -266,7 +266,8 @@ loading and filtering events are unchanged. Upstream has the same bug. File:
 `src/service/rooms/search/mod.rs`; tests in
 `src/service/rooms/search/tests.rs`, `src/service/rooms/search/tests/timing.rs`
 (synthetic production-sized lists intersect in under five seconds of Linux
-thread CPU time, where the old code took 35 to 49) and `src/main/tests/search_multi_word.rs`.
+thread CPU time, where the old code took 35 to 49 seconds) and
+`src/main/tests/search_multi_word.rs`.
 
 ### Uploaded device and cross-signing keys are bounded in size
 

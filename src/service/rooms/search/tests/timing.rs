@@ -26,10 +26,10 @@ const WORD_HITS: [u64; 10] =
 /// `SHARED_EVERY`th message holds them all. The old intersection copied every
 /// other list for each candidate of the first, about 3.1 billion ids for these
 /// sizes, and the whole search request took about 47 seconds in production;
-/// here it takes 35 to 49 seconds of CPU. The bound, 5 seconds, is on the Linux
-/// thread CPU time of the intersection alone, which excludes time descheduled;
-/// it is not the endpoint's latency, since reading the hit lists and loading
-/// and filtering events are not measured.
+/// on these lists the old intersection took 35 to 49 seconds of CPU. The bound,
+/// 5 seconds, is on the Linux thread CPU time of the intersection alone, which
+/// excludes time descheduled; it is not the endpoint's latency, since reading
+/// the hit lists and loading and filtering events are not measured.
 #[test]
 fn production_sized_hit_lists_intersect_quickly() {
 	let lists = WORD_HITS
