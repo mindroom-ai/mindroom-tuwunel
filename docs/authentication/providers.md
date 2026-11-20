@@ -421,9 +421,10 @@ option existed, or made any other way (an ordinary registration, also one
 without a password, the admin API, a guest), has no record and is never
 claimed. List such accounts in `assigned_accounts`.
 
-The name is the one a new account would be given: that of the first claim of
-`userid_claims` the identity holds (an address's local part), with ASCII
-letters lowercased. `userid_claims` must be set, and `trusted` must not be: the
+The name is the first claim of `userid_claims` the identity holds (for `email`,
+the address's local part), as it is, with ASCII letters lowercased. When that
+is not a valid name, nothing is claimed: no later claim is tried, as one is for
+a new account's name. `userid_claims` must be set, and `trusted` must not be: the
 server refuses to start otherwise. Without `userid_claims`, a name the provider
 lets its users choose could claim an account, and a trusted provider gives a
 sign-in an existing account by name whatever these checks say. An identity that

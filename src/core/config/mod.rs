@@ -2027,17 +2027,19 @@ pub struct IdentityProvider {
 	/// in: `claim_accounts_of_appservice = "import"`. An identity linked to no
 	/// account, whose first sign-in neither `assigned_accounts` nor an admin
 	/// association gives one, gets the existing account named by the first
-	/// claim of `userid_claims` it holds, ASCII letters lowercased, the name
-	/// a new account would be given. It gets it only when that appservice
-	/// registered the account with `m.login.application_service`, which the
-	/// server records as it creates the account, and still has the name in
-	/// its `users` namespace; the account is no appservice's own user, has no
-	/// password, and is not deactivated, locked, a server admin, linked to
-	/// any identity or listed in an `assigned_accounts`; the sign-in holds
-	/// every claim of `assigned_accounts_claims`; and the provider does not
-	/// say the address is unverified. A name read from the `email` claim
-	/// needs `email_verified` to be true. The account then becomes an SSO
-	/// account, as an assigned one does. Any other sign-in is mapped as
+	/// claim of `userid_claims` it holds, as it is, with ASCII letters
+	/// lowercased; one that is not a valid name claims nothing, and no later
+	/// claim is tried, as one is for a new account's name. It gets it only
+	/// when that appservice registered the account with
+	/// `m.login.application_service`, which the server records as it creates
+	/// the account, and still has the name in its `users` namespace; the
+	/// account is no appservice's own user, has no password, and is not
+	/// deactivated, locked, a server admin, linked to any identity or listed
+	/// in an `assigned_accounts`; the sign-in holds every claim of
+	/// `assigned_accounts_claims`; and the provider does not say the address
+	/// is unverified. A name read from the `email` claim needs
+	/// `email_verified` to be true. The account then becomes an SSO account,
+	/// as an assigned one does. Any other sign-in is mapped as
 	/// without the option, normally to a new account, under a generated name
 	/// when its own is taken; when an existing account of its name is not
 	/// claimed, a warning in the log names it and the reason. Accounts made

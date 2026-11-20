@@ -1044,11 +1044,16 @@ not listed in an `assigned_accounts`; the sign-in holds every claim of
 unverified, and says it is verified when the name is read from the `email`
 claim; and, by the assignment's own checks (`sso_assignment`, split from
 `assign_sso_account`), the account exists, has an empty password, no recorded
-deactivation and no linked identity. The account's password lock is taken
-first and held until the link is stored, and the account gets the sentinel and
-origin `sso` in the same write batch, as an assigned account does. The admin
-and lock reads are made under that lock, which a promotion or an account lock
-does not take. The server reads a passwordless account outside an exclusive
+deactivation and no linked identity. The record and the appservices are read
+first, and the appservices released, before the account is held: registering
+an appservice holds them while it takes its own user's lock, so a claim that
+held the account and then waited for them could wait on such a registration
+for ever. The account's password lock is then taken and held until the link
+is stored, and the account gets the sentinel and origin `sso` in the same
+write batch, as an assigned account does. The admin and lock reads are made
+under that lock, which a promotion or an account lock does not take. A first
+claim that is not a valid name claims nothing; no later claim is tried, as
+one is for a new account's name. The server reads a passwordless account outside an exclusive
 namespace as a guest (`users::is_guest`); the claim relies on the record
 instead, and guest handling is unchanged elsewhere.
 

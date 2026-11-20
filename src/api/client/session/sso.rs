@@ -1300,17 +1300,14 @@ async fn claimed_account(
 	let by_address = claim == choices.len().saturating_sub(1);
 	let verified = userinfo.email_verified.unwrap_or(!by_address);
 
-	// Every appservice is loaded before any is asked about, and before the
-	// account is held.
+	// Every appservice is loaded before any is asked about.
 	services.appservice.loaded().await;
-
-	// The account's own checks, and its password lock, which a claim holds
-	// until its link is stored; the checks below are made under it.
-	let assignment = services.users.sso_assignment(&user_id).await;
 
 	// Only the record says who made the account: one without a password that
 	// anything else made, as a registration may, has none. The appservice must
-	// still be registered for the name.
+	// still be registered for the name. Both are read, and the appservices
+	// released, before the account is held: registering an appservice holds
+	// them while it takes its own user's lock.
 	let recorded = services
 		.users
 		.registering_appservice(&user_id)
@@ -1330,6 +1327,11 @@ async fn claimed_account(
 				.any(|info| info.sender == user_id),
 		)
 	};
+
+	// The account's own checks, and its password lock, which a claim holds
+	// until its link is stored; the admin and lock reads below are made under
+	// it.
+	let assignment = services.users.sso_assignment(&user_id).await;
 
 	let refusals = [
 		(reserved, "is listed in an assigned_accounts"),
