@@ -59,7 +59,7 @@ pub(crate) mod well_known;
 
 mod utils;
 
-#[cfg(feature = "sso_link_pause")]
+#[cfg(all(feature = "sso_link_pause", debug_assertions))]
 pub use self::session::link_pause;
 pub(crate) use self::{
 	account::{

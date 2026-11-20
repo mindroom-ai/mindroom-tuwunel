@@ -38,7 +38,7 @@ use rust_rocksdb::{DB, Options};
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
-#[cfg(feature = "sso_link_pause")]
+#[cfg(all(feature = "sso_link_pause", debug_assertions))]
 use tuwunel_api_client::link_pause;
 use tuwunel_core::{
 	Err, Result,
@@ -1005,7 +1005,7 @@ async fn provenance(services: &Services, base: &str, client: &Client) -> Result 
 	};
 
 	Box::pin(registry_order(services, base, client)).await?;
-	#[cfg(feature = "sso_link_pause")]
+	#[cfg(all(feature = "sso_link_pause", debug_assertions))]
 	Box::pin(registry_held(services, base, client)).await?;
 
 	let hosted = |localpart: &str| format!("{localpart}:example.com");
@@ -1145,7 +1145,7 @@ async fn registry_order(services: &Services, base: &str, client: &Client) -> Res
 /// stores its link without reading them again, and only then does the
 /// registration get them. It reuses the claimed appservice's token, so it is
 /// refused the moment it gets them: without the claim's read, at once.
-#[cfg(feature = "sso_link_pause")]
+#[cfg(all(feature = "sso_link_pause", debug_assertions))]
 async fn registry_held(services: &Services, base: &str, client: &Client) -> Result {
 	let name = "premade-ghosts";
 	let yan = register_ahead(services, base, "made-yan").await?;

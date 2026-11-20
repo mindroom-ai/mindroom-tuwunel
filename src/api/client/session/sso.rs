@@ -1,13 +1,7 @@
-#[cfg(feature = "sso_link_pause")]
+#[cfg(all(feature = "sso_link_pause", debug_assertions))]
 pub mod link_pause;
 mod native_apple;
 mod uiaa;
-
-/// Without the test-only pause, a sign-in never pauses.
-#[cfg(not(feature = "sso_link_pause"))]
-mod link_pause {
-	pub(super) fn point(_: &ruma::UserId) -> std::future::Ready<()> { std::future::ready(()) }
-}
 
 use std::{borrow::Cow, collections::BTreeMap, net::IpAddr, time::Duration};
 
@@ -777,14 +771,14 @@ async fn complete_sso_session(
 				))));
 			}
 
-			held = Some(
-				services
-					.users
-					.hold_unlinked_account(&user_id)
-					.await?,
-			);
+			held = services
+				.users
+				.hold_unlinked_account(&user_id)
+				.await
+				.map(Some)?;
 		}
 
+		#[cfg(all(feature = "sso_link_pause", debug_assertions))]
 		link_pause::point(&user_id).await;
 
 		Ok((session, (user_id, held, (terms, registry))))

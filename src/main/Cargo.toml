@@ -229,6 +229,7 @@ sentry_telemetry = [
 	"tuwunel-router/sentry_telemetry",
 ]
 # Test only: lets a test pause an SSO sign-in just before its link is stored.
+# Compiled only with debug assertions, so no release build has it.
 sso_link_pause = [
 	"tuwunel-api-client/sso_link_pause",
 ]

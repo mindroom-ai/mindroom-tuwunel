@@ -25,7 +25,7 @@ use ruma::api::client::session::{
 use tuwunel_core::{Err, Result, err, info, utils::stream::ReadyExt};
 use tuwunel_service::users::device::generate_refresh_token;
 
-#[cfg(feature = "sso_link_pause")]
+#[cfg(all(feature = "sso_link_pause", debug_assertions))]
 pub use self::sso::link_pause;
 use self::{
 	ldap::ldap_login,
