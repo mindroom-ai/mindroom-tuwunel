@@ -2037,19 +2037,20 @@ pub struct IdentityProvider {
 	/// every claim of `assigned_accounts_claims`; and the provider does not
 	/// say the address is unverified. A name read from the `email` claim
 	/// needs `email_verified` to be true. The account then becomes an SSO
-	/// account, as an assigned one does. Any other sign-in works as without
-	/// the option: it gets a new account, under a generated name when its
-	/// own is taken, and a warning in the log names the account and the
-	/// reason. Accounts made before this option existed have no record: list
-	/// those in `assigned_accounts`. Only the name is compared, never the
-	/// address's domain: use this only where every admitted identity has a
-	/// verified address with a unique local part that is never given to
-	/// another person, with `assigned_accounts_claims` naming claims only
-	/// your organization's accounts hold, such as `hd`, and with
-	/// `userid_claims`, which this option requires, listing only claims the
-	/// organization assigns. It cannot be combined with `trusted`. The
-	/// appservice can still act as the accounts in its namespace after they
-	/// are claimed. A reload applies to the next sign-in.
+	/// account, as an assigned one does. Any other sign-in is mapped as
+	/// without the option, normally to a new account, under a generated name
+	/// when its own is taken; when an existing account of its name is not
+	/// claimed, a warning in the log names it and the reason. Accounts made
+	/// before this option existed have no record: list those in
+	/// `assigned_accounts`. Only the name is compared, never the address's
+	/// domain: use this only where every admitted identity has a verified
+	/// address with a unique local part that is never given to another
+	/// person, with `assigned_accounts_claims` naming claims only your
+	/// organization's accounts hold, such as `hd`, and with `userid_claims`,
+	/// which this option requires, listing only claims the organization
+	/// assigns. It cannot be combined with `trusted`. The appservice can
+	/// still act as the accounts in its namespace after they are claimed. A
+	/// reload applies to the next sign-in.
 	pub claim_accounts_of_appservice: Option<String>,
 
 	/// Rules for who may register through this provider, and the rooms their

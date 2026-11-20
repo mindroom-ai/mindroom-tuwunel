@@ -1038,8 +1038,8 @@ non-ASCII lookalike that lowercases to a name names no account.
 `claimed_account` gives it only when the record names the configured
 appservice, which is registered and has the account in its `users` namespace
 now (exclusive or not); the account is no appservice's own user, not a server
-admin, not locked, not of a forbidden name and not listed in an
-`assigned_accounts`; the sign-in holds every claim of
+admin, not locked, not of a forbidden name (matched on the local part) and
+not listed in an `assigned_accounts`; the sign-in holds every claim of
 `assigned_accounts_claims`; the provider does not say the address is
 unverified, and says it is verified when the name is read from the `email`
 claim; and, by the assignment's own checks (`sso_assignment`, split from
@@ -1052,11 +1052,18 @@ does not take. The server reads a passwordless account outside an exclusive
 namespace as a guest (`users::is_guest`); the claim relies on the record
 instead, and guest handling is unchanged elsewhere.
 
-Any other first sign-in goes on as without the option, with a warning naming
-the account and the reason; a claim is logged at info. The config check
-refuses the option without `userid_claims`, so no claim a provider lets its
-users choose names an account, and with `trusted`, whose matching by name
-would give out an account a claim was refused. The record proves the
+Any other first sign-in is mapped as without the option; when an existing
+account of its name is not claimed, a warning names it and the reason, and a
+claim is logged at info. The option, `assigned_accounts_claims` and the
+claims that name the account are all read from the live configuration: the
+provider a sign-in carries is cached as it was first used, so a reload that
+set `userid_claims` would otherwise still claim by a name the identity's user
+chose. The fallback after a refused claim reads the cached provider, as it
+does without the option: a provider that was `trusted` when first used stays
+so until a restart. The config check refuses the option without
+`userid_claims`, so no claim a provider lets its users choose names an
+account, and with `trusted`, whose matching by name would give out an account
+a claim was refused. The record proves the
 appservice, not the person: only the name is compared, not the address's
 domain, and the appservice can still act as an account in its namespace after
 it is claimed. Unset, the default, sign-in works as before. Upstream has no

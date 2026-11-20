@@ -1268,8 +1268,10 @@ async fn claimed_account(
 		.find_config(provider.id())
 		.ok()?;
 
+	// The names are read from the live configuration too: the provider is as
+	// it was first used, with the `userid_claims` it had then.
 	let appservice = config.claim_accounts_of_appservice.as_deref()?;
-	let choices = userid_choices(provider, userinfo);
+	let choices = userid_choices(config, userinfo);
 	let (claim, name) = choices
 		.iter()
 		.enumerate()
@@ -1282,7 +1284,7 @@ async fn claimed_account(
 		.find_user_association_pending(provider.id(), userinfo)
 		.is_some();
 
-	if associated || listed(services, &user_id) || !services.users.exists(&user_id).await {
+	if associated || !services.users.exists(&user_id).await {
 		return None;
 	}
 
@@ -1320,13 +1322,14 @@ async fn claimed_account(
 	};
 
 	let forbidden = &services.config.registration.forbidden_usernames;
-	let unclaimed = !claims.is_empty() && !userinfo.meets(claims, provider.trusted);
+	let unclaimed = !claims.is_empty() && !userinfo.meets(claims, config.trusted);
 	let refusals = [
+		(listed(services, &user_id), "is listed in an assigned_accounts"),
 		(unclaimed, "is claimed without the assigned_accounts_claims"),
 		(!verified, "is claimed by an address not known to be verified"),
 		(!made, "the appservice did not register, or no longer has in its namespace"),
 		(owned, "is an appservice's own user"),
-		(forbidden.is_match(&name), "has a forbidden name"),
+		(forbidden.is_match(user_id.localpart()), "has a forbidden name"),
 		(services.admin.user_is_admin(&user_id).await, "is a server admin"),
 		(services.users.is_locked(&user_id).await, "is locked"),
 	];
