@@ -27,19 +27,20 @@ use axum::{
 use axum_server::from_tcp;
 use futures::{
 	FutureExt, TryFutureExt,
-	future::{join, select},
+	future::{join, join3, select},
 };
 use reqwest::{
-	Client, Response, StatusCode, Url,
+	Client, Method, Response, StatusCode, Url,
 	header::{AUTHORIZATION, COOKIE, LOCATION, SET_COOKIE},
 	redirect::Policy,
 };
 use rust_rocksdb::{DB, Options};
 use serde_json::{Value, json};
+use tokio::time::{sleep, timeout};
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{
 	Err, Result,
-	config::check::reload,
+	config::{IdentityProvider, check::reload},
 	err,
 	result::NotFound,
 	ruma::{
@@ -64,6 +65,19 @@ const CLIENT: &str = "https://client.example/callback";
 
 /// Token of the appservice that creates accounts ahead of their owners.
 const AS_TOKEN: &str = "sso-assigned-migration-token";
+
+/// ID of that appservice, whose accounts named `made-…` first sign-ins claim.
+const APPSERVICE: &str = "sso-assigned-migration";
+
+/// Another appservice with those names in its namespace, and its token.
+const OTHER: &str = "sso-assigned-other";
+const OTHER_TOKEN: &str = "sso-assigned-other-token";
+
+/// Token of the admin that creates an account through the user admin API.
+const ADMIN_TOKEN: &str = "sso-assigned-premade-admin-access-token";
+
+/// A provider that names no `userid_claims` until a reload does.
+const LATE: &str = "late-idp";
 
 /// Accounts the provider assigns, by email address. Alice's address is listed
 /// in a different case than the provider sends it, and two addresses name
@@ -115,7 +129,9 @@ const CHAIN: [&str; 2] = ["chain-a", "chain-b"];
 /// sign-in carries, is refused, linked to nothing and given no other account,
 /// and the account is left as it was. An address listed by a reload is
 /// assigned at the next sign-in. With `assigned_accounts_claims`, every
-/// sign-in of a listed address that lacks those claims is refused.
+/// sign-in of a listed address that lacks those claims is refused. With
+/// `claim_accounts_of_appservice`, a first sign-in claims the account the
+/// appservice made under its name, and no other account.
 #[test]
 fn sso_assigned_account() -> Result {
 	// A child process of `sso_assigned_migrated_deactivation` runs every test of
@@ -286,8 +302,9 @@ where
 	outcome
 }
 
-/// The test's providers: the one assigning accounts, and a chain of two
-/// default ones, all served by one stand-in at `issuer`.
+/// The test's providers: the one assigning accounts, a chain of two default
+/// ones, and one that names no `userid_claims`, all served by one stand-in at
+/// `issuer`.
 fn provider_options(issuer: &str) -> Vec<String> {
 	let option =
 		|idp: &str, key: &str, value: &str| format!("identity_provider.{idp}.{key}={value}");
@@ -295,19 +312,23 @@ fn provider_options(issuer: &str) -> Vec<String> {
 	let assigned = ASSIGNED.replace(['\n', '\t'], "");
 	let chain_assigned = CHAIN_ASSIGNED.replace(['\n', '\t'], "");
 
-	[IDP, CHAIN[0], CHAIN[1]]
+	[IDP, CHAIN[0], CHAIN[1], LATE]
 		.into_iter()
 		.flat_map(|idp| {
+			let userid_claims = if idp == LATE { "[]" } else { "[\"email\"]" };
+
 			[
 				option(idp, "client_id", &format!("\"{idp}\"")),
 				option(idp, "client_secret", "\"test-secret\""),
 				option(idp, "brand", "\"test\""),
 				option(idp, "issuer_url", &format!("\"{issuer}\"")),
-				option(idp, "userid_claims", "[\"email\"]"),
+				option(idp, "userid_claims", userid_claims),
 			]
 		})
 		.chain([
 			"oidc_registration_allowed_redirect_hosts=[\"client.example\"]".to_owned(),
+			"admin.room.create=true".to_owned(),
+			"registration.grant_admin_to_first_user=false".to_owned(),
 			option(IDP, "assigned_accounts", &assigned),
 			option(CHAIN[0], "default", "true"),
 			option(CHAIN[1], "default", "true"),
@@ -395,6 +416,11 @@ async fn userinfo(headers: HeaderMap) -> Json<Value> {
 
 	if let Some(hd) = hd {
 		claims["hd"] = json!(hd);
+	}
+
+	// An identity may also carry a name its user chose.
+	if let Some((_, name)) = sub.split_once("-named-") {
+		claims["preferred_username"] = json!(name);
 	}
 
 	Json(claims)
@@ -498,7 +524,8 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	chained(services, base, &client).await?;
 	reserved(services, base, &client).await?;
 	reloaded(services, base, &client).await?;
-	claimed(services, base, &client).await
+	claimed(services, base, &client).await?;
+	Box::pin(premade(services, base, &client)).await
 }
 
 /// Listed addresses whose sign-in is refused, each for one reason.
@@ -816,6 +843,334 @@ async fn claimed(services: &Services, base: &str, client: &Client) -> Result {
 	Ok(())
 }
 
+/// With `claim_accounts_of_appservice`, which a reload sets, a first sign-in
+/// whose address is verified and which holds `assigned_accounts_claims` claims
+/// the account the appservice registered under the address's name, in a
+/// namespace that is not exclusive: it becomes an SSO account, its login token
+/// logs in, and the next sign-in follows the link. Each other first sign-in
+/// gets its identity's fallback account, as without the option, and the
+/// account made ahead is left as it was: without the option; lacking the
+/// claims; with an address the provider says is unverified or says nothing
+/// about; spelled with a non-ASCII lookalike; for an account that has a
+/// password, is linked to another identity, deactivated, a server admin,
+/// locked, or listed in `assigned_accounts`. A listed address still gets its
+/// listed account, not the one its name gives. `provenance` has the accounts
+/// the appservice did not register.
+async fn premade(services: &Services, base: &str, client: &Client) -> Result {
+	let hosted = |localpart: &str| format!("{localpart}:example.com");
+	let mut made = Vec::new();
+
+	for name in [
+		"off", "ann", "bea", "cal", "eve", "fay", "gus", "hal", "ian", "jan", "kay", "kit",
+	] {
+		made.push(register_ahead(services, base, &format!("made-{name}")).await?);
+	}
+
+	let [off, ann, bea, cal, eve, fay, gus, hal, ian, jan, kay, kit] = made.as_slice() else {
+		return Err!("each of the names has an account made ahead");
+	};
+
+	unclaimed(services, client, base, "verified-off", &hosted("made-off")).await?;
+	as_made(services, off).await?;
+
+	reconfigure(services, IDP, |provider| {
+		provider.claim_accounts_of_appservice = Some(APPSERVICE.to_owned());
+		provider
+			.assigned_accounts
+			.insert("made-ian@example.com".to_owned(), jan.clone());
+		provider
+			.assigned_accounts
+			.insert("kay@example.com".to_owned(), kay.clone());
+	})?;
+
+	// The account is claimed, and the link is followed from then on; another
+	// identity of the same name does not get it.
+	let response = sign_in(client, base, "verified-ann", &hosted("made-ann")).await?;
+	let (user_id, _token) = log_in(client, base, &response).await?;
+
+	assert_eq!(user_id, *ann);
+	assert_eq!(services.users.origin(ann).await?, "sso");
+	assert_eq!(services.users.password_hash(ann).await?, PASSWORD_SENTINEL);
+
+	let response = sign_in(client, base, "verified-ann", &hosted("made-ann")).await?;
+
+	assert_eq!(signed_in(services, &response).await?, *ann);
+	unclaimed(services, client, base, "verified-ann-twin", &hosted("made-ann")).await?;
+	assert_eq!(linked_account(services, "verified-ann").await?, *ann);
+
+	// The claims, and a verified address, are needed; with them the same
+	// account is claimed.
+	unclaimed(services, client, base, "verified-personal-bea", "made-bea").await?;
+	unclaimed(services, client, base, "verified-foreign-bea", "made-bea:other.example").await?;
+	unclaimed(services, client, base, "unverified-cal", &hosted("made-cal")).await?;
+	unclaimed(services, client, base, "plain-cal", &hosted("made-cal")).await?;
+
+	for (sub, account) in [("verified-bea", bea), ("verified-cal", cal)] {
+		as_made(services, account).await?;
+
+		let localpart = hosted(account.localpart());
+		let response = sign_in(client, base, sub, &localpart).await?;
+
+		assert_eq!(signed_in(services, &response).await?, *account);
+	}
+
+	// A non-ASCII lookalike of the name, which lowercases to it, claims nothing.
+	unclaimed(services, client, base, "verified-kelvin", &hosted("made-KELVINit")).await?;
+	as_made(services, kit).await?;
+
+	// A password the appservice set is kept, and so is another identity's link.
+	let dan = json!({
+		"type": "m.login.application_service",
+		"username": "made-dan",
+		"password": "sso-assigned-test-password",
+	});
+
+	let dan = register_with(services, base, AS_TOKEN, dan).await?;
+	let hash = services.users.password_hash(&dan).await?;
+
+	unclaimed(services, client, base, "verified-dan", &hosted("made-dan")).await?;
+	assert_eq!(services.users.password_hash(&dan).await?, hash);
+	assert!(!services.oauth.sessions.is_linked(&dan).await, "dan is linked to nothing");
+
+	adopt(services, eve, "eve-adopted").await?;
+	unclaimed(services, client, base, "verified-eve", &hosted("made-eve")).await?;
+	assert_eq!(linked_account(services, "eve-adopted").await?, *eve);
+	assert_eq!(services.users.password_hash(eve).await?, "");
+
+	// A deactivated account, a server admin and a locked account stay unclaimed;
+	// unlocked, the account is claimed.
+	services
+		.users
+		.deactivate_account(fay, DeactivationReason::SelfService)
+		.await?;
+
+	services.admin.make_user_admin(gus).await?;
+	services
+		.users
+		.set_locked(hal, &services.globals.server_user);
+
+	assert!(services.admin.user_is_admin(gus).await, "gus is a server admin");
+
+	for account in [fay, gus, hal] {
+		let sub = format!("verified-{}", account.localpart());
+
+		unclaimed(services, client, base, &sub, &hosted(account.localpart())).await?;
+		as_made(services, account).await?;
+	}
+
+	services.users.clear_locked(hal);
+
+	let response = sign_in(client, base, "verified-hal-unlocked", &hosted("made-hal")).await?;
+
+	assert_eq!(signed_in(services, &response).await?, *hal);
+
+	// A listed address gets its listed account, not the one its name gives, and
+	// a listed account is only for its address.
+	let response = sign_in(client, base, "verified-ian", &hosted("made-ian")).await?;
+
+	assert_eq!(signed_in(services, &response).await?, *jan);
+	unclaimed(services, client, base, "verified-kay", &hosted("made-kay")).await?;
+
+	for account in [ian, kay] {
+		as_made(services, account).await?;
+	}
+
+	Box::pin(provenance(services, base, client)).await
+}
+
+/// Only the appservice's registrations with its login type are recorded as its
+/// own, and only a recorded account is claimed. Accounts without a password in
+/// its namespace that anything else made are not: one registered as anyone
+/// may, one the user admin API created, one another appservice registered, one
+/// registered with the appservice's token alone, and the appservice's own
+/// user. Nor is a recorded account that is another appservice's own user, or
+/// whose appservice no longer has its name or is no longer registered. A
+/// provider used before a reload named its `userid_claims` claims by those
+/// claims, not by a name its users choose.
+async fn provenance(services: &Services, base: &str, client: &Client) -> Result {
+	let user = |localpart: &str| {
+		UserId::parse_with_server_name(localpart, services.globals.server_name())
+	};
+
+	Box::pin(registry_order(services, base, client)).await?;
+
+	let hosted = |localpart: &str| format!("{localpart}:example.com");
+	let ann = user("made-ann")?;
+	let sam = user("made-sam")?;
+	let tom = user("made-tom")?;
+	let admin = client::register(services, "premade-admin", ADMIN_TOKEN).await?;
+	let login_type =
+		|localpart: &str| json!({ "type": "m.login.application_service", "username": localpart });
+
+	services
+		.users
+		.full_register(Register {
+			user_id: Some(&sam),
+			..Default::default()
+		})
+		.await?;
+
+	services.admin.make_user_admin(&admin).await?;
+
+	let created = client::Client { services, base, token: ADMIN_TOKEN }
+		.request(Method::PUT, &format!("{base}/_synapse/admin/v2/users/{tom}"), &json!({}))
+		.await?;
+
+	assert!(created.status().is_success(), "the user admin API creates tom");
+
+	let uri = register_with(services, base, OTHER_TOKEN, login_type("made-uri")).await?;
+	let wyn = register_with(services, base, OTHER_TOKEN, login_type("made-wyn")).await?;
+	let vic = register_with(services, base, AS_TOKEN, json!({ "username": "made-vic" })).await?;
+	let sender = user("migration")?;
+	let users = &services.users;
+
+	let recorded = async |account: &UserId| users.registering_appservice(account).await;
+
+	assert_eq!(recorded(&ann).await.as_deref(), Some(APPSERVICE));
+	assert_eq!(recorded(&uri).await.as_deref(), Some(OTHER));
+
+	for account in [&sam, &tom, &vic, &sender] {
+		assert_eq!(recorded(account).await, None, "{account}");
+	}
+
+	// An account the appservice registered that is another appservice's own
+	// user has the record, and is not claimed.
+	let xan = register_ahead(services, base, "made-xan").await?;
+
+	let own = "sso-assigned-own";
+
+	register_one(services, own, "sso-assigned-own-token", "made-xan", Vec::new()).await?;
+
+	assert_eq!(recorded(&xan).await.as_deref(), Some(APPSERVICE));
+
+	for account in [&sam, &tom, &uri, &vic, &sender, &xan] {
+		let sub = format!("verified-{}", account.localpart());
+
+		unclaimed(services, client, base, &sub, &hosted(account.localpart())).await?;
+		as_made(services, account).await?;
+	}
+
+	// The late provider signs someone in with no `userid_claims`, and a reload
+	// then names them: the name is read from the address, as the reload says,
+	// not from a name the identity's user chose.
+	let pia = register_ahead(services, base, "made-pia").await?;
+	let ray = register_ahead(services, base, "made-ray").await?;
+	let response = sign_in_at(client, base, LATE, "late-first", "latefirst").await?;
+
+	assert_eq!(signed_in(services, &response).await?, user("latefirst")?);
+
+	reconfigure(services, LATE, |provider| {
+		provider.userid_claims = ["email".to_owned()].into();
+		provider.assigned_accounts_claims = [("hd".to_owned(), "example.com".to_owned())].into();
+		provider.claim_accounts_of_appservice = Some(APPSERVICE.to_owned());
+	})?;
+
+	let sub = "verified-ray-named-made-pia";
+	let response = sign_in_at(client, base, LATE, sub, &hosted("made-ray")).await?;
+
+	assert_eq!(signed_in(services, &response).await?, ray);
+	as_made(services, &pia).await?;
+
+	// The appservice an account is recorded for must still have its name, and
+	// still be registered.
+	reconfigure(services, IDP, |provider| {
+		provider.claim_accounts_of_appservice = Some(OTHER.to_owned());
+	})?;
+
+	register_one(services, OTHER, OTHER_TOKEN, "other-migration", Vec::new()).await?;
+	unclaimed(services, client, base, "verified-wyn-narrowed", &hosted("made-wyn")).await?;
+	as_made(services, &wyn).await?;
+
+	services
+		.appservice
+		.unregister_appservice(OTHER)
+		.await?;
+
+	unclaimed(services, client, base, "verified-wyn-unregistered", &hosted("made-wyn")).await?;
+	as_made(services, &wyn).await
+}
+
+/// A claim reads the appservices before it holds the account. Registering an
+/// appservice holds them while it waits for its own user's lock, which the
+/// test holds here: a claim that arrives meanwhile waits for the appservices
+/// without the account's lock, which is free to take, and claims the account
+/// once the registration is through. Holding the account first, the claim and
+/// such a registration of the account's name would wait for each other.
+async fn registry_order(services: &Services, base: &str, client: &Client) -> Result {
+	let name = "premade-bot";
+	let bot = UserId::parse_with_server_name(name, services.globals.server_name())?;
+	let zoe = register_ahead(services, base, "made-zoe").await?;
+	let held = services.users.hold_unlinked_account(&bot).await?;
+	let registering = register_one(services, name, "premade-bot-token", name, Vec::new());
+	let signing = sign_in(client, base, "verified-made-zoe", "made-zoe:example.com");
+	let probing = async {
+		sleep(Duration::from_millis(500)).await;
+
+		let account = services.users.hold_unlinked_account(&zoe);
+		let free = timeout(Duration::from_secs(2), account)
+			.await
+			.is_ok();
+
+		drop(held);
+		free
+	};
+
+	let (registered, response, free) = join3(registering, signing, probing).await;
+
+	registered?;
+	assert!(free, "the claim waits for the appservices without the account's lock");
+	assert_eq!(signed_in(services, &response?).await?, zoe);
+
+	Ok(())
+}
+
+/// Reload the configuration with the provider `idp` changed by `change`.
+fn reconfigure(services: &Services, idp: &str, change: impl Fn(&mut IdentityProvider)) -> Result {
+	let mut config = (*services.server.config.clone()).clone();
+
+	config
+		.identity_provider
+		.values_mut()
+		.filter(|provider| provider.id() == idp)
+		.for_each(change);
+
+	reload(&services.config, &config)?;
+	services.server.config.update(config)?;
+
+	Ok(())
+}
+
+/// Sign in as `sub` with the address `<localpart>@example.com`, and expect the
+/// identity's fallback account, which it is then linked to.
+async fn unclaimed(
+	services: &Services,
+	client: &Client,
+	base: &str,
+	sub: &str,
+	localpart: &str,
+) -> Result {
+	let response = sign_in(client, base, sub, localpart).await?;
+	let fallback = fallback(services, sub).await?;
+
+	assert_eq!(signed_in(services, &response).await?, fallback, "{sub} gets its fallback");
+	assert_eq!(linked_account(services, sub).await?, fallback);
+
+	Ok(())
+}
+
+/// Expect an account as it was made: without a password, of origin `password`
+/// and linked to no identity.
+async fn as_made(services: &Services, account: &UserId) -> Result {
+	assert_eq!(services.users.password_hash(account).await?, "", "{account}");
+	assert_eq!(services.users.origin(account).await?, "password", "{account}");
+	assert!(
+		!services.oauth.sessions.is_linked(account).await,
+		"{account} is linked to nothing"
+	);
+
+	Ok(())
+}
+
 /// Expect a refusal for lacking `assigned_accounts_claims` that leaves the
 /// identity `sub` linked to `account`, as it was.
 async fn refused_keeping_link(
@@ -836,26 +1191,47 @@ async fn refused_keeping_link(
 	Ok(())
 }
 
-/// Register an appservice that creates accounts for the test's people.
+/// Register the appservices that create accounts for the test's people.
 ///
-/// Its namespace is exclusive, as a migration's usually is: SSO never names a
-/// new account in it, so only the assignment signs the people in to theirs.
+/// The first one's namespace for the assigned people is exclusive, as a
+/// migration's often is: SSO never names a new account in it, so only the
+/// assignment signs the people in to theirs. The names `made-…` are in a
+/// namespace that is not exclusive, of both appservices: anything may register
+/// there.
 async fn register_appservice(services: &Services) -> Result {
-	let namespaces = Namespaces {
-		users: vec![Namespace::new(
-			true,
-			"^@(alice|carol|dave|gina|hank|kim|rita|uma|vera|wes):.*$".to_owned(),
-		)],
-		..Default::default()
-	};
+	let assigned = "^@(alice|carol|dave|gina|hank|kim|rita|uma|vera|wes):.*$";
+	let made = || Namespace::new(false, "^@made-[a-z]+:.*$".to_owned());
+	let appservices = [
+		(APPSERVICE, AS_TOKEN, "migration", vec![
+			Namespace::new(true, assigned.to_owned()),
+			made(),
+		]),
+		(OTHER, OTHER_TOKEN, "other-migration", vec![made()]),
+	];
 
+	for (id, token, sender, users) in appservices {
+		register_one(services, id, token, sender, users).await?;
+	}
+
+	Ok(())
+}
+
+/// Register an appservice, or replace the one of that ID, with its `users`
+/// namespaces.
+async fn register_one(
+	services: &Services,
+	id: &str,
+	token: &str,
+	sender: &str,
+	users: Vec<Namespace>,
+) -> Result {
 	let registration: Registration = RegistrationInit {
-		id: "sso-assigned-migration".to_owned(),
+		id: id.to_owned(),
 		url: None,
-		as_token: AS_TOKEN.to_owned(),
-		hs_token: "sso-assigned-migration-hs-token".to_owned(),
-		sender_localpart: "migration".to_owned(),
-		namespaces,
+		as_token: token.to_owned(),
+		hs_token: format!("{id}-hs-token"),
+		sender_localpart: sender.to_owned(),
+		namespaces: Namespaces { users, ..Default::default() },
 		rate_limited: None,
 		protocols: None,
 	}
@@ -869,16 +1245,23 @@ async fn register_appservice(services: &Services) -> Result {
 
 /// Create an account through the appservice, without a password or a device.
 async fn register_ahead(services: &Services, base: &str, localpart: &str) -> Result<OwnedUserId> {
-	let appservice = client::Client { services, base, token: AS_TOKEN };
-	let response = appservice
-		.post(
-			"register",
-			&json!({
-				"type": "m.login.application_service",
-				"username": localpart,
-				"inhibit_login": true,
-			}),
-		)
+	let body = json!({ "type": "m.login.application_service", "username": localpart });
+
+	register_with(services, base, AS_TOKEN, body).await
+}
+
+/// Create an account with an appservice's token and a `/register` body, without
+/// a device.
+async fn register_with(
+	services: &Services,
+	base: &str,
+	token: &str,
+	mut body: Value,
+) -> Result<OwnedUserId> {
+	body["inhibit_login"] = json!(true);
+
+	let response = client::Client { services, base, token }
+		.post("register", &body)
 		.await?;
 
 	Ok(client::field(&response, "user_id")?.try_into()?)

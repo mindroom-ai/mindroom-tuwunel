@@ -124,6 +124,7 @@ it uses the first matching provider in configuration order.
 | `trusted` | `false` | Lets a claim name an existing account: where Tuwunel otherwise skips a claim naming an existing user, a trusted provider grants access to that account. Claims are still tried in their fixed order, so an earlier claim naming an available username registers a new account instead. It never matches a username that `registration.forbidden_usernames` matches or that an appservice reserves as its sender user or within its exclusive user namespace. **Only set this for providers you self-host and fully control. Never use with public providers (GitHub, GitLab, Google, etc.); it enables account takeover.** For migrated databases, prefer durable bulk adoption or individual association to temporarily enabling this option. A trusted provider's `email` claim is also bound to a new account when it sends no `email_verified` claim. |
 | `assigned_accounts` | `{}` | Assigns existing local accounts to people by the address in their `email` claim, matched ignoring ASCII case. A listed address's first sign-in gets that account or is refused, never another account. **Only for an app restricted to your own organization, or with `assigned_accounts_claims`; whoever controls a listed address gets the account.** See [Assigning accounts created before the first sign-in](#assigning-accounts-created-before-the-first-sign-in). |
 | `assigned_accounts_claims` | `{}` | Claims every sign-in of an address `assigned_accounts` lists must all hold, such as `{ hd = "example.com" }`, named and matched as in `registration_rules`. A listed address's sign-in that lacks one is refused, whatever account it would get, linked ones included while they send the listed address. It refuses sign-ins only, so set it before the app admits accounts outside your organization. See [Assigning accounts created before the first sign-in](#assigning-accounts-created-before-the-first-sign-in). |
+| `claim_accounts_of_appservice` | unset | The ID of an appservice whose accounts their people claim: a first sign-in gets the existing account `userid_claims` (required) name, when that appservice registered it with `m.login.application_service` (recorded as the account is created) and still has it in its namespace, the account has no password and is not deactivated, locked, an admin or linked, and the sign-in holds `assigned_accounts_claims`. A sign-in whose `email_verified` is false claims nothing, and one whose name is read from `email` needs `email_verified` to be true. Any other sign-in is mapped as without it. Not with `trusted`. **Only the name is compared, never the address's domain.** See [Claiming accounts created before the first sign-in](#claiming-accounts-created-before-the-first-sign-in). |
 | `registration_rules` | `[]` | Rules a sign-in must meet to create an account, each a set of claims, the rooms a new account meeting it joins, and whether that account is external (joins only by invite). Empty, registration works as before. See [Letting only some people register](#letting-only-some-people-register). |
 | `unique_id_fallbacks` | `true` | When no claim is accepted, create the account at a localpart derived from the provider identity, the same one on every sign-in. Set to `false` on private servers where such usernames are undesirable; a misconfiguration then produces an error instead. |
 | `registration` | `true` | Whether this provider can create new Matrix accounts. Set to `false` to restrict the provider to existing users only. |
@@ -431,6 +432,85 @@ reason, looks like an account created without a password, and would be
 reactivated. Remove the entries once their people have signed in or the
 migration window ends. The configuration is the only record of the
 assignments; a reload applies to the next sign-in.
+
+### Claiming accounts created before the first sign-in
+
+Listing every person's address in `assigned_accounts` does not scale: each new
+person needs a configuration change. When an appservice makes the accounts,
+`claim_accounts_of_appservice` names it by its registration's `id`, and a
+person's first sign-in then claims the account made under their name:
+
+```toml
+[[global.identity_provider]]
+# ...
+userid_claims = ["email"]
+assigned_accounts_claims = { hd = "example.com" }
+claim_accounts_of_appservice = "import"
+```
+
+The server records which appservice registers an account, when the account is
+created through `/register` with `m.login.application_service`. Nothing else
+writes that record, and none is inferred later: an account made before this
+option existed, or made any other way (an ordinary registration, also one
+without a password, the admin API, a guest), has no record and is never
+claimed. List such accounts in `assigned_accounts`.
+
+One claim names the account: the first the identity holds of those
+`userid_claims` lists, in the server's fixed order, not the order they are
+listed in: `sub`, `preferred_username`, `username`, `nickname`, `login`, then
+the local part of `email`. With
+`userid_claims = ["email", "preferred_username"]`, `preferred_username` names
+the account whenever the identity has one; list only `email` to claim by
+address. The claim is used as it is, with ASCII letters lowercased. When that
+is not a valid name, nothing is claimed: no later claim is tried, as one is for
+a new account's name.
+
+`userid_claims` must be set, and `trusted` must not be: the
+server refuses to start otherwise. Without `userid_claims`, a name the provider
+lets its users choose could claim an account, and a trusted provider gives a
+sign-in an existing account by name whatever these checks say. An identity that
+is linked to no account, has no listed address and no admin association gets
+the account when all of this holds:
+
+- the record names the configured appservice, that appservice is registered
+  and the account is in its `users` namespace now, exclusive or not, and the
+  account is not an appservice's own user;
+- the account has no password or other sign-in system's marker, and is not
+  deactivated, locked, a server admin, linked to any identity (also one adopted
+  from another server's database) or listed in an `assigned_accounts`;
+- the sign-in holds every claim of `assigned_accounts_claims`;
+- the provider does not say the address is unverified, and, when the name is
+  read from the `email` claim, says it is verified (`email_verified` is true).
+
+The account then becomes an SSO account (origin `sso`, no password) in the same
+write that stores the link, the log records the claim, and later sign-ins
+follow the link.
+
+Any other first sign-in is mapped as without the option: normally it gets a new
+account, under a generated name when its own is taken, and is linked to that
+account from then on. When an existing account of its name is not claimed, the
+log has a warning naming it and the reason. To let that person claim the
+account after all, remove the cause,
+delete the identity's link (`!admin query oauth delete`) and have them sign in
+again.
+
+**The record proves which appservice made the account, not whose it is. Only
+the name is compared, never the address's domain.** With
+`userid_claims = ["email"]`, `alice@elsewhere.example` names the same account
+as `alice@example.com`. Use this only when:
+
+- the provider sends `email_verified`, as Google does;
+- `assigned_accounts_claims` names claims only your organization's accounts
+  hold, such as Google's `hd`;
+- every local part is one person's, and is never given to another person
+  later; and
+- `userid_claims` lists only claims the organization assigns.
+
+Otherwise list the accounts in `assigned_accounts`. Keep bots and bridged
+users out of the appservice's namespace, or make them with another appservice.
+The appservice can act as any account in its namespace, also after its person
+has claimed it, so guard its token accordingly. A reload applies to the next
+sign-in.
 
 ### Letting only some people register
 

@@ -20,6 +20,11 @@ pub struct Register<'a> {
 	pub password: Option<&'a str>,
 	pub origin: Option<&'a str>,
 	pub is_appservice: bool,
+	/// The ID of the appservice registering the account with
+	/// `m.login.application_service`, which is recorded as the account is
+	/// created (see [`super::Service::registering_appservice`]); never a
+	/// guest's.
+	pub appservice: Option<&'a str>,
 	pub is_guest: bool,
 	pub grant_first_user_admin: bool,
 	pub displayname: Option<&'a str>,
@@ -43,6 +48,7 @@ pub async fn full_register(
 		password,
 		origin,
 		is_appservice,
+		appservice,
 		is_guest,
 		grant_first_user_admin,
 		displayname,
@@ -74,6 +80,14 @@ pub async fn full_register(
 		.users
 		.create_new(user_id, password, origin)
 		.await?;
+
+	// Recorded only here, for the account this registration created: nothing
+	// infers the record or writes it later.
+	if let Some(appservice) = appservice.filter(|_| !is_guest) {
+		self.db
+			.userid_appservice
+			.insert(user_id, appservice);
+	}
 
 	// Marked before anything else acts as the account, so nothing below and no
 	// session finds it unmarked.
