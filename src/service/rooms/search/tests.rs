@@ -23,9 +23,9 @@ fn hits_are_in_every_list_newest_first() {
 /// A repeated word, in any case, is read once, where it first appears.
 #[test]
 fn query_words_are_distinct_in_first_seen_order() {
-	let words: Vec<_> = query_words("Be nice to be, able to BE!").collect();
+	let words: Vec<_> = query_words("Go far to go, fast to GO!").collect();
 
-	assert_eq!(words, ["be", "nice", "to", "able"]);
+	assert_eq!(words, ["go", "far", "to", "fast"]);
 	assert_eq!(query_words("?! ...").count(), 0);
 }
 

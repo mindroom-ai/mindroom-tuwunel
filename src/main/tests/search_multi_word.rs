@@ -30,9 +30,9 @@ const MESSAGES: [&str; 10] = [
 	"beta gamma",
 	"Gamma, BETA and alpha!",
 	"alpha beta",
-	"be nice to be able",
+	"go far to go fast",
 	"alpha gamma beta delta",
-	"be quiet",
+	"go home",
 	"gamma",
 	"alpha",
 ];
@@ -41,7 +41,7 @@ const MESSAGES: [&str; 10] = [
 const SEARCHES: [(&str, &[usize]); 8] = [
 	("alpha beta gamma", &[6, 3, 0]),
 	("gamma ALPHA", &[6, 3, 0]),
-	("be able to be", &[5]),
+	("go fast to go", &[5]),
 	("alpha alpha", &[9, 6, 4, 3, 1, 0]),
 	("gamma", &[8, 6, 3, 2, 0]),
 	("Beta, BETA beta", &[6, 4, 3, 2, 0]),

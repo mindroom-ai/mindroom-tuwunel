@@ -15,8 +15,8 @@ const MESSAGES: u64 = 400_000;
 /// One message in this many holds every word.
 const SHARED_EVERY: u64 = 4_000;
 
-/// Hits per word of "Except it would be nice to be able to show", in order, in
-/// one production room. The repeated words repeat their lists.
+/// Hits per word of a ten-word sentence of common words, in order, in one
+/// production room. The repeated words repeat their lists.
 const WORD_HITS: [u64; 10] =
 	[3_837, 171_950, 32_715, 84_557, 1_267, 206_178, 84_557, 1_496, 206_178, 20_941];
 
