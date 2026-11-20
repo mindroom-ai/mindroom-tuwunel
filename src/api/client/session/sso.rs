@@ -3,6 +3,12 @@ pub mod link_pause;
 mod native_apple;
 mod uiaa;
 
+/// Without the test-only pause, a sign-in never pauses.
+#[cfg(not(feature = "sso_link_pause"))]
+mod link_pause {
+	pub(super) fn point(_: &ruma::UserId) -> std::future::Ready<()> { std::future::ready(()) }
+}
+
 use std::{borrow::Cow, collections::BTreeMap, net::IpAddr, time::Duration};
 
 use axum::{
@@ -779,7 +785,6 @@ async fn complete_sso_session(
 			);
 		}
 
-		#[cfg(feature = "sso_link_pause")]
 		link_pause::point(&user_id).await;
 
 		Ok((session, (user_id, held, (terms, registry))))
