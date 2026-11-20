@@ -252,23 +252,28 @@ first time a range selects it. Upstream has the same bug. Files:
 `src/service/sync/mod.rs`, `src/api/client/sync/v5/selector.rs`; test in
 `src/service/sync/tests.rs`.
 
-### A multi-word search intersects its hit lists by hash set
+### A multi-word search reads the shortest list and looks up the rest
 
 A room search for several words read each word's hits, newest first, and kept
 those of the first word that every other word's list held. Each candidate
 copied all the other lists before scanning them, about 3.1 billion ids for a
 ten-word sentence of common words with hit lists of roughly 200,000 events,
 and the whole search request took about 47 seconds in one room while a
-single word took under a second. The shortest list is now checked against a
-hash set of each other list, which keeps its newest-first order for paging,
-and a word repeated in the query is read once. Reading every list whole still
-cost about 520,000 postings per page for that sentence in one busy room, so
-the lists are now read one id each in turn until the shortest ends. Another
-list is read on only while it is at most `PROBE_FACTOR` times as long as the
-hits left; past that, each hit's key for that word is looked up instead. Rooms
-are searched eight at a time, in their order. Ids, order, `count` and paging
-are unchanged. Upstream has the same bug. Files:
-`src/service/rooms/search/mod.rs`, `src/api/client/search.rs`; tests in
+single word took under a second. A first fix checked the shortest list
+against a hash set of every other list, but still read every list whole,
+about 520,000 postings per page for that sentence in one busy room. Now the
+first 16 words' lists are read one id each in turn until the shortest ends,
+and later words are opened only on their turn. Each other list is read on
+while it holds at most `PROBE_FACTOR` (8) times the hits left; one that ends
+by then is intersected by hash set, and past that each hit's key for that word
+is looked up instead. A repeated word is read once. Index keys grow instead of
+panicking on a word that lowercasing lengthens. Up to four rooms are searched
+at once, in their order. Ids, order, `count` and paging are unchanged. In a
+release benchmark on synthetic production-sized lists, that sentence's id
+search fell from 163 ms to 4 ms with a warm block cache, and from about 9 s to
+under 0.4 s on its first run after opening the database. Upstream has the
+same bug. Files: `src/service/rooms/search/mod.rs`,
+`src/api/client/search.rs`; tests in
 `src/service/rooms/search/tests.rs`, `src/service/rooms/search/tests/timing.rs`
 (synthetic production-sized lists intersect in under five seconds of Linux
 thread CPU time, where the old code took 35 to 49 seconds) and
