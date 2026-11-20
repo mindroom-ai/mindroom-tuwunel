@@ -55,7 +55,12 @@ const LOCKSTEP_WORDS: usize = 16;
 
 /// A word's hit list is read whole only while it is at most this many times
 /// as long as the hits left; past that, each hit's key is looked up instead.
-const PROBE_FACTOR: usize = 8;
+///
+/// On a production-sized index, with the default block cache, a lookup costs
+/// about 7 ms of CPU and a scanned posting about 1.7 µs, some 4,000 times
+/// less. The first factor, 8, was tuned on a database that fit in the cache,
+/// and turned a 0.5 s search of a rare and a common word into 15 s.
+pub const PROBE_FACTOR: usize = 4096;
 
 impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {

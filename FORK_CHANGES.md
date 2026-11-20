@@ -264,16 +264,19 @@ against a hash set of every other list, but still read every list whole,
 about 520,000 postings per page for that sentence in one busy room. Now the
 first 16 words' lists are read one id each in turn until the shortest ends,
 and later words are opened only on their turn. Each other list is read on
-while it holds at most `PROBE_FACTOR` (8) times the hits left; one that ends
-by then is intersected by hash set, and past that each hit's key for that word
-is looked up instead. A repeated word is read once. Index keys grow instead of
-panicking on a word that lowercasing lengthens. Up to four rooms are searched
-at once, in their order. Ids, order, `count` and paging are unchanged. A
-lookup that fails for a reason other than a missing key is logged and leaves
-that room out of the results, where a failed scan item was skipped. In a
-release benchmark on synthetic production-sized lists, that sentence's id
-search fell from 163 ms to 4 ms with a warm block cache, and from about 9 s to
-under 0.4 s on its first run after opening the database. Upstream has the
+while it holds at most `PROBE_FACTOR` (4096) times the hits left; one that
+ends by then is intersected by hash set, and past that each hit's key for that
+word is looked up instead. The factor was 8 at first, but on a production-sized
+index a lookup costs about 7 ms of CPU, some 4,000 times a scanned posting, so
+a rare word searched with a common one took 15 s instead of 0.5 s. A repeated
+word is read once. Index keys grow instead of panicking on a word that
+lowercasing lengthens. Up to four rooms are searched at once, in their order.
+Ids, order, `count` and paging are unchanged. A lookup that fails for a reason
+other than a missing key is logged and leaves that room out of the results,
+where a failed scan item was skipped. In a release benchmark on synthetic
+production-sized lists, with the factor at 8, that sentence's id search fell
+from 163 ms to 4 ms with a warm block cache, and from about 9 s to under 0.4 s
+on its first run after opening the database. Upstream has the
 same bug. Files: `src/service/rooms/search/mod.rs`,
 `src/api/client/search.rs`; tests in
 `src/service/rooms/search/tests.rs`, `src/service/rooms/search/tests/timing.rs`
