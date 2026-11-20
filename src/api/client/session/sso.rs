@@ -718,18 +718,12 @@ async fn complete_sso_session(
 					);
 					(user_id, Some(assignment))
 				},
-				| None => match claimed_account(services, provider, &userinfo)
-					.boxed() // size firewall
-					.await
-				{
-					| Some((user_id, assignment)) => (user_id, Some(assignment)),
-					| None => {
-						let (user_id, takes) =
-							decide_user_id(services, provider, &userinfo, &unique_id).await?;
+				| None => {
+					let (user_id, assignment, takes) =
+						first_account(services, provider, &userinfo, &unique_id).await?;
 
-						taken = takes;
-						(user_id, None)
-					},
+					taken = takes;
+					(user_id, assignment)
 				},
 			},
 		};
@@ -1232,6 +1226,28 @@ fn listed(services: &Services, user_id: &UserId) -> bool {
 		.values()
 		.flat_map(|provider| provider.assigned_accounts.values())
 		.any(|listed| listed.as_str() == user_id.as_str())
+}
+
+/// The account of a first sign-in that no assignment names: the one it claims,
+/// with its assignment, or else the one chosen by name, with whether it existed
+/// then (see `decide_user_id`).
+async fn first_account(
+	services: &Services,
+	provider: &Provider,
+	userinfo: &UserInfo,
+	unique_id: &str,
+) -> Result<(OwnedUserId, Option<SsoAssignment>, Option<bool>)> {
+	let claimed = claimed_account(services, provider, userinfo)
+		.boxed() // size firewall
+		.await;
+
+	if let Some((user_id, assignment)) = claimed {
+		return Ok((user_id, Some(assignment), None));
+	}
+
+	let (user_id, takes) = decide_user_id(services, provider, userinfo, unique_id).await?;
+
+	Ok((user_id, None, takes))
 }
 
 /// The account an appservice made ahead that this first sign-in claims, with
