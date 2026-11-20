@@ -27,7 +27,7 @@ use axum::{
 use axum_server::from_tcp;
 use futures::{
 	FutureExt, TryFutureExt,
-	future::{join, select},
+	future::{join, join3, select},
 };
 use reqwest::{
 	Client, Method, Response, StatusCode, Url,
@@ -36,6 +36,7 @@ use reqwest::{
 };
 use rust_rocksdb::{DB, Options};
 use serde_json::{Value, json};
+use tokio::time::{sleep, timeout};
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
 use tuwunel_core::{
 	Err, Result,
@@ -991,6 +992,8 @@ async fn provenance(services: &Services, base: &str, client: &Client) -> Result 
 		UserId::parse_with_server_name(localpart, services.globals.server_name())
 	};
 
+	Box::pin(registry_order(services, base, client)).await?;
+
 	let hosted = |localpart: &str| format!("{localpart}:example.com");
 	let ann = user("made-ann")?;
 	let sam = user("made-sam")?;
@@ -1085,6 +1088,40 @@ async fn provenance(services: &Services, base: &str, client: &Client) -> Result 
 
 	unclaimed(services, client, base, "verified-wyn-unregistered", &hosted("made-wyn")).await?;
 	as_made(services, &wyn).await
+}
+
+/// A claim reads the appservices before it holds the account. Registering an
+/// appservice holds them while it waits for its own user's lock, which the
+/// test holds here: a claim that arrives meanwhile waits for the appservices
+/// without the account's lock, which is free to take, and claims the account
+/// once the registration is through. Holding the account first, the claim and
+/// such a registration of the account's name would wait for each other.
+async fn registry_order(services: &Services, base: &str, client: &Client) -> Result {
+	let name = "premade-bot";
+	let bot = UserId::parse_with_server_name(name, services.globals.server_name())?;
+	let zoe = register_ahead(services, base, "made-zoe").await?;
+	let held = services.users.hold_unlinked_account(&bot).await?;
+	let registering = register_one(services, name, "premade-bot-token", name, Vec::new());
+	let signing = sign_in(client, base, "verified-made-zoe", "made-zoe:example.com");
+	let probing = async {
+		sleep(Duration::from_millis(500)).await;
+
+		let account = services.users.hold_unlinked_account(&zoe);
+		let free = timeout(Duration::from_secs(2), account)
+			.await
+			.is_ok();
+
+		drop(held);
+		free
+	};
+
+	let (registered, response, free) = join3(registering, signing, probing).await;
+
+	registered?;
+	assert!(free, "the claim waits for the appservices without the account's lock");
+	assert_eq!(signed_in(services, &response?).await?, zoe);
+
+	Ok(())
 }
 
 /// Reload the configuration with the provider `idp` changed by `change`.
