@@ -15,7 +15,6 @@ use std::{
 	path::{Path, PathBuf},
 	pin::pin,
 	process::Command,
-	sync::atomic::{AtomicBool, Ordering},
 	time::Duration,
 };
 
@@ -39,6 +38,8 @@ use rust_rocksdb::{DB, Options};
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
+#[cfg(feature = "sso_link_pause")]
+use tuwunel_api_client::link_pause;
 use tuwunel_core::{
 	Err, Result,
 	config::{IdentityProvider, check::reload},
@@ -1004,6 +1005,7 @@ async fn provenance(services: &Services, base: &str, client: &Client) -> Result 
 	};
 
 	Box::pin(registry_order(services, base, client)).await?;
+	#[cfg(feature = "sso_link_pause")]
 	Box::pin(registry_held(services, base, client)).await?;
 
 	let hosted = |localpart: &str| format!("{localpart}:example.com");
@@ -1136,47 +1138,56 @@ async fn registry_order(services: &Services, base: &str, client: &Client) -> Res
 	Ok(())
 }
 
-/// A claim keeps reading the appservices until its link is stored. An
-/// appservice that would put the name in its exclusive namespace, registered
-/// while the claim waits for the account's lock, which the test holds, waits
-/// for the claim; and the claim, which reads them no more, finishes while the
-/// registration waits.
+/// A claim keeps reading the appservices until its link is stored. The claim
+/// is paused just before it stores the link, and an appservice that would put
+/// the name in its exclusive namespace is registered: the registration waits
+/// for the appservices, and a read of them waits behind it. Resumed, the claim
+/// stores its link without reading them again, and only then does the
+/// registration get them. It reuses the claimed appservice's token, so it is
+/// refused the moment it gets them: without the claim's read, at once.
+#[cfg(feature = "sso_link_pause")]
 async fn registry_held(services: &Services, base: &str, client: &Client) -> Result {
 	let name = "premade-ghosts";
 	let yan = register_ahead(services, base, "made-yan").await?;
-	let held = services.users.hold_unlinked_account(&yan).await?;
-	let registered = AtomicBool::new(false);
+	let (paused, resume) = link_pause::arm(&yan);
 	let exclusive = vec![Namespace::new(true, "^@made-yan:.*$".to_owned())];
 	let signing = sign_in(client, base, "verified-made-yan", "made-yan:example.com");
 	let registering = async {
-		sleep(Duration::from_millis(500)).await;
+		paused
+			.await
+			.map_err(|_| err!("the claim pauses before its link"))?;
 
-		let registration = register_one(services, name, "premade-ghosts-token", name, exclusive);
-		let result = registration.await;
+		let mut registration = pin!(register_one(services, name, AS_TOKEN, name, exclusive));
+		let first = registration.as_mut().now_or_never();
+		let reads_wait = services.appservice.read().now_or_never().is_none();
 
-		registered.store(true, Ordering::SeqCst);
-		result
+		drop(resume);
+
+		let waited = first.is_none();
+		let refused = match first {
+			| Some(result) => result.is_err(),
+			| None => registration.await.is_err(),
+		};
+
+		let linked = services.oauth.sessions.is_linked(&yan).await;
+
+		Ok::<_, tuwunel_core::Error>((waited, reads_wait, refused, linked))
 	};
 
-	let probing = async {
-		sleep(Duration::from_millis(1500)).await;
+	// The timeout is only a watchdog.
+	let (response, registered) = timeout(Duration::from_secs(60), join(signing, registering))
+		.await
+		.map_err(|_| err!("the claim and the registration finish"))?;
 
-		let waited = !registered.load(Ordering::SeqCst);
+	let (waited, reads_wait, refused, linked) = registered?;
 
-		drop(held);
-		waited
-	};
-
-	let (response, registration, waited) = join3(signing, registering, probing).await;
-
-	registration?;
-	assert!(waited, "the registration waits for the claim's link");
+	assert!(waited, "the registration waits for the paused claim");
+	assert!(reads_wait, "a read of the appservices waits behind the registration");
+	assert!(refused, "the registration is refused for its token");
+	assert!(linked, "the link is stored before the registration gets the appservices");
 	assert_eq!(signed_in(services, &response?).await?, yan);
 
-	services
-		.appservice
-		.unregister_appservice(name)
-		.await
+	Ok(())
 }
 
 /// Reload the configuration with the provider `idp` changed by `change`.

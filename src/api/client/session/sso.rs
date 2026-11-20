@@ -1,3 +1,5 @@
+#[cfg(feature = "sso_link_pause")]
+pub mod link_pause;
 mod native_apple;
 mod uiaa;
 
@@ -737,7 +739,9 @@ async fn complete_sso_session(
 			..session
 		};
 
-		let created = !services.users.exists(&user_id).await;
+		// A held account was found to exist as it was taken: a second read could
+		// only fail, and creating the account would wait on its own lock.
+		let created = held.is_none() && !services.users.exists(&user_id).await;
 		let terms = if created {
 			let origin = match provider.registration {
 				| true => "sso",
@@ -774,6 +778,9 @@ async fn complete_sso_session(
 					.await?,
 			);
 		}
+
+		#[cfg(feature = "sso_link_pause")]
+		link_pause::point(&user_id).await;
 
 		Ok((session, (user_id, held, (terms, registry))))
 	};

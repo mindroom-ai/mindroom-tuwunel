@@ -29,6 +29,8 @@ use self::{
 	ldap::ldap_login,
 	password::{handle_login as password_handle_login, password_login},
 };
+#[cfg(feature = "sso_link_pause")]
+pub use self::sso::link_pause;
 pub(crate) use self::{
 	logout::{logout_all_route, logout_route},
 	refresh::refresh_token_route,
