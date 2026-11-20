@@ -59,8 +59,6 @@ pub(crate) mod well_known;
 
 mod utils;
 
-#[cfg(all(feature = "sso_link_pause", debug_assertions))]
-pub use self::session::link_pause;
 pub(crate) use self::{
 	account::{
 		add_3pid_route, change_password_route, deactivate_route, delete_3pid_route,

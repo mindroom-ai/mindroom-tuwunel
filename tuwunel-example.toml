@@ -2477,7 +2477,7 @@
 # `m.login.application_service`, which the server records as it creates
 # the account, and still has the name in its `users` namespace; the name
 # is in no appservice's exclusive namespace, such as one for its ghost
-# accounts, where a sign-in never names a new account either; the
+# accounts, as name selection skips names reserved at lookup; the
 # account is no appservice's own user, has no password, and is not
 # deactivated, locked, a server admin, linked to any identity or listed
 # in an `assigned_accounts`; the sign-in holds every claim of
@@ -2496,7 +2496,14 @@
 # accounts hold, such as `hd`, and with `userid_claims`, which this
 # option requires, listing only claims the organization assigns. It
 # cannot be combined with `trusted`. The appservice can still act as the
-# accounts in its namespace after they are claimed. A reload applies to
+# accounts in its namespace after they are claimed. Releases
+# v2.0.0-mindroom.4 and .5 also claimed names in an exclusive namespace:
+# keep accounts meant to be claimed in one that is not exclusive, or
+# their first sign-ins get a fallback account, linked to it until an
+# admin deletes the link. The exclusive namespaces are read at lookup,
+# and registering an appservice never revisits accounts already claimed:
+# register an exclusive namespace before its ghost accounts exist or this
+# option is set, and unset it while widening one. A reload applies to
 # the next sign-in.
 #
 #claim_accounts_of_appservice =

@@ -38,8 +38,6 @@ use rust_rocksdb::{DB, Options};
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
-#[cfg(all(feature = "sso_link_pause", debug_assertions))]
-use tuwunel_api_client::link_pause;
 use tuwunel_core::{
 	Err, Result,
 	config::{IdentityProvider, check::reload},
@@ -856,10 +854,10 @@ async fn claimed(services: &Services, base: &str, client: &Client) -> Result {
 /// about; spelled with a non-ASCII lookalike; for an account that has a
 /// password, is linked to another identity, deactivated, a server admin,
 /// locked, or listed in `assigned_accounts`; or for a ghost account the
-/// appservice registered in a namespace of its own that another appservice
-/// has exclusive. A listed address still gets its listed account, not the one
-/// its name gives. `provenance` has the accounts the appservice did not
-/// register.
+/// appservice registered in its own exclusive namespace, or in a namespace of
+/// its own that only another appservice has exclusive. A listed address still
+/// gets its listed account, not the one its name gives. `provenance` has the
+/// accounts the appservice did not register.
 async fn premade(services: &Services, base: &str, client: &Client) -> Result {
 	let hosted = |localpart: &str| format!("{localpart}:example.com");
 	let mut made = Vec::new();
@@ -918,13 +916,19 @@ async fn premade(services: &Services, base: &str, client: &Client) -> Result {
 		assert_eq!(signed_in(services, &response).await?, *account);
 	}
 
-	// A ghost the appservice registered is not claimed, though the record
-	// names the appservice and its own namespace for it is not exclusive:
-	// another appservice has the name exclusive.
+	// A ghost the appservice registered in its exclusive namespace is not
+	// claimed, though the record names the appservice.
 	let ghost = register_ahead(services, base, "ghost-gil").await?;
 
 	unclaimed(services, client, base, "verified-ghost-gil", &hosted("ghost-gil")).await?;
 	as_made(services, &ghost).await?;
+
+	// Nor is one it registered in a namespace of its own that is not
+	// exclusive, when another appservice has the name exclusive.
+	let shade = register_ahead(services, base, "shade-sid").await?;
+
+	unclaimed(services, client, base, "verified-shade-sid", &hosted("shade-sid")).await?;
+	as_made(services, &shade).await?;
 
 	// A non-ASCII lookalike of the name, which lowercases to it, claims nothing.
 	unclaimed(services, client, base, "verified-kelvin", &hosted("made-KELVINit")).await?;
@@ -1005,8 +1009,6 @@ async fn provenance(services: &Services, base: &str, client: &Client) -> Result 
 	};
 
 	Box::pin(registry_order(services, base, client)).await?;
-	#[cfg(all(feature = "sso_link_pause", debug_assertions))]
-	Box::pin(registry_held(services, base, client)).await?;
 
 	let hosted = |localpart: &str| format!("{localpart}:example.com");
 	let ann = user("made-ann")?;
@@ -1138,62 +1140,6 @@ async fn registry_order(services: &Services, base: &str, client: &Client) -> Res
 	Ok(())
 }
 
-/// A claim keeps reading the appservices until its link is stored. The claim
-/// is paused just before it stores the link, and an appservice that would put
-/// the name in its exclusive namespace is registered: the registration waits
-/// for the appservices, and a read of them waits behind it. Resumed, the claim
-/// stores its link without reading them again, and only then does the
-/// registration get them. It reuses the claimed appservice's token, so it is
-/// refused the moment it gets them: without the claim's read, at once.
-#[cfg(all(feature = "sso_link_pause", debug_assertions))]
-async fn registry_held(services: &Services, base: &str, client: &Client) -> Result {
-	let name = "premade-ghosts";
-	let yan = register_ahead(services, base, "made-yan").await?;
-	let (paused, resume) = link_pause::arm(&yan);
-	let exclusive = vec![Namespace::new(true, "^@made-yan:.*$".to_owned())];
-	let signing = sign_in(client, base, "verified-made-yan", "made-yan:example.com");
-	let registering = async {
-		paused
-			.await
-			.map_err(|_| err!("the claim pauses before its link"))?;
-
-		let mut registration = pin!(register_one(services, name, AS_TOKEN, name, exclusive));
-		let first = registration.as_mut().now_or_never();
-		let reads_wait = services
-			.appservice
-			.read()
-			.now_or_never()
-			.is_none();
-
-		drop(resume);
-
-		let waited = first.is_none();
-		let refused = match first {
-			| Some(result) => result.is_err(),
-			| None => registration.await.is_err(),
-		};
-
-		let linked = services.oauth.sessions.is_linked(&yan).await;
-
-		Ok::<_, tuwunel_core::Error>((waited, reads_wait, refused, linked))
-	};
-
-	// The timeout is only a watchdog.
-	let (response, registered) = timeout(Duration::from_mins(1), join(signing, registering))
-		.await
-		.map_err(|_| err!("the claim and the registration finish"))?;
-
-	let (waited, reads_wait, refused, linked) = registered?;
-
-	assert!(waited, "the registration waits for the paused claim");
-	assert!(reads_wait, "a read of the appservices waits behind the registration");
-	assert!(refused, "the registration is refused for its token");
-	assert!(linked, "the link is stored before the registration gets the appservices");
-	assert_eq!(signed_in(services, &response?).await?, yan);
-
-	Ok(())
-}
-
 /// Reload the configuration with the provider `idp` changed by `change`.
 fn reconfigure(services: &Services, idp: &str, change: impl Fn(&mut IdentityProvider)) -> Result {
 	let mut config = (*services.server.config.clone()).clone();
@@ -1265,21 +1211,23 @@ async fn refused_keeping_link(
 ///
 /// The first one's namespace for the assigned people is exclusive, as a
 /// migration's often is: SSO never names a new account in it, so only the
-/// assignment signs the people in to theirs. The names `made-…` are in a
-/// namespace that is not exclusive, of both appservices: anything may register
-/// there. The ghost accounts' names, `ghost-…`, are in the first one's
-/// namespace, not exclusive, and in the other's, exclusive.
+/// assignment signs the people in to theirs. So is its namespace for its ghost
+/// accounts, `ghost-…`. The names `made-…` are in a namespace that is not
+/// exclusive, of both appservices: anything may register there. The names
+/// `shade-…` are in the first one's namespace, not exclusive, and in the
+/// other's, exclusive.
 async fn register_appservice(services: &Services) -> Result {
 	let assigned = "^@(alice|carol|dave|gina|hank|kim|rita|uma|vera|wes):.*$";
 	let made = || Namespace::new(false, "^@made-[a-z]+:.*$".to_owned());
-	let ghost = |exclusive| Namespace::new(exclusive, "^@ghost-[a-z]+:.*$".to_owned());
+	let shade = |exclusive| Namespace::new(exclusive, "^@shade-[a-z]+:.*$".to_owned());
 	let appservices = [
 		(APPSERVICE, AS_TOKEN, "migration", vec![
 			Namespace::new(true, assigned.to_owned()),
-			ghost(false),
+			Namespace::new(true, "^@ghost-[a-z]+:.*$".to_owned()),
+			shade(false),
 			made(),
 		]),
-		(OTHER, OTHER_TOKEN, "other-migration", vec![ghost(true), made()]),
+		(OTHER, OTHER_TOKEN, "other-migration", vec![shade(true), made()]),
 	];
 
 	for (id, token, sender, users) in appservices {

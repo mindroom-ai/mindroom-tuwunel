@@ -30,9 +30,6 @@ default = [
 
 jwt_login = ["tuwunel-api/jwt_login"]
 ldap = ["tuwunel-api/ldap", "tuwunel-service/ldap"]
-# Test only: lets a test pause an SSO sign-in just before its link is stored.
-# Compiled only with debug assertions, so the repository's release profiles leave it out.
-sso_link_pause = []
 
 release_max_log_level = [
 	"log/max_level_trace",

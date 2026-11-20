@@ -1,5 +1,3 @@
-#[cfg(all(feature = "sso_link_pause", debug_assertions))]
-pub mod link_pause;
 mod native_apple;
 mod uiaa;
 
@@ -33,7 +31,6 @@ use ruma::{
 };
 use serde::{Deserialize, Serialize};
 use serde_html_form::{from_str as from_form_str, to_string as to_form_string};
-use tokio::sync::RwLockReadGuard;
 use tuwunel_core::{
 	Err, Result, at,
 	config::IdentityProvider,
@@ -56,7 +53,6 @@ use tuwunel_core::{
 };
 use tuwunel_service::{
 	Services,
-	appservice::RegistrationInfo,
 	client::read_response_capped,
 	media::MXC_LENGTH,
 	oauth::{
@@ -690,7 +686,7 @@ async fn complete_sso_session(
 		};
 
 		let mut taken = None;
-		let (user_id, mut held, registry) = match (session.user_id, old_user_id) {
+		let (user_id, mut held) = match (session.user_id, old_user_id) {
 			// A chained identity without a link of its own takes the carried
 			// account, which a listed address must name, verified.
 			| (Some(user_id), old_user_id) => match assigned_user_id {
@@ -702,9 +698,9 @@ async fn complete_sso_session(
 						"This sign-in is assigned to {assigned}, not {user_id}, which it \
 						 carries."
 					)))),
-				| _ => (user_id, None, None),
+				| _ => (user_id, None),
 			},
-			| (None, Some(user_id)) => (user_id, None, None),
+			| (None, Some(user_id)) => (user_id, None),
 			| (None, None) => match assigned_user_id {
 				| Some(user_id) if userinfo.email_verified == Some(false) =>
 					return refuse_unverified(&user_id),
@@ -720,16 +716,14 @@ async fn complete_sso_session(
 						%user_id,
 						"Linking the assigned account."
 					);
-					(user_id, Some(assignment), None)
+					(user_id, Some(assignment))
 				},
 				| None => {
-					let (user_id, claim, takes) =
+					let (user_id, assignment, takes) =
 						first_account(services, provider, &userinfo, &unique_id).await?;
 
-					let (assignment, registry) = claim.unzip();
-
 					taken = takes;
-					(user_id, assignment, registry)
+					(user_id, assignment)
 				},
 			},
 		};
@@ -739,9 +733,7 @@ async fn complete_sso_session(
 			..session
 		};
 
-		// A held account was found to exist as it was taken: a second read could
-		// only fail, and creating the account would wait on its own lock.
-		let created = held.is_none() && !services.users.exists(&user_id).await;
+		let created = !services.users.exists(&user_id).await;
 		let terms = if created {
 			let origin = match provider.registration {
 				| true => "sso",
@@ -771,22 +763,20 @@ async fn complete_sso_session(
 				))));
 			}
 
-			held = services
-				.users
-				.hold_unlinked_account(&user_id)
-				.await
-				.map(Some)?;
+			held = Some(
+				services
+					.users
+					.hold_unlinked_account(&user_id)
+					.await?,
+			);
 		}
 
-		#[cfg(all(feature = "sso_link_pause", debug_assertions))]
-		link_pause::point(&user_id).await;
-
-		Ok((session, (user_id, held, (terms, registry))))
+		Ok((session, (user_id, held, terms)))
 	};
 
 	// An assigned account without a password becomes an SSO account in the
 	// batch that links it, so no reader finds one without the other.
-	let (session, (user_id, held, (terms, registry)), old_sess_id) = services
+	let (session, (user_id, held, terms), old_sess_id) = services
 		.oauth
 		.sessions
 		.commit_identity_session_with(&unique_id, complete_identity, |(user_id, held, _), txn| {
@@ -799,8 +789,8 @@ async fn complete_sso_session(
 		.await?;
 
 	// The link is stored, so the account is released before the steps below
-	// lock it, and so are the appservices a claim read.
-	drop((held, registry));
+	// lock it.
+	drop(held);
 
 	if services
 		.users
@@ -1238,27 +1228,21 @@ fn listed(services: &Services, user_id: &UserId) -> bool {
 		.any(|listed| listed.as_str() == user_id.as_str())
 }
 
-/// The appservices, read by a claim until its link is stored.
-type Registry<'a> = RwLockReadGuard<'a, BTreeMap<String, RegistrationInfo>>;
-
-/// A claim's assignment, and the appservices it read.
-type Claim<'a> = (SsoAssignment, Registry<'a>);
-
 /// The account of a first sign-in that no assignment names: the one it claims,
-/// with its claim, or else the one chosen by name, with whether it existed
+/// with its assignment, or else the one chosen by name, with whether it existed
 /// then (see `decide_user_id`).
-async fn first_account<'a>(
-	services: &'a Services,
+async fn first_account(
+	services: &Services,
 	provider: &Provider,
 	userinfo: &UserInfo,
 	unique_id: &str,
-) -> Result<(OwnedUserId, Option<Claim<'a>>, Option<bool>)> {
+) -> Result<(OwnedUserId, Option<SsoAssignment>, Option<bool>)> {
 	let claimed = claimed_account(services, provider, userinfo)
 		.boxed() // size firewall
 		.await;
 
-	if let Some((user_id, claim)) = claimed {
-		return Ok((user_id, Some(claim), None));
+	if let Some((user_id, assignment)) = claimed {
+		return Ok((user_id, Some(assignment), None));
 	}
 
 	let (user_id, takes) = decide_user_id(services, provider, userinfo, unique_id).await?;
@@ -1267,17 +1251,17 @@ async fn first_account<'a>(
 }
 
 /// The account an appservice made ahead that this first sign-in claims, with
-/// its claim, when the provider's live `claim_accounts_of_appservice`
+/// its assignment, when the provider's live `claim_accounts_of_appservice`
 /// names the appservice recorded as registering it. The account is the one
 /// named by the first claim of `userid_claims` the identity holds, lowercased
 /// in ASCII only, so a non-ASCII lookalike of a name names no account. A
 /// refusal is logged with its reason, and the sign-in then gets an account as
 /// without the option.
-async fn claimed_account<'a>(
-	services: &'a Services,
+async fn claimed_account(
+	services: &Services,
 	provider: &Provider,
 	userinfo: &UserInfo,
-) -> Option<(OwnedUserId, Claim<'a>)> {
+) -> Option<(OwnedUserId, SsoAssignment)> {
 	let config = services
 		.oauth
 		.providers
@@ -1323,31 +1307,31 @@ async fn claimed_account<'a>(
 	// anything else made, as a registration may, has none. The appservice must
 	// still be registered for the name. A name in any appservice's exclusive
 	// namespace is never claimed, as a sign-in never names a new account there:
-	// such accounts are the appservice's ghosts. The appservices are read
-	// before the account is held, since registering an appservice holds them
-	// while it takes its own user's lock, and a claim keeps reading them until
-	// its link is stored, so no registration meanwhile puts the name in an
-	// exclusive namespace or makes it an appservice's own user. Nothing from
-	// here to the link reads them again: with a registration waiting for them,
-	// a second read would wait for ever.
+	// such accounts are the appservice's ghosts. All are read, and the
+	// appservices released, before the account is held: registering an
+	// appservice holds them while it takes its own user's lock.
 	let recorded = services
 		.users
 		.registering_appservice(&user_id)
 		.await;
 
-	let appservices = services.appservice.read().await;
-	let made = recorded.as_deref() == Some(appservice.as_str())
-		&& appservices
-			.get(&appservice)
-			.is_some_and(|info| info.is_user_match(&user_id));
+	let (made, owned, exclusive) = {
+		let appservices = services.appservice.read().await;
+		let made = recorded.as_deref() == Some(appservice.as_str())
+			&& appservices
+				.get(&appservice)
+				.is_some_and(|info| info.is_user_match(&user_id));
 
-	let owned = appservices
-		.values()
-		.any(|info| info.sender == user_id);
-
-	let exclusive = appservices
-		.values()
-		.any(|info| info.is_exclusive_user_match(&user_id));
+		(
+			made,
+			appservices
+				.values()
+				.any(|info| info.sender == user_id),
+			appservices
+				.values()
+				.any(|info| info.is_exclusive_user_match(&user_id)),
+		)
+	};
 
 	// The account's own checks, and its password lock, which a claim holds
 	// until its link is stored; the admin and lock reads below are made under
@@ -1379,7 +1363,7 @@ async fn claimed_account<'a>(
 	match assignment {
 		| Ok(assignment) => {
 			info!(provider = provider.id(), %user_id, "Claiming the account made ahead.");
-			Some((user_id, (assignment, appservices)))
+			Some((user_id, assignment))
 		},
 		| Err(reason) => {
 			warn!(%user_id, "Refused a sign-in's claim of the account, which {reason}.");

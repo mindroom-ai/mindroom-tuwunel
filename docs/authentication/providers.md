@@ -442,8 +442,8 @@ the account when all of this holds:
   and the account is in its `users` namespace now, and the account is not an
   appservice's own user;
 - the name is in no appservice's exclusive namespace, such as one for an
-  import appservice's ghost accounts: a sign-in never names a new account
-  there either;
+  import appservice's ghost accounts: name selection skips names reserved at
+  lookup, for a claim as for a new account's name;
 - the account has no password or other sign-in system's marker, and is not
   deactivated, locked, a server admin, linked to any identity (also one adopted
   from another server's database) or listed in an `assigned_accounts`;
@@ -481,6 +481,22 @@ another appservice.
 The appservice can act as any account in its namespace, also after its person
 has claimed it, so guard its token accordingly. A reload applies to the next
 sign-in.
+
+**Upgrading from v2.0.0-mindroom.4 or .5:** those releases also claimed an
+account whose name is in an exclusive namespace. Accounts meant to be claimed
+must now be in a namespace that is not exclusive. A deployment that keeps them
+in an exclusive one sees their first sign-ins refused the claim: each gets its
+fallback account and is linked to it for good, until an admin deletes the link
+(`!admin query oauth delete`).
+
+Known limits: the exclusive namespaces are checked when the sign-in looks the
+account up, as ordinary naming checks them, and are not held until the link is
+stored. So an appservice registered while a claim is under way has the same
+result as one registered just after it, and registering an appservice never
+revisits accounts already claimed in its namespace. Register an exclusive
+namespace before its ghost accounts exist or before setting
+`claim_accounts_of_appservice`, and pause new claims (unset the option and
+reload) while widening an exclusive namespace on a live server.
 
 ### Letting only some people register
 

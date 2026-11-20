@@ -228,11 +228,6 @@ sentry_telemetry = [
 	"dep:sentry-tracing",
 	"tuwunel-router/sentry_telemetry",
 ]
-# Test only: lets a test pause an SSO sign-in just before its link is stored.
-# Compiled only with debug assertions, so the repository's release profiles leave it out.
-sso_link_pause = [
-	"tuwunel-api-client/sso_link_pause",
-]
 synapse_admin = [
 	"dep:tuwunel-api-admin",
 	"tuwunel-router/synapse_admin",

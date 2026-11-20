@@ -1054,35 +1054,41 @@ which `decide_user_id` now reads too), lowercased in ASCII only, so a
 non-ASCII lookalike that lowercases to a name names no account.
 `claimed_account` gives it only when the record names the configured
 appservice, which is registered and has the account in its `users` namespace
-now; the name is in no registered appservice's exclusive namespace, so an
-import appservice's ghost accounts there are never claimed, as ordinary
-sign-in naming never picks such a name; the account is no appservice's own
-user, not a server
-admin, not locked, not of a forbidden name (matched on the local part) and
-not listed in an `assigned_accounts`; the sign-in holds every claim of
-`assigned_accounts_claims`; the provider does not say the address is
-unverified, and says it is verified when the name is read from the `email`
-claim; and, by the assignment's own checks (`sso_assignment`, split from
-`assign_sso_account`), the account exists, has an empty password, no recorded
-deactivation and no linked identity. The record and the appservices are read
-first, before the account is held: registering an appservice holds them while
-it takes its own user's lock, so a claim that held the account and then
-waited for them could wait on such a registration for ever. A claim that
-succeeds keeps its read of the appservices until the link is stored, so no
-appservice registered meanwhile makes the name exclusive or its own user;
-nothing from that read to the link reads them again, which, with a
-registration waiting, would wait for ever. Nor is a held account read again
-for whether it exists: a failed read would send the sign-in to create it,
-waiting on its own lock. A test pauses a claim just before its link through
-`sso_link_pause`, a test-only cargo feature compiled only with debug
-assertions, so the repository's release profiles leave it out, `--all-features` builds included. The account's password lock is
-then taken and held until the link is stored, and the account gets the sentinel and origin `sso` in the same
-write batch, as an assigned account does. The admin and lock reads are made
-under that lock, which a promotion or an account lock does not take. A first
-claim that is not a valid name claims nothing; no later claim is tried, as
-one is for a new account's name. The server reads a passwordless account outside an exclusive
-namespace as a guest (`users::is_guest`); the claim relies on the record
-instead, and guest handling is unchanged elsewhere.
+now; the name is in no registered appservice's exclusive namespace (read in the
+same appservices read as the record's check), so an import appservice's ghost
+accounts there are never claimed: name selection skips names reserved at
+lookup, for a claim as for a new account's name; the account is no
+appservice's own user, not a server admin, not locked, not of a forbidden name
+(matched on the local part) and not listed in an `assigned_accounts`; the
+sign-in holds every claim of `assigned_accounts_claims`; the provider does not
+say the address is unverified, and says it is verified when the name is read
+from the `email` claim; and, by the assignment's own checks (`sso_assignment`,
+split from `assign_sso_account`), the account exists, has an empty password,
+no recorded deactivation and no linked identity. The record and the
+appservices are read first, and the appservices released, before the account
+is held: registering an appservice holds them while it takes its own user's
+lock, so a claim that held the account and then waited for them could wait on
+such a registration for ever. The account's password lock is then taken and
+held until the link is stored, and the account gets the sentinel and origin
+`sso` in the same write batch, as an assigned account does. The admin and lock
+reads are made under that lock, which a promotion or an account lock does not
+take. A first claim that is not a valid name claims nothing; no later claim is
+tried, as one is for a new account's name. The server reads a passwordless
+account outside an exclusive namespace as a guest (`users::is_guest`); the
+claim relies on the record instead, and guest handling is unchanged elsewhere.
+
+v2.0.0-mindroom.4 and .5 also claimed an account whose name is in an exclusive
+namespace. Accounts meant to be claimed must now be in a namespace that is not
+exclusive: one kept in an exclusive namespace has its person's first sign-in
+refused the claim, given the fallback account and linked to it for good, until
+an admin deletes the link. Known limits: the exclusive namespaces are checked
+at lookup, as ordinary naming checks them, and the appservices are not held
+until the link is stored. An appservice registered while a claim is under way
+has the same result as one registered just after it, and registering an
+appservice never revisits accounts already claimed in its namespace, so
+operators register an exclusive namespace before its ghost accounts exist or
+before setting the option, and pause new claims while widening one on a live
+server.
 
 Any other first sign-in is mapped as without the option; when an existing
 account of its name is not claimed, a warning names it and the reason, and a
@@ -1099,11 +1105,10 @@ whether the account is its own user. The config check refuses the option
 without `userid_claims`, so only claims the operator lists there name an
 account (list only claims the organization assigns), and with `trusted`,
 whose matching by name would give out an account a claim was refused. The
-record proves the
-appservice, not the person: only the name is compared, not the address's
-domain, and the appservice can still act as an account in its namespace after
-it is claimed. Unset, the default, sign-in works as before. Upstream has no
-such option. Files: `src/database/maps.rs`,
+record proves the appservice, not the person: only the name is compared, not
+the address's domain, and the appservice can still act as an account in its
+namespace after it is claimed. Unset, the default, sign-in works as before.
+Upstream has no such option. Files: `src/database/maps.rs`,
 `src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
 `src/service/users/{mod.rs,register.rs,sso.rs}`,
 `src/api/client/register/register.rs`, `src/api/client/session/sso.rs`,
