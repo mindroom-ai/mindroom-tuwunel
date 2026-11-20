@@ -818,6 +818,14 @@ client_secret = "oauth-secret"
 	result.expect("known assigned accounts claims should pass config check");
 
 	refused(r#"assigned_accounts_claims = { groups = "x" }"#, "unknown claim");
+
+	let claiming = "claim_accounts_of_appservice = \"import\"\nuserid_claims = [\"email\"]";
+	let (result, _) = check_with_captured_logs(&config(claiming));
+
+	result.expect("claiming with userid_claims should pass config check");
+
+	refused(r#"claim_accounts_of_appservice = "import""#, "needs userid_claims");
+	refused(&format!("{claiming}\ntrusted = true"), "is trusted");
 }
 
 #[test]

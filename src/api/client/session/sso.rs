@@ -60,7 +60,7 @@ use tuwunel_service::{
 		TokenResponse, UserInfo, fallback_localpart, unique_id_iss_sub, unique_id_sub,
 	},
 	threepid::canonicalize_email,
-	users::{PASSWORD_SENTINEL, Register},
+	users::{PASSWORD_SENTINEL, Register, SsoAssignment},
 };
 use url::Url;
 
@@ -714,11 +714,11 @@ async fn complete_sso_session(
 					(user_id, Some(assignment))
 				},
 				| None => {
-					let (user_id, takes) =
-						decide_user_id(services, provider, &userinfo, &unique_id).await?;
+					let (user_id, assignment, takes) =
+						first_account(services, provider, &userinfo, &unique_id).await?;
 
 					taken = takes;
-					(user_id, None)
+					(user_id, assignment)
 				},
 			},
 		};
@@ -1223,6 +1223,181 @@ fn listed(services: &Services, user_id: &UserId) -> bool {
 		.any(|listed| listed.as_str() == user_id.as_str())
 }
 
+/// The account of a first sign-in that no assignment names: the one it claims,
+/// with its assignment, or else the one chosen by name, with whether it existed
+/// then (see `decide_user_id`).
+async fn first_account(
+	services: &Services,
+	provider: &Provider,
+	userinfo: &UserInfo,
+	unique_id: &str,
+) -> Result<(OwnedUserId, Option<SsoAssignment>, Option<bool>)> {
+	let claimed = claimed_account(services, provider, userinfo)
+		.boxed() // size firewall
+		.await;
+
+	if let Some((user_id, assignment)) = claimed {
+		return Ok((user_id, Some(assignment), None));
+	}
+
+	let (user_id, takes) = decide_user_id(services, provider, userinfo, unique_id).await?;
+
+	Ok((user_id, None, takes))
+}
+
+/// The account an appservice made ahead that this first sign-in claims, with
+/// its assignment, when the provider's live `claim_accounts_of_appservice`
+/// names the appservice recorded as registering it. The account is the one
+/// named by the first claim of `userid_claims` the identity holds, lowercased
+/// in ASCII only, so a non-ASCII lookalike of a name names no account. A
+/// refusal is logged with its reason, and the sign-in then gets an account as
+/// without the option.
+async fn claimed_account(
+	services: &Services,
+	provider: &Provider,
+	userinfo: &UserInfo,
+) -> Option<(OwnedUserId, SsoAssignment)> {
+	let config = services
+		.oauth
+		.providers
+		.find_config(provider.id())
+		.ok()?;
+
+	// All that the configuration says is read here, at one point and before
+	// anything is awaited, so a reload meanwhile changes none of it. The names
+	// are read from it too: the provider is as it was first used, with the
+	// `userid_claims` it had then.
+	let appservice = config.claim_accounts_of_appservice.clone()?;
+	let choices = userid_choices(config, userinfo);
+	let (claim, name) = choices
+		.iter()
+		.enumerate()
+		.find_map(|(claim, name)| Some((claim, name.as_ref()?.to_ascii_lowercase())))?;
+
+	let user_id = UserId::parse_with_server_name(&name, services.globals.server_name())
+		.ok()
+		.filter(|user_id| user_id.validate_strict().is_ok())?;
+	let claims = &config.assigned_accounts_claims;
+	let unclaimed = !claims.is_empty() && !userinfo.meets(claims, config.trusted);
+	let reserved = listed(services, &user_id);
+	let forbidden = &services.config.registration.forbidden_usernames;
+	let forbidden = forbidden.is_match(user_id.localpart());
+	let associated = services
+		.oauth
+		.sessions
+		.find_user_association_pending(provider.id(), userinfo)
+		.is_some();
+
+	if associated || !services.users.exists(&user_id).await {
+		return None;
+	}
+
+	// The address is the last choice. One that names the account must be
+	// verified; any other name still fails on an address said to be unverified.
+	let by_address = claim == choices.len().saturating_sub(1);
+	let verified = userinfo.email_verified.unwrap_or(!by_address);
+
+	// Every appservice is loaded before any is asked about.
+	services.appservice.loaded().await;
+
+	// Only the record says who made the account: one without a password that
+	// anything else made, as a registration may, has none. The appservice must
+	// still be registered for the name. Both are read, and the appservices
+	// released, before the account is held: registering an appservice holds
+	// them while it takes its own user's lock.
+	let recorded = services
+		.users
+		.registering_appservice(&user_id)
+		.await;
+
+	let (made, owned) = {
+		let appservices = services.appservice.read().await;
+		let made = recorded.as_deref() == Some(appservice.as_str())
+			&& appservices
+				.get(&appservice)
+				.is_some_and(|info| info.is_user_match(&user_id));
+
+		(
+			made,
+			appservices
+				.values()
+				.any(|info| info.sender == user_id),
+		)
+	};
+
+	// The account's own checks, and its password lock, which a claim holds
+	// until its link is stored; the admin and lock reads below are made under
+	// it.
+	let assignment = services.users.sso_assignment(&user_id).await;
+
+	let refusals = [
+		(reserved, "is listed in an assigned_accounts"),
+		(unclaimed, "is claimed without the assigned_accounts_claims"),
+		(!verified, "is claimed by an address not known to be verified"),
+		(!made, "the appservice did not register, or no longer has in its namespace"),
+		(owned, "is an appservice's own user"),
+		(forbidden, "has a forbidden name"),
+		(services.admin.user_is_admin(&user_id).await, "is a server admin"),
+		(services.users.is_locked(&user_id).await, "is locked"),
+	];
+
+	let refusal = refusals
+		.into_iter()
+		.find_map(|(refused, reason)| refused.then_some(reason));
+
+	let assignment = match (refusal, assignment) {
+		| (Some(reason), _) => Err(reason),
+		| (None, Ok((_, false))) => Err("has a password or another sign-in system's marker"),
+		| (None, assignment) => assignment,
+	};
+
+	match assignment {
+		| Ok(assignment) => {
+			info!(provider = provider.id(), %user_id, "Claiming the account made ahead.");
+			Some((user_id, assignment))
+		},
+		| Err(reason) => {
+			warn!(%user_id, "Refused a sign-in's claim of the account, which {reason}.");
+			None
+		},
+	}
+}
+
+/// The claims that may name the identity's account, in the order they are
+/// tried, as the provider's `userid_claims` allow them; the address's local
+/// part is the last.
+fn userid_choices<'a>(provider: &Provider, userinfo: &'a UserInfo) -> [Option<&'a str>; 6] {
+	let explicit = |claim: &str| provider.userid_claims.contains(claim);
+
+	let allowed = |claim: &str| provider.userid_claims.is_empty() || explicit(claim);
+
+	[
+		explicit("sub").then_some(userinfo.sub.as_str()),
+		userinfo
+			.preferred_username
+			.as_deref()
+			.filter(|_| allowed("preferred_username")),
+		userinfo
+			.username
+			.as_deref()
+			.filter(|_| allowed("username")),
+		userinfo
+			.nickname
+			.as_deref()
+			.filter(|_| allowed("nickname")),
+		userinfo
+			.login
+			.as_deref()
+			.filter(|_| allowed("login")),
+		userinfo
+			.email
+			.as_deref()
+			.and_then(|email| email.split_once('@'))
+			.map(at!(0))
+			.filter(|_| allowed("email")),
+	]
+}
+
 /// Returns the user ID, and, for an account taken by name, whether it existed
 /// then: the sign-in holds such an account until its link is stored. None when
 /// the provider is trusted (it may take linked accounts) or an admin associated
@@ -1255,45 +1430,13 @@ async fn decide_user_id(
 	}
 
 	let hold = !provider.trusted;
-	let explicit = |claim: &str| provider.userid_claims.contains(claim);
-
-	let allowed = |claim: &str| provider.userid_claims.is_empty() || explicit(claim);
-
-	let choices = [
-		explicit("sub")
-			.then_some(userinfo.sub.as_str())
-			.map(str::to_lowercase),
-		userinfo
-			.preferred_username
-			.as_deref()
-			.map(str::to_lowercase)
-			.filter(|_| allowed("preferred_username")),
-		userinfo
-			.username
-			.as_deref()
-			.map(str::to_lowercase)
-			.filter(|_| allowed("username")),
-		userinfo
-			.nickname
-			.as_deref()
-			.map(str::to_lowercase)
-			.filter(|_| allowed("nickname")),
-		userinfo
-			.login
-			.as_deref()
-			.map(str::to_lowercase)
-			.filter(|_| allowed("login")),
-		userinfo
-			.email
-			.as_deref()
-			.and_then(|email| email.split_once('@'))
-			.map(at!(0))
-			.map(str::to_lowercase)
-			.filter(|_| allowed("email")),
-	];
+	let choices = userid_choices(provider, userinfo)
+		.into_iter()
+		.flatten()
+		.map(str::to_lowercase);
 
 	// A listed account is only for its listed address, never for a name.
-	for choice in choices.into_iter().flatten() {
+	for choice in choices {
 		if let Some((user_id, existed)) = try_user_id(services, provider, &choice, false).await
 			&& !listed(services, &user_id)
 		{

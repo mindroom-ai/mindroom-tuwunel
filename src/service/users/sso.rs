@@ -139,6 +139,19 @@ impl Service {
 			.is_missing()
 	}
 
+	/// The ID of the appservice that registered the account with
+	/// `m.login.application_service`, as recorded when it was created. An
+	/// account made any other way, or before the record was kept, has none,
+	/// and an unreadable record counts as none.
+	pub async fn registering_appservice(&self, user_id: &UserId) -> Option<String> {
+		self.db
+			.userid_appservice
+			.get(user_id)
+			.await
+			.deserialized()
+			.ok()
+	}
+
 	/// Mark the account external. Nothing clears the mark.
 	pub fn set_external(&self, user_id: &UserId) { self.db.userid_external.insert(user_id, b""); }
 
@@ -330,6 +343,18 @@ impl Service {
 	/// has none yet. The assignment holds the account's password lock until the
 	/// link is stored, and says whether the account has an empty password.
 	pub async fn assign_sso_account(&self, user_id: &UserId) -> Result<SsoAssignment> {
+		self.sso_assignment(user_id)
+			.await
+			.map_err(|reason| {
+				err!(Request(Forbidden(warn!(
+					"This sign-in is assigned to {user_id}, which {reason}."
+				))))
+			})
+	}
+
+	/// The assignment of an account to a signing-in identity that has none
+	/// yet, or the reason the account cannot be linked.
+	pub async fn sso_assignment(&self, user_id: &UserId) -> Result<SsoAssignment, &'static str> {
 		let guard = self.changing_password.lock(user_id).await;
 		let password = self.password_hash(user_id).await;
 		let empty = password.as_deref().is_ok_and(str::is_empty);
@@ -349,13 +374,10 @@ impl Service {
 			),
 		];
 
-		if let Some((_, reason)) = refusals.into_iter().find(|(refused, _)| *refused) {
-			return Err!(Request(Forbidden(warn!(
-				"This sign-in is assigned to {user_id}, which {reason}."
-			))));
+		match refusals.into_iter().find(|(refused, _)| *refused) {
+			| Some((_, reason)) => Err(reason),
+			| None => Ok((guard, empty)),
 		}
-
-		Ok((guard, empty))
 	}
 
 	/// Hold an account a first sign-in takes by name, new or existing, until its
