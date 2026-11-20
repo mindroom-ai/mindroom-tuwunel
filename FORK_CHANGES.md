@@ -1070,7 +1070,7 @@ registration waiting, would wait for ever. Nor is a held account read again
 for whether it exists: a failed read would send the sign-in to create it,
 waiting on its own lock. A test pauses a claim just before its link through
 `sso_link_pause`, a test-only cargo feature compiled only with debug
-assertions, so no release build has it, `--all-features` ones included. The account's password lock is
+assertions, so the repository's release profiles leave it out, `--all-features` builds included. The account's password lock is
 then taken and held until the link is stored, and the account gets the sentinel and origin `sso` in the same
 write batch, as an assigned account does. The admin and lock reads are made
 under that lock, which a promotion or an account lock does not take. A first
