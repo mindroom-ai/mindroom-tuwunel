@@ -485,18 +485,29 @@ sign-in.
 **Upgrading from v2.0.0-mindroom.4 or .5:** those releases also claimed an
 account whose name is in an exclusive namespace. Accounts meant to be claimed
 must now be in a namespace that is not exclusive. A deployment that keeps them
-in an exclusive one sees their first sign-ins refused the claim: each gets its
-fallback account and is linked to it for good, until an admin deletes the link
-(`!admin query oauth delete`).
+in an exclusive one sees their first sign-ins refused the claim. Each then gets
+the account it would get without the option: ordinary naming tries the later
+names `userid_claims` gives and by default ends at a generated fallback name;
+with `unique_id_fallbacks = false` it may refuse the sign-in, linking nothing.
+Only when ordinary naming succeeds is the identity linked to that account, for
+good, until an admin deletes the link (`!admin query oauth delete`).
 
 Known limits: the exclusive namespaces are checked when the sign-in looks the
 account up, as ordinary naming checks them, and are not held until the link is
-stored. So an appservice registered while a claim is under way has the same
-result as one registered just after it, and registering an appservice never
-revisits accounts already claimed in its namespace. Register an exclusive
-namespace before its ghost accounts exist or before setting
-`claim_accounts_of_appservice`, and pause new claims (unset the option and
-reload) while widening an exclusive namespace on a live server.
+stored. An appservice registered before that lookup is seen. One registered
+after it has the same result as one registered just after the link is stored,
+and registering an appservice never revisits accounts already claimed in its
+namespace. So:
+
+- Register an exclusive namespace, or a wider one, before its new ghost
+  accounts exist or before setting `claim_accounts_of_appservice`.
+- To widen an exclusive namespace on a live server, pause this provider's first
+  sign-ins, let callbacks already under way finish, check the existing links in
+  the newly reserved range, register the wider namespace, then resume.
+- Unsetting `claim_accounts_of_appservice` is no such pause: it does not wait
+  for claims already past their lookup, and first sign-ins meanwhile get
+  ordinary naming instead, linked for good.
+- Claims made before the registration are never revisited.
 
 ### Letting only some people register
 

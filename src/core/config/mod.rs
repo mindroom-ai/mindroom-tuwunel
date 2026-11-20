@@ -2059,13 +2059,22 @@ pub struct IdentityProvider {
 	/// cannot be combined with `trusted`. The appservice can still act as the
 	/// accounts in its namespace after they are claimed. Releases
 	/// v2.0.0-mindroom.4 and .5 also claimed names in an exclusive namespace:
-	/// keep accounts meant to be claimed in one that is not exclusive, or
-	/// their first sign-ins get a fallback account, linked to it until an
-	/// admin deletes the link. The exclusive namespaces are read at lookup,
-	/// and registering an appservice never revisits accounts already claimed:
-	/// register an exclusive namespace before its ghost accounts exist or this
-	/// option is set, and unset it while widening one. A reload applies to
-	/// the next sign-in.
+	/// keep accounts meant to be claimed in one that is not exclusive. A
+	/// refused claim gets the account the sign-in would get without this
+	/// option: ordinary naming tries the later names `userid_claims` gives and
+	/// by default ends at a generated name, and with
+	/// `unique_id_fallbacks = false` it may refuse the sign-in, linking
+	/// nothing. Only an account ordinary naming gives stays linked, until an
+	/// admin deletes the link. The exclusive namespaces are read at lookup: a
+	/// registration before the lookup is seen, one after it is not, and
+	/// registering an appservice never revisits accounts already claimed.
+	/// Register an exclusive namespace, or a wider one, before its new ghost
+	/// accounts exist or this option is set. To widen one on a live server,
+	/// pause this provider's first sign-ins, let callbacks under way finish,
+	/// check the existing links in the newly reserved range, register, then
+	/// resume. Unsetting this option is no such pause: it does not wait for
+	/// claims past their lookup, and gives first sign-ins ordinary naming
+	/// instead. A reload applies to the next sign-in.
 	pub claim_accounts_of_appservice: Option<String>,
 
 	/// Rules for who may register through this provider, and the rooms their

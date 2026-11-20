@@ -1079,16 +1079,22 @@ claim relies on the record instead, and guest handling is unchanged elsewhere.
 
 v2.0.0-mindroom.4 and .5 also claimed an account whose name is in an exclusive
 namespace. Accounts meant to be claimed must now be in a namespace that is not
-exclusive: one kept in an exclusive namespace has its person's first sign-in
-refused the claim, given the fallback account and linked to it for good, until
-an admin deletes the link. Known limits: the exclusive namespaces are checked
-at lookup, as ordinary naming checks them, and the appservices are not held
-until the link is stored. An appservice registered while a claim is under way
-has the same result as one registered just after it, and registering an
-appservice never revisits accounts already claimed in its namespace, so
-operators register an exclusive namespace before its ghost accounts exist or
-before setting the option, and pause new claims while widening one on a live
-server.
+exclusive. A refused claim gets the account the sign-in would get without the
+option: ordinary naming tries the later names of `userid_claims` and by default
+ends at a generated fallback name, and with `unique_id_fallbacks = false` it
+may refuse the sign-in, linking nothing. Only when ordinary naming succeeds is
+its link stored, for good until an admin deletes it. Known limits: the
+exclusive namespaces are checked at lookup, as ordinary naming checks them, and
+the appservices are not held until the link is stored. An appservice registered
+before a claim's lookup is seen; one registered after it has the same result as
+one registered just after the link, and registering an appservice never
+revisits accounts already claimed in its namespace. So operators register an
+exclusive namespace, or a wider one, before its new ghost accounts exist or
+before setting the option. To widen one live, they pause the provider's first
+sign-ins, let callbacks under way finish, check the existing links in the newly
+reserved range, register, then resume. Unsetting the option is no such pause:
+it does not wait for claims already past their lookup, and first sign-ins
+meanwhile get ordinary naming instead.
 
 Any other first sign-in is mapped as without the option; when an existing
 account of its name is not claimed, a warning names it and the reason, and a
