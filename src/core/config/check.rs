@@ -955,6 +955,16 @@ fn check_identity_providers(config: &Config) -> Result {
 			));
 		}
 
+		// Without `userid_claims` any claim names the account, also those a
+		// provider lets its users choose.
+		if provider.claim_accounts_of_appservice.is_some() && provider.userid_claims.is_empty() {
+			return Err!(Config(
+				"claim_accounts_of_appservice",
+				"Identity provider №{i} needs userid_claims, which name the claims an account's \
+				 name is read from."
+			));
+		}
+
 		for rule in &provider.registration_rules {
 			if rule.claims.is_empty() {
 				return Err!(Config(
