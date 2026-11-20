@@ -513,7 +513,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	reserved(services, base, &client).await?;
 	reloaded(services, base, &client).await?;
 	claimed(services, base, &client).await?;
-	premade(services, base, &client).await
+	Box::pin(premade(services, base, &client)).await
 }
 
 /// Listed addresses whose sign-in is refused, each for one reason.
