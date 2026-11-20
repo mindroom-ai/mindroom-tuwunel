@@ -504,6 +504,7 @@ mod tests {
 			trusted: false,
 			assigned_accounts: BTreeMap::new(),
 			assigned_accounts_claims: BTreeMap::new(),
+			claim_accounts_of_appservice: None,
 			registration_rules: Vec::new(),
 			unique_id_fallbacks: true,
 			registration: true,
