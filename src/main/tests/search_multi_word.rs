@@ -2,7 +2,8 @@
 
 use serde_json::{Value, json};
 use tuwunel_core::{Result, err};
-use tuwunel_service::Services;
+use tuwunel_matrix::{PduCount, PduId, RawPduId};
+use tuwunel_service::{Services, rooms::search::PROBE_FACTOR};
 
 use self::{
 	client::{Client, field, register},
@@ -57,18 +58,29 @@ const SKEWED: usize = 40;
 /// so that a term's further words are opened only on their turn.
 const FILLERS: usize = 16;
 
+/// Postings of `common` and `most` indexed directly in the room of skewed
+/// lists, for ids of no event, so that their lists are longer than the
+/// search's probe factor times two hits. Sending that many messages would be
+/// slow. A term of only `common` and `most` would count these ids; every term
+/// here also holds a word only real messages have.
+const SEEDED: usize = 2 * PROBE_FACTOR + 1;
+
+/// The count of the first seeded id, above every event's, so that a scan of
+/// `common` or `most` reads the seeded ids before any message.
+const SEEDED_FROM: u64 = 1 << 40;
+
 /// Whether the message at an index is a hit.
 type Holds = fn(usize) -> bool;
 
 /// Each search term in the room of skewed lists with the indices of the
 /// messages it finds, newest first, given which of them hold a word.
 ///
-/// `solo` and `pair` are rarer than `common` and `most` by more than the
-/// search's probe factor, so their hits are looked up by key instead of read;
-/// `solo` is also that much rarer than `middle`. Message 26 lacks `most` but
-/// holds `mostly`, so a lookup of `most` must miss it. Otherwise `middle` is
-/// not rarer enough, so its list is read whole; `every` and `common` are
-/// equally long.
+/// With the `SEEDED` postings, `solo` and `pair` are rarer than `common` and
+/// `most` by more than the search's probe factor, so their hits are looked up
+/// by key instead of read. Message 26 lacks `most` but holds `mostly`, so a
+/// lookup of `most` must miss it. Otherwise the longer list is not long
+/// enough and is read whole: `middle`'s against `solo` or `pair`, and
+/// `common`'s against `middle` or `every`.
 const SKEWED_SEARCHES: [(&str, Holds); 12] = [
 	("solo common", |i| i == 26),
 	("common solo", |i| i == 26),
@@ -154,6 +166,25 @@ async fn search_skewed_lists(client: &Client<'_>) -> Result {
 			.await?;
 
 		sent.push(event_id.to_string());
+	}
+
+	let shortroomid = client
+		.services
+		.short
+		.get_shortroomid(&room)
+		.await?;
+
+	for count in (SEEDED_FROM..).take(SEEDED) {
+		let pdu_id: RawPduId = PduId {
+			shortroomid,
+			count: PduCount::Normal(count),
+		}
+		.into();
+
+		client
+			.services
+			.search
+			.index_pdu(shortroomid, &pdu_id, "common most");
 	}
 
 	// The fillers fill the lockstep, so `pair` and `most` are opened after it.
