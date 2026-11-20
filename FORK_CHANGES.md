@@ -1011,6 +1011,42 @@ Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,
 `docs/authentication/providers.md`; tests in
 `src/main/tests/sso_assigned_account.rs` and `src/core/config/tests.rs`.
 
+### A first SSO sign-in can claim an account an appservice made ahead
+
+`assigned_accounts` needs every person's address in the configuration, so each
+new person is a configuration change. Without an entry, the first sign-in of a
+person whose account an appservice made ahead got a new account under a
+generated name, linked to the identity from then on. A provider's
+`claim_accounts_of_appservice` names an appservice by its ID. A first sign-in
+of an identity linked to no account, with no listed address, no carried account
+and no admin association, then gets the existing account named by the first
+claim of `userid_claims` the identity holds (`userid_choices`, which
+`decide_user_id` now reads too), lowercased in ASCII only, so a non-ASCII
+lookalike that lowercases to a name names no account. `claimed_account` gives
+it only when the account is in that appservice's exclusive `users` namespace
+and is no appservice's own user; is not a guest, a server admin, locked, of a
+forbidden name or listed in an `assigned_accounts`; the sign-in holds every
+claim of `assigned_accounts_claims`; the provider does not say the address is
+unverified, and says it is verified when the name is read from the `email`
+claim (an absent `email_verified` counts only on a `trusted` provider); and,
+checked under the account's password lock by the assignment's own checks
+(`sso_assignment`, split from `assign_sso_account`), the account exists, has
+an empty password, no recorded deactivation and no linked identity. The lock
+is held until the link is stored, and the account gets the sentinel and origin
+`sso` in the same write batch, as an assigned account does. The registering
+appservice is not stored with an account, and an account without a password
+outside an exclusive namespace is what the server reads as a guest, so the
+exclusive namespace stands for "made by that appservice". Any other first
+sign-in goes on as without the option, with a warning naming the account and
+the reason; a claim is logged at info. The config check requires
+`userid_claims` with the option, so no claim a provider lets its users choose
+names an account by default. Only the name is compared, not the address's
+domain. Unset, the default, sign-in works as before. Upstream has no such
+option. Files: `src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
+`src/service/users/sso.rs`, `src/api/client/session/sso.rs`,
+`docs/authentication/providers.md`; tests in
+`src/main/tests/sso_assigned_account.rs` and `src/core/config/tests.rs`.
+
 ### External accounts are kept out of listed rooms
 
 An external account joins only rooms it is invited to, but nothing kept it out
@@ -1942,6 +1978,10 @@ assigned_accounts = { "alice@example.com" = "@alice:example.com" }
 # Empty by default; claims every sign-in of a listed address must hold. Set it
 # before the app admits accounts outside the organization.
 assigned_accounts_claims = { hd = "example.com" }
+# Unset by default; the ID of an appservice whose accounts, in its exclusive
+# namespace, their people claim at their first sign-in. Needs userid_claims.
+userid_claims = ["email"]
+claim_accounts_of_appservice = "import"
 ```
 
 ### Registration rules for SSO sign-ins
