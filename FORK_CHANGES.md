@@ -261,8 +261,12 @@ ten-word sentence of common words with hit lists of roughly 200,000 events,
 and the whole search request took about 47 seconds in one room while a
 single word took under a second. The shortest list is now checked against a
 hash set of each other list, which keeps its newest-first order for paging,
-and a word repeated in the query is read once. Reading the hit lists and
-loading and filtering events are unchanged. Upstream has the same bug. File:
+and a word repeated in the query is read once. Reading every list whole still
+cost about 520,000 postings per page for that sentence in one busy room, so
+the lists are now read one id each in turn until the shortest ends. Another
+list is read on only while it is at most `PROBE_FACTOR` times as long as the
+hits left; past that, each hit's key for that word is looked up instead.
+Ids, order, `count` and paging are unchanged. Upstream has the same bug. File:
 `src/service/rooms/search/mod.rs`; tests in
 `src/service/rooms/search/tests.rs`, `src/service/rooms/search/tests/timing.rs`
 (synthetic production-sized lists intersect in under five seconds of Linux

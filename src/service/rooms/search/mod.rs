@@ -50,6 +50,10 @@ const TOKEN_ID_MAX_LEN: usize =
 	size_of::<ShortRoomId>() + WORD_MAX_LEN + 1 + size_of::<RawPduId>();
 const WORD_MAX_LEN: usize = 50;
 
+/// A word's hit list is read whole only while it is at most this many times
+/// as long as the hits left; past that, each hit's key is looked up instead.
+const PROBE_FACTOR: usize = 8;
+
 impl crate::Service for Service {
 	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
@@ -135,6 +139,12 @@ pub async fn search_pdus<'a>(
 }
 
 /// The ids of a room's events holding every word of the query, newest first.
+///
+/// The words' lists are read one id each in turn until one ends; that
+/// shortest list holds the candidates. Each other list is then read to its
+/// end only if it is at most `PROBE_FACTOR` times as long as the candidates
+/// left; a longer one is never read further, and each candidate's key for
+/// that word is looked up instead.
 #[implement(Service)]
 pub async fn search_pdu_ids(&self, query: &RoomQuery<'_>) -> Result<Vec<RawPduId>> {
 	let shortroomid = self
@@ -143,11 +153,63 @@ pub async fn search_pdu_ids(&self, query: &RoomQuery<'_>) -> Result<Vec<RawPduId
 		.get_shortroomid(query.room_id)
 		.await?;
 
-	let pdu_ids = self
-		.search_pdu_ids_query_room(query, shortroomid)
-		.await;
+	let words: Vec<_> = query_words(&query.criteria.search_term).collect();
+	let mut scans: Vec<_> = words
+		.iter()
+		.map(|word| {
+			let scan = self.search_pdu_ids_query_words(shortroomid, word);
+			(word, scan.boxed(), Vec::new())
+		})
+		.collect();
 
-	Ok(intersect_hits(pdu_ids))
+	if scans.is_empty() {
+		return Ok(Vec::new());
+	}
+
+	let shortest = 'ended: loop {
+		for (i, (_, scan, list)) in scans.iter_mut().enumerate() {
+			match scan.next().await {
+				| Some(id) => list.push(id),
+				| None => break 'ended i,
+			}
+		}
+	};
+
+	let (_, _, mut hits) = scans.swap_remove(shortest);
+	for (word, mut scan, mut list) in scans {
+		if hits.is_empty() {
+			break;
+		}
+
+		let budget = hits.len().saturating_mul(PROBE_FACTOR);
+		while list.len() <= budget
+			&& let Some(id) = scan.next().await
+		{
+			list.push(id);
+		}
+
+		if list.len() <= budget {
+			hits = intersect_hits(vec![hits, list]);
+			continue;
+		}
+
+		hits = hits
+			.into_iter()
+			.stream()
+			.wide_filter_map(async |id| {
+				let key = make_tokenid(shortroomid, word, &id);
+				self.db
+					.tokenids
+					.exists(&key)
+					.await
+					.is_ok()
+					.then_some(id)
+			})
+			.collect()
+			.await;
+	}
+
+	Ok(hits)
 }
 
 /// Keeps the ids every word's hit list holds, in the shortest list's order.
@@ -171,23 +233,6 @@ fn intersect_hits(mut lists: Vec<Vec<RawPduId>>) -> Vec<RawPduId> {
 	}
 
 	hits
-}
-
-#[implement(Service)]
-async fn search_pdu_ids_query_room(
-	&self,
-	query: &RoomQuery<'_>,
-	shortroomid: ShortRoomId,
-) -> Vec<Vec<RawPduId>> {
-	query_words(&query.criteria.search_term)
-		.stream()
-		.wide_then(async |word| {
-			self.search_pdu_ids_query_words(shortroomid, &word)
-				.collect::<Vec<_>>()
-				.await
-		})
-		.collect::<Vec<_>>()
-		.await
 }
 
 /// Iterate over PduId's containing a word

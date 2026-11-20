@@ -49,11 +49,36 @@ const SEARCHES: [(&str, &[usize]); 8] = [
 	("?! ...", &[]),
 ];
 
+/// Messages in the room of skewed lists, each holding `common` and `every`.
+const SKEWED: usize = 40;
+
+/// Whether the message at an index is a hit.
+type Holds = fn(usize) -> bool;
+
+/// Each search term in the room of skewed lists with the indices of the
+/// messages it finds, newest first, given which of them hold a word.
+///
+/// `solo` and `pair` are rarer than `common` by more than the search's probe
+/// factor, so its hits are looked up by key instead of read. `middle` is not,
+/// so its list is read whole; `every` and `common` are equally long.
+const SKEWED_SEARCHES: [(&str, Holds); 9] = [
+	("solo common", |i| i == 26),
+	("common solo", |i| i == 26),
+	("pair common", |i| matches!(i, 5 | 26)),
+	("common pair middle", |i| i == 5),
+	("middle common", |i| i % 4 == 1),
+	("common middle", |i| i % 4 == 1),
+	("every common COMMON", |_| true),
+	("solo absent", |_| false),
+	("absent common", |_| false),
+];
+
 /// A multi-word search finds the messages holding every word, newest first.
 ///
 /// Each search is paged at several limits. A repeated word counts once, a
 /// single word finds every message holding it, and a word no message holds,
-/// or a term without words, leaves no hits.
+/// or a term without words, leaves no hits. The same holds where a word is
+/// far rarer than another, whose hits are then looked up by key.
 #[test]
 fn multi_word_search_finds_messages_with_every_word() -> Result {
 	boot("search-multi-word", [], exercise)
@@ -84,6 +109,47 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 		for limit in [1, 2, 10] {
 			let found = search(&client, term, limit, expected.len()).await?;
+			assert_eq!(found, expected, "search for {term:?} at limit {limit}");
+		}
+	}
+
+	search_skewed_lists(&client).await
+}
+
+/// Searches a second room, whose words' lists differ widely in length.
+async fn search_skewed_lists(client: &Client<'_>) -> Result {
+	let room = client
+		.create_room(&json!({"preset": "private_chat"}))
+		.await?;
+
+	let mut sent = Vec::new();
+	for i in 0..SKEWED {
+		let mut body = String::from("every common");
+		for (word, holds) in
+			[("middle", i % 4 == 1), ("pair", matches!(i, 5 | 26)), ("solo", i == 26)]
+		{
+			if holds {
+				body.push(' ');
+				body.push_str(word);
+			}
+		}
+
+		let event_id = client
+			.send_text(&room, &format!("skewed-{i}"), &body)
+			.await?;
+
+		sent.push(event_id.to_string());
+	}
+
+	for (term, holds) in SKEWED_SEARCHES {
+		let expected: Vec<_> = (0..SKEWED)
+			.rev()
+			.filter(|&i| holds(i))
+			.map(|i| sent[i].as_str())
+			.collect();
+
+		for limit in [1, 3, 10] {
+			let found = search(client, term, limit, expected.len()).await?;
 			assert_eq!(found, expected, "search for {term:?} at limit {limit}");
 		}
 	}
