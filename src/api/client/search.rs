@@ -47,6 +47,10 @@ const LIMIT_DEFAULT: usize = 10;
 const LIMIT_MAX: usize = 100;
 const CONTEXT_MAX: usize = 20;
 
+/// Rooms searched at once, in their order. Over 111 rooms, four overlapped
+/// cold reads well; eight gained little more.
+const ROOMS_WIDTH: usize = 4;
+
 /// # `POST /_matrix/client/r0/search`
 ///
 /// Searches rooms for messages.
@@ -111,7 +115,7 @@ async fn category_room_events(
 				.is_ok()
 				.then_some(room_id)
 		})
-		.filter_map(async |room_id| {
+		.widen_filter_map(ROOMS_WIDTH, async |room_id| {
 			let query = RoomQuery {
 				room_id: &room_id,
 				user_id: Some(sender_user),

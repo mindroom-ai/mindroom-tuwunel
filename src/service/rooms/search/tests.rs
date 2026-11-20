@@ -5,7 +5,7 @@ mod timing;
 
 use tuwunel_matrix::PduCount;
 
-use super::{intersect_hits, query_words};
+use super::{WORD_MAX_LEN, intersect_hits, make_tokenid, query_words, tokenize};
 use crate::rooms::timeline::{PduId, RawPduId};
 
 /// The hits are those in every list, newest first, whichever list is shortest.
@@ -27,6 +27,24 @@ fn query_words_are_distinct_in_first_seen_order() {
 
 	assert_eq!(words, ["go", "far", "to", "fast"]);
 	assert_eq!(query_words("?! ...").count(), 0);
+}
+
+/// A word that lowercasing lengthens past `WORD_MAX_LEN` bytes still gets the
+/// full key `index_pdu` writes, for normal and backfilled ids.
+#[test]
+fn tokenids_fit_words_lowercasing_lengthens() {
+	let body = "\u{130}".repeat(WORD_MAX_LEN / 2);
+	let word = tokenize(&body).next().expect("one word");
+	assert_eq!(body.len(), WORD_MAX_LEN);
+	assert_eq!(word.len(), WORD_MAX_LEN / 2 * 3);
+
+	for count in [PduCount::Normal(9), PduCount::Backfilled(-9)] {
+		let pdu_id: RawPduId = PduId { shortroomid: 7, count }.into();
+		let expected =
+			[&7_u64.to_be_bytes()[..], word.as_bytes(), &[0xFF], pdu_id.as_ref()].concat();
+
+		assert_eq!(make_tokenid(7, &word, &pdu_id).as_slice(), expected);
+	}
 }
 
 fn ids(counts: &[u64]) -> Vec<RawPduId> { counts.iter().copied().map(id).collect() }
