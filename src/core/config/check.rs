@@ -965,6 +965,16 @@ fn check_identity_providers(config: &Config) -> Result {
 			));
 		}
 
+		// A trusted provider takes an existing account by name, also one whose
+		// claim was just refused.
+		if provider.claim_accounts_of_appservice.is_some() && provider.trusted {
+			return Err!(Config(
+				"claim_accounts_of_appservice",
+				"Identity provider №{i} is trusted, which gives a sign-in an existing account \
+				 whatever its claim's checks say."
+			));
+		}
+
 		for rule in &provider.registration_rules {
 			if rule.claims.is_empty() {
 				return Err!(Config(

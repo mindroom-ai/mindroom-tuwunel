@@ -1236,10 +1236,11 @@ fn listed(services: &Services, user_id: &UserId) -> bool {
 
 /// The account an appservice made ahead that this first sign-in claims, with
 /// its assignment, when the provider's live `claim_accounts_of_appservice`
-/// names that appservice. The account is the one named by the first claim of
-/// `userid_claims` the identity holds, lowercased in ASCII only, so a
-/// non-ASCII lookalike of a name names no account. A refusal is logged with
-/// its reason, and the sign-in then gets an account as without the option.
+/// names the appservice recorded as registering it. The account is the one
+/// named by the first claim of `userid_claims` the identity holds, lowercased
+/// in ASCII only, so a non-ASCII lookalike of a name names no account. A
+/// refusal is logged with its reason, and the sign-in then gets an account as
+/// without the option.
 async fn claimed_account(
 	services: &Services,
 	provider: &Provider,
@@ -1272,16 +1273,27 @@ async fn claimed_account(
 	// The address is the last choice. One that names the account must be
 	// verified; any other name still fails on an address said to be unverified.
 	let by_address = claim == choices.len().saturating_sub(1);
-	let verified = userinfo
-		.email_verified
-		.unwrap_or(provider.trusted || !by_address);
-
+	let verified = userinfo.email_verified.unwrap_or(!by_address);
 	let claims = &config.assigned_accounts_claims;
+
+	// The account's own checks, and its password lock, which a claim holds
+	// until its link is stored; the checks below are made under it.
+	let assignment = services.users.sso_assignment(&user_id).await;
+
+	// Only the record says who made the account: one without a password that
+	// anything else made, as a registration may, has none. The appservice must
+	// still be registered for the name.
+	let recorded = services
+		.users
+		.registering_appservice(&user_id)
+		.await;
+
 	let (made, owned) = {
 		let appservices = services.appservice.read().await;
-		let made = appservices
-			.get(appservice)
-			.is_some_and(|info| info.is_exclusive_user_match(&user_id));
+		let made = recorded.as_deref() == Some(appservice)
+			&& appservices
+				.get(appservice)
+				.is_some_and(|info| info.is_user_match(&user_id));
 
 		(made, appservices.values().any(|info| info.sender == user_id))
 	};
@@ -1291,10 +1303,9 @@ async fn claimed_account(
 	let refusals = [
 		(unclaimed, "is claimed without the assigned_accounts_claims"),
 		(!verified, "is claimed by an address not known to be verified"),
-		(!made, "is outside the appservice's exclusive namespace"),
+		(!made, "the appservice did not register, or no longer has in its namespace"),
 		(owned, "is an appservice's own user"),
 		(forbidden.is_match(&name), "has a forbidden name"),
-		(services.users.is_guest(&user_id).await, "is a guest"),
 		(services.admin.user_is_admin(&user_id).await, "is a server admin"),
 		(services.users.is_locked(&user_id).await, "is locked"),
 	];
@@ -1303,14 +1314,10 @@ async fn claimed_account(
 		.into_iter()
 		.find_map(|(refused, reason)| refused.then_some(reason));
 
-	// Checked last, under the account's password lock, which a claim holds
-	// until its link is stored.
-	let assignment = match refusal {
-		| Some(reason) => Err(reason),
-		| None => match services.users.sso_assignment(&user_id).await {
-			| Ok((_, false)) => Err("has a password or another sign-in system's marker"),
-			| assignment => assignment,
-		},
+	let assignment = match (refusal, assignment) {
+		| (Some(reason), _) => Err(reason),
+		| (None, Ok((_, false))) => Err("has a password or another sign-in system's marker"),
+		| (None, assignment) => assignment,
 	};
 
 	match assignment {

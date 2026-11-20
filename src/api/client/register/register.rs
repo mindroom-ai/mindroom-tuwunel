@@ -94,12 +94,21 @@ pub(crate) async fn register_route(
 
 	let password = if is_guest { None } else { body.password.as_deref() };
 
+	// Only a registration of the appservice login type was checked against the
+	// appservice's own namespace above.
+	let appservice = body
+		.appservice_info
+		.as_ref()
+		.filter(|_| body.body.login_type == Some(LoginType::ApplicationService))
+		.map(|info| info.registration.id.as_str());
+
 	services
 		.users
 		.full_register(Register {
 			user_id: Some(&user_id),
 			password,
 			is_appservice: body.appservice_info.is_some(),
+			appservice,
 			is_guest,
 			grant_first_user_admin: true,
 			..Default::default()

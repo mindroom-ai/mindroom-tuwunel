@@ -2467,24 +2467,28 @@
 # account, whose first sign-in neither `assigned_accounts` nor an admin
 # association gives one, gets the existing account named by the first
 # claim of `userid_claims` it holds, ASCII letters lowercased, the name
-# a new account would be given. It gets it only when the account is in
-# that appservice's exclusive `users` namespace, is no appservice's own
-# user, has no password, and is not deactivated, locked, a server
-# admin, linked to any identity or listed in an `assigned_accounts`; the
-# sign-in holds every claim of `assigned_accounts_claims`; and the
-# provider does not say the address is unverified. A name read from the
-# `email` claim needs `email_verified` to be true, or absent on a
-# `trusted` provider. The account then becomes an SSO account, as an
-# assigned one does. Any other sign-in works as without the option: it
-# gets a new account, under a generated name when its own is taken, and
-# a warning in the log names the account and the reason. Only the name
-# is compared, never the address's domain: use this with an app
-# restricted to your own organization, or name claims only your
-# organization's accounts hold in `assigned_accounts_claims`, and list
-# in `userid_claims`, which this option requires, only claims the
-# organization assigns. An account of that namespace deactivated
-# before deactivation reasons were recorded has none and would be
-# claimed. A reload applies to the next sign-in.
+# a new account would be given. It gets it only when that appservice
+# registered the account with `m.login.application_service`, which the
+# server records as it creates the account, and still has the name in
+# its `users` namespace; the account is no appservice's own user, has no
+# password, and is not deactivated, locked, a server admin, linked to
+# any identity or listed in an `assigned_accounts`; the sign-in holds
+# every claim of `assigned_accounts_claims`; and the provider does not
+# say the address is unverified. A name read from the `email` claim
+# needs `email_verified` to be true. The account then becomes an SSO
+# account, as an assigned one does. Any other sign-in works as without
+# the option: it gets a new account, under a generated name when its
+# own is taken, and a warning in the log names the account and the
+# reason. Accounts made before this option existed have no record: list
+# those in `assigned_accounts`. Only the name is compared, never the
+# address's domain: use this only where every admitted identity has a
+# verified address with a unique local part that is never given to
+# another person, with `assigned_accounts_claims` naming claims only
+# your organization's accounts hold, such as `hd`, and with
+# `userid_claims`, which this option requires, listing only claims the
+# organization assigns. It cannot be combined with `trusted`. The
+# appservice can still act as the accounts in its namespace after they
+# are claimed. A reload applies to the next sign-in.
 #
 #claim_accounts_of_appservice =
 

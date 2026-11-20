@@ -803,6 +803,7 @@ client_secret = "oauth-secret"
 	result.expect("claiming with userid_claims should pass config check");
 
 	refused(r#"claim_accounts_of_appservice = "import""#, "needs userid_claims");
+	refused(&format!("{claiming}\ntrusted = true"), "is trusted");
 }
 
 #[test]

@@ -1016,34 +1016,54 @@ Upstream has no such option. Files: `src/core/config/{mod.rs,check.rs}`,
 `assigned_accounts` needs every person's address in the configuration, so each
 new person is a configuration change. Without an entry, the first sign-in of a
 person whose account an appservice made ahead got a new account under a
-generated name, linked to the identity from then on. A provider's
-`claim_accounts_of_appservice` names an appservice by its ID. A first sign-in
-of an identity linked to no account, with no listed address, no carried account
-and no admin association, then gets the existing account named by the first
-claim of `userid_claims` the identity holds (`userid_choices`, which
-`decide_user_id` now reads too), lowercased in ASCII only, so a non-ASCII
-lookalike that lowercases to a name names no account. `claimed_account` gives
-it only when the account is in that appservice's exclusive `users` namespace
-and is no appservice's own user; is not a guest, a server admin, locked, of a
-forbidden name or listed in an `assigned_accounts`; the sign-in holds every
-claim of `assigned_accounts_claims`; the provider does not say the address is
+generated name, linked to the identity from then on.
+
+Nothing stored says who made an account: a registration with
+`m.login.application_service`, an ordinary registration without a password,
+the admin API's user creation and a guest all leave the origin `password` and
+an empty password. A new map, `userid_appservice`, records the registering
+appservice's ID. `full_register` (`Register::appservice`) writes it right
+after `create_new`, and the `/register` route passes the ID only for a
+registration of the `m.login.application_service` type, never a guest's.
+Nothing else writes it and it is never inferred or backfilled
+(`users::registering_appservice` reads it; an unreadable record counts as
+none), so an account made before the map existed has none.
+
+A provider's `claim_accounts_of_appservice` names an appservice by its ID. A
+first sign-in of an identity linked to no account, with no listed address, no
+carried account and no admin association, then gets the existing account named
+by the first claim of `userid_claims` the identity holds (`userid_choices`,
+which `decide_user_id` now reads too), lowercased in ASCII only, so a
+non-ASCII lookalike that lowercases to a name names no account.
+`claimed_account` gives it only when the record names the configured
+appservice, which is registered and has the account in its `users` namespace
+now (exclusive or not); the account is no appservice's own user, not a server
+admin, not locked, not of a forbidden name and not listed in an
+`assigned_accounts`; the sign-in holds every claim of
+`assigned_accounts_claims`; the provider does not say the address is
 unverified, and says it is verified when the name is read from the `email`
-claim (an absent `email_verified` counts only on a `trusted` provider); and,
-checked under the account's password lock by the assignment's own checks
-(`sso_assignment`, split from `assign_sso_account`), the account exists, has
-an empty password, no recorded deactivation and no linked identity. The lock
-is held until the link is stored, and the account gets the sentinel and origin
-`sso` in the same write batch, as an assigned account does. The registering
-appservice is not stored with an account, and an account without a password
-outside an exclusive namespace is what the server reads as a guest, so the
-exclusive namespace stands for "made by that appservice". Any other first
-sign-in goes on as without the option, with a warning naming the account and
-the reason; a claim is logged at info. The config check requires
-`userid_claims` with the option, so no claim a provider lets its users choose
-names an account by default. Only the name is compared, not the address's
-domain. Unset, the default, sign-in works as before. Upstream has no such
-option. Files: `src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
-`src/service/users/sso.rs`, `src/api/client/session/sso.rs`,
+claim; and, by the assignment's own checks (`sso_assignment`, split from
+`assign_sso_account`), the account exists, has an empty password, no recorded
+deactivation and no linked identity. The account's password lock is taken
+first and held until the link is stored, and the account gets the sentinel and
+origin `sso` in the same write batch, as an assigned account does. The admin
+and lock reads are made under that lock, which a promotion or an account lock
+does not take. The server reads a passwordless account outside an exclusive
+namespace as a guest (`users::is_guest`); the claim relies on the record
+instead, and guest handling is unchanged elsewhere.
+
+Any other first sign-in goes on as without the option, with a warning naming
+the account and the reason; a claim is logged at info. The config check
+refuses the option without `userid_claims`, so no claim a provider lets its
+users choose names an account, and with `trusted`, whose matching by name
+would give out an account a claim was refused. The record proves the
+appservice, not the person: only the name is compared, not the address's
+domain, and the appservice can still act as an account in its namespace after
+it is claimed. Unset, the default, sign-in works as before. Upstream has no
+such option. Files: `src/database/maps.rs`,
+`src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
+`src/service/users/{mod.rs,register.rs,sso.rs}`,
+`src/api/client/register/register.rs`, `src/api/client/session/sso.rs`,
 `docs/authentication/providers.md`; tests in
 `src/main/tests/sso_assigned_account.rs` and `src/core/config/tests.rs`.
 
@@ -1978,8 +1998,9 @@ assigned_accounts = { "alice@example.com" = "@alice:example.com" }
 # Empty by default; claims every sign-in of a listed address must hold. Set it
 # before the app admits accounts outside the organization.
 assigned_accounts_claims = { hd = "example.com" }
-# Unset by default; the ID of an appservice whose accounts, in its exclusive
-# namespace, their people claim at their first sign-in. Needs userid_claims.
+# Unset by default; the ID of an appservice whose accounts, registered with
+# m.login.application_service, their people claim at their first sign-in.
+# Needs userid_claims and is refused with trusted = true.
 userid_claims = ["email"]
 claim_accounts_of_appservice = "import"
 ```

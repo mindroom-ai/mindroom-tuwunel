@@ -139,6 +139,19 @@ impl Service {
 			.is_missing()
 	}
 
+	/// The ID of the appservice that registered the account with
+	/// `m.login.application_service`, as recorded when it was created. An
+	/// account made any other way, or before the record was kept, has none,
+	/// and an unreadable record counts as none.
+	pub async fn registering_appservice(&self, user_id: &UserId) -> Option<String> {
+		self.db
+			.userid_appservice
+			.get(user_id)
+			.await
+			.deserialized()
+			.ok()
+	}
+
 	/// Mark the account external. Nothing clears the mark.
 	pub fn set_external(&self, user_id: &UserId) { self.db.userid_external.insert(user_id, b""); }
 
