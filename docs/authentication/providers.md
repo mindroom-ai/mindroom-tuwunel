@@ -421,10 +421,17 @@ option existed, or made any other way (an ordinary registration, also one
 without a password, the admin API, a guest), has no record and is never
 claimed. List such accounts in `assigned_accounts`.
 
-The name is the first claim of `userid_claims` the identity holds (for `email`,
-the address's local part), as it is, with ASCII letters lowercased. When that
+One claim names the account: the first the identity holds of those
+`userid_claims` lists, in the server's fixed order, not the order they are
+listed in: `sub`, `preferred_username`, `username`, `nickname`, `login`, then
+the local part of `email`. With
+`userid_claims = ["email", "preferred_username"]`, `preferred_username` names
+the account whenever the identity has one; list only `email` to claim by
+address. The claim is used as it is, with ASCII letters lowercased. When that
 is not a valid name, nothing is claimed: no later claim is tried, as one is for
-a new account's name. `userid_claims` must be set, and `trusted` must not be: the
+a new account's name.
+
+`userid_claims` must be set, and `trusted` must not be: the
 server refuses to start otherwise. Without `userid_claims`, a name the provider
 lets its users choose could claim an account, and a trusted provider gives a
 sign-in an existing account by name whatever these checks say. An identity that
