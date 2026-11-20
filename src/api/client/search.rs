@@ -111,7 +111,7 @@ async fn category_room_events(
 				.is_ok()
 				.then_some(room_id)
 		})
-		.filter_map(async |room_id| {
+		.widen_filter_map(8, async |room_id| {
 			let query = RoomQuery {
 				room_id: &room_id,
 				user_id: Some(sender_user),

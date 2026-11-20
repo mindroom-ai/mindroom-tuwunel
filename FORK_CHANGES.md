@@ -265,9 +265,10 @@ and a word repeated in the query is read once. Reading every list whole still
 cost about 520,000 postings per page for that sentence in one busy room, so
 the lists are now read one id each in turn until the shortest ends. Another
 list is read on only while it is at most `PROBE_FACTOR` times as long as the
-hits left; past that, each hit's key for that word is looked up instead.
-Ids, order, `count` and paging are unchanged. Upstream has the same bug. File:
-`src/service/rooms/search/mod.rs`; tests in
+hits left; past that, each hit's key for that word is looked up instead. Rooms
+are searched eight at a time, in their order. Ids, order, `count` and paging
+are unchanged. Upstream has the same bug. Files:
+`src/service/rooms/search/mod.rs`, `src/api/client/search.rs`; tests in
 `src/service/rooms/search/tests.rs`, `src/service/rooms/search/tests/timing.rs`
 (synthetic production-sized lists intersect in under five seconds of Linux
 thread CPU time, where the old code took 35 to 49 seconds) and
