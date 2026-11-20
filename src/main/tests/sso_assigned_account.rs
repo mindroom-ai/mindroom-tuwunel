@@ -73,7 +73,7 @@ const OTHER: &str = "sso-assigned-other";
 const OTHER_TOKEN: &str = "sso-assigned-other-token";
 
 /// Token of the admin that creates an account through the user admin API.
-const ADMIN_TOKEN: &str = "sso-assigned-admin-token";
+const ADMIN_TOKEN: &str = "sso-assigned-premade-admin-access-token";
 
 /// Accounts the provider assigns, by email address. Alice's address is listed
 /// in a different case than the provider sends it, and two addresses name
