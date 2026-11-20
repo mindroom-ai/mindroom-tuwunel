@@ -1,10 +1,19 @@
+//! Search tokenization and multi-word hit list intersection tests.
+
+#[cfg(target_os = "linux")]
+mod timing;
+
 use futures::StreamExt;
 use ruma::room_id;
 use tuwunel_core::{Result, config::Figment};
 use tuwunel_database::SEP;
+use tuwunel_matrix::PduCount;
 
-use super::{WORD_MAX_LEN, make_tokenid, tokenize};
-use crate::test_utils::{fixture, pdu_id};
+use super::{WORD_MAX_LEN, intersect_hits, make_tokenid, query_words, tokenize};
+use crate::{
+	rooms::timeline::{PduId, RawPduId},
+	test_utils::{fixture, pdu_id},
+};
 
 #[test]
 fn lowercase_expansion_preserves_the_full_search_key() {
@@ -67,4 +76,35 @@ async fn lowercase_expansion_remains_searchable() -> Result {
 	assert_eq!(remaining, 0);
 
 	Ok(())
+}
+
+/// The hits are those in every list, newest first, whichever list is shortest.
+#[test]
+fn hits_are_in_every_list_newest_first() {
+	let lists = vec![ids(&[9, 7, 5, 3, 1]), ids(&[7, 3]), ids(&[9, 7, 3, 2])];
+
+	assert_eq!(intersect_hits(lists), ids(&[7, 3]));
+	assert_eq!(intersect_hits(vec![ids(&[2, 1]); 2]), ids(&[2, 1]));
+	assert_eq!(intersect_hits(vec![ids(&[2, 1])]), ids(&[2, 1]));
+	assert_eq!(intersect_hits(vec![ids(&[2]), Vec::new()]), ids(&[]));
+	assert_eq!(intersect_hits(Vec::new()), ids(&[]));
+}
+
+/// A repeated word, in any case, is read once, where it first appears.
+#[test]
+fn query_words_are_distinct_in_first_seen_order() {
+	let words: Vec<_> = query_words("Go far to go, fast to GO!").collect();
+
+	assert_eq!(words, ["go", "far", "to", "fast"]);
+	assert_eq!(query_words("?! ...").count(), 0);
+}
+
+fn ids(counts: &[u64]) -> Vec<RawPduId> { counts.iter().copied().map(id).collect() }
+
+fn id(count: u64) -> RawPduId {
+	PduId {
+		shortroomid: 7,
+		count: PduCount::Normal(count),
+	}
+	.into()
 }
