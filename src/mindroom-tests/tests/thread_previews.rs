@@ -636,8 +636,7 @@ mod tests {
 		let bundled_edit = &stream["unsigned"]["m.relations"]["m.replace"];
 		let expected = bundle_edits.then_some(edit.as_str());
 		assert_eq!(bundled_edit["event_id"].as_str(), expected, "skip the unusable edit");
-		let relations = bundled_edit.pointer("/unsigned/m.relations");
-		assert!(relations.is_none());
+		assert!(bundled_edit["unsigned"]["m.relations"].is_null());
 
 		let terminal = stream_edit(&reply, "interrupted");
 		let mut cached = stream_edit(&reply, "streaming");

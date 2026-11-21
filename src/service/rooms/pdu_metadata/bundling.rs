@@ -424,10 +424,9 @@ fn replacement_children<'a>(
 	seek.extend(prefix.iter().copied());
 	seek.extend([u8::MAX; size_of::<u64>() * 2]);
 
-	// Saturation distinguishes an unreadable scan from an exhausted one.
 	let record_error = move |error: &tuwunel_core::Error| {
 		if let Some(rows) = rows.filter(|_| !error.is_missing()) {
-			rows.store(usize::MAX, Relaxed);
+			rows.store(usize::MAX, Relaxed); // Unreadable, not exhausted.
 		}
 	};
 	self.db
@@ -444,8 +443,8 @@ fn replacement_children<'a>(
 		})
 		.map(|key| u64_from_u8(&key[CHILD_COUNT_OFFSET..KEY_LEN]))
 		.map(PduCount::from_unsigned)
-		.map(move |count| (shortroomid, count))
-		.filter_map(move |(shortroomid, count)| async move {
+		.map(move |count| (shortroomid, count, record_error))
+		.filter_map(async |(shortroomid, count, record_error)| {
 			let child_id: RawPduId = PduId { shortroomid, count }.into();
 			self.services
 				.timeline
