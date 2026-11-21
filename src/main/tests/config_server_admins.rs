@@ -26,6 +26,7 @@ mod client_get;
 mod fixture;
 mod timeline;
 
+const MAS_SECRET: &str = "config-admin-test-mas-secret";
 const REGISTRATION_SECRET: &str = "config-admin-test-shared-secret";
 
 #[test]
@@ -35,7 +36,10 @@ fn configured_admins_have_http_authority_but_not_room_membership() -> Result {
 		[
 			"admin.room.create=true",
 			"admin.escape_commands=true",
+			r#"admin.execute=["users create-user helper test-password"]"#,
+			&format!("authentication.mas_secret={MAS_SECRET:?}"),
 			"registration.enable=true",
+			"registration.grant_admin_to_first_user=true",
 			"registration.\
 			 yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse=true",
 			&format!("registration.shared_secret={REGISTRATION_SECRET:?}"),
@@ -49,8 +53,15 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let token = "config-admin-service-token-0123456789";
 	let admin = &services.admin;
 	let cache = &services.state_cache;
-	// Provision the service accounts directly, not through public sign-up.
-	let helper = register(services, "helper", token).await?;
+	// The startup command provisions the listed account before any human signs up.
+	let helper = user_id!("@helper:localhost").to_owned();
+	let admin_room = admin.get_admin_room().await?;
+	assert!(services.users.exists(&helper).await);
+	assert!(!cache.is_joined(&helper, &admin_room).await, "listed first user must not join");
+	services
+		.users
+		.create_device(&helper, None, (Some(token), None), None, None, None)
+		.await?;
 	let visitor = register(services, "visitor", "config-admin-visitor-token-0123456789").await?;
 	services.users.set_external(&visitor);
 
@@ -66,12 +77,12 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let operator = user_id!("@operator:localhost");
 	let ordinary =
 		register(services, "ordinary", "config-admin-ordinary-token-0123456789").await?;
-	let admin_room = admin.get_admin_room().await?;
-	assert!(cache.is_joined(operator, &admin_room).await, "room bootstrap");
+	assert!(cache.is_joined(operator, &admin_room).await, "unlisted user must still bootstrap");
 	assert!(admin.user_is_last_admin(operator).await);
 	assert!(!admin.user_is_last_admin(&helper).await);
 	assert!(!cache.is_joined(&helper, &admin_room).await);
 
+	check_availability(&human, &signup).await?;
 	check_admin_updates(&human, &service, &helper).await?;
 	check_external_promotion(&human, &visitor).await?;
 	check_shared_secret_provisioning(&signup).await?;
@@ -106,7 +117,36 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	assert!(revoke.contains("server_admins"), "{revoke}");
 	assert!(cache.is_joined(&helper, &admin_room).await);
 
-	check_reserved_signup(&signup, &helper).await
+	check_reserved_signup(&signup, &helper).await?;
+	human
+		.admin_api(Method::PUT, &format!("v2/users/{reserved}"), &json!({"admin": true}), 200)
+		.await?;
+	assert!(admin.user_is_admin(reserved).await);
+	assert!(!cache.is_joined(reserved, &admin_room).await);
+	Ok(())
+}
+
+async fn check_availability(human: &Client<'_>, signup: &Client<'_>) -> Result {
+	let mas = Client { token: MAS_SECRET, ..*signup };
+	for username in ["unused", "reserved"] {
+		let probes = [
+			(signup, signup.url(&format!("register/available?username={username}"))),
+			(human, format!("{}/_synapse/admin/v1/username_available?username={username}", human.base)),
+			(&mas, format!("{}/_synapse/mas/is_localpart_available?localpart={username}", mas.base)),
+		];
+		for (client, url) in probes {
+			let response = client.get_url(&url).await?;
+			let status = response.status();
+			let body: Value = response.json().await?;
+			if username == "reserved" {
+				assert!(status.is_client_error(), "{url}: {status} {body}");
+				assert_eq!(body["errcode"], "M_USER_IN_USE", "{url}");
+			} else {
+				assert!(status.is_success(), "{url}: {status} {body}");
+			}
+		}
+	}
+	Ok(())
 }
 
 async fn check_admin_updates(
