@@ -61,7 +61,7 @@ pub(super) async fn ldap_login(
 	// password is reserved for deactivated accounts. The tuwunel password field
 	// will never be read to login a LDAP user so it's not an issue.
 	if !services.users.exists(lowercased_user_id).await {
-		services.users.check_signup_name(lowercased_user_id)?;
+		services.users.check_signup(lowercased_user_id)?;
 		services
 			.users
 			.full_register(Register {

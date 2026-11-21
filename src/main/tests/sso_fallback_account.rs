@@ -298,7 +298,12 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let erin = unique_id_sub((&provider, "erin"))?;
 	let response = sign_in(&client, base, "erin", "service_account").await?;
 	assert_eq!(fallback_localpart(&erin), signed_in(services, &response).await?.localpart());
-	assert!(!services.users.exists(tuwunel_core::ruma::user_id!("@service_account:localhost")).await);
+	assert!(
+		!services
+			.users
+			.exists(tuwunel_core::ruma::user_id!("@service_account:localhost"))
+			.await
+	);
 
 	Ok(())
 }

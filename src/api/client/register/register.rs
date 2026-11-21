@@ -73,7 +73,7 @@ pub(crate) async fn register_route(
 	let user_id =
 		resolve_registration_user_id(services, &body, is_guest, emergency_mode_enabled).await?;
 
-	services.users.check_signup_name(&user_id)?;
+	services.users.check_signup(&user_id)?;
 
 	check_appservice_namespace(services, &body, &user_id, emergency_mode_enabled).await?;
 

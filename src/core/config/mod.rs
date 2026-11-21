@@ -3165,6 +3165,13 @@ pub fn allows_password_registration(&self) -> bool {
 	self.registration.enable && self.authentication.login.with_password
 }
 
+/// Whether a user ID has a config grant, regardless of room or account state.
+#[implement(Config)]
+#[must_use]
+pub fn has_admin_grant(&self, user: &ruma::UserId) -> bool {
+	self.server_admins.iter().any(|id| &**id == user)
+}
+
 /// Lists the storage provider sections the storage service builds from.
 ///
 /// These are the configured sections plus the built-in local `media`

@@ -24,7 +24,7 @@ pub(super) async fn auth_appservice(
 
 	// A namespace can assert a user before an account exists, but it cannot
 	// claim a configured grant that has not been provisioned.
-	if services.admin.user_is_configured_admin(&user_id) && !services.users.exists(&user_id).await {
+	if services.config.has_admin_grant(&user_id) && !services.users.exists(&user_id).await {
 		return Err!(Request(Forbidden("This user ID is reserved.")));
 	}
 

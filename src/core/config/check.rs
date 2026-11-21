@@ -128,7 +128,8 @@ pub fn check(config: &Config) -> Result {
 			|| user_id.localpart() == config.admin.server_user_localpart.as_str()
 		{
 			return Err!(Config(
-				"server_admins", "{user_id} must be a local account other than the server user."
+				"server_admins",
+				"{user_id} must be a local account other than the server user."
 			));
 		}
 	}

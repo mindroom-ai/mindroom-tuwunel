@@ -37,8 +37,8 @@ pub struct Register<'a> {
 
 /// Reserve configured admin IDs for explicit operator provisioning.
 #[implement(super::Service)]
-pub fn check_signup_name(&self, user_id: &UserId) -> Result {
-	if self.services.admin.user_is_configured_admin(user_id) {
+pub fn check_signup(&self, user_id: &UserId) -> Result {
+	if self.services.config.has_admin_grant(user_id) {
 		return Err!(Request(UserInUse("User ID is not available.")));
 	}
 	Ok(())

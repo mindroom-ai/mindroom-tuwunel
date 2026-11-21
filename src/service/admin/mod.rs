@@ -270,16 +270,10 @@ impl Service {
 	/// account never is, even when it is in the admin room: admin routes act
 	/// as the server user and would carry it out of its rooms.
 	pub async fn user_is_admin(&self, user_id: &UserId) -> bool {
-		self.user_is_admin_inner(user_id, true).await
+		self.is_admin(user_id, true).await
 	}
 
-	/// Checks for an explicit grant, independent of account or room state.
-	#[must_use]
-	pub fn user_is_configured_admin(&self, user_id: &UserId) -> bool {
-		self.services.server.config.server_admins.iter().any(|id| id.as_str() == user_id.as_str())
-	}
-
-	async fn user_is_admin_inner(&self, user_id: &UserId, include_config: bool) -> bool {
+	async fn is_admin(&self, user_id: &UserId, include_config: bool) -> bool {
 		if user_id == self.services.globals.server_user {
 			return true;
 		}
@@ -288,7 +282,7 @@ impl Service {
 			return false;
 		}
 
-		if include_config && self.user_is_configured_admin(user_id) {
+		if include_config && self.services.config.has_admin_grant(user_id) {
 			return true;
 		}
 
@@ -452,7 +446,7 @@ impl Service {
 		}
 
 		// A config grant alone does not authorize commands from chat.
-		if !self.user_is_admin_inner(event.sender(), false).await {
+		if !self.is_admin(event.sender(), false).await {
 			return false;
 		}
 

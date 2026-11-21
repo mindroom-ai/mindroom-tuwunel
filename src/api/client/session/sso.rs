@@ -1073,7 +1073,7 @@ async fn register_user(
 	user_id: &UserId,
 	origin: &str,
 ) -> Result<RegistrationTerms> {
-	services.users.check_signup_name(user_id)?;
+	services.users.check_signup(user_id)?;
 
 	let terms = registration_terms(services, provider, userinfo).await?;
 
@@ -1496,7 +1496,7 @@ async fn try_user_id(
 		return None;
 	}
 
-	if services.users.check_signup_name(&user_id).is_err() {
+	if services.config.has_admin_grant(&user_id) {
 		return None;
 	}
 

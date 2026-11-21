@@ -845,13 +845,20 @@ client_secret = "oauth-secret"
 
 #[test]
 fn server_admins_only_accepts_local_accounts_other_than_the_server_user() {
-	for (user, valid) in [("@helper:example.com", true), ("@helper:elsewhere.example", false), ("@_server:example.com", false)] {
-		let config = config_from_toml(&format!(r#"[global]
+	for (user, valid) in [
+		("@helper:example.com", true),
+		("@helper:elsewhere.example", false),
+		("@_server:example.com", false),
+	] {
+		let config = config_from_toml(&format!(
+			r#"[global]
 server_name = "example.com"
 server_admins = ["{user}"]
 [global.admin]
 server_user_localpart = "_server"
-"#)).expect("server admins config parses");
+"#
+		))
+		.expect("server admins config parses");
 		let result = check(&config);
 		if valid {
 			result.expect("local service account is valid");

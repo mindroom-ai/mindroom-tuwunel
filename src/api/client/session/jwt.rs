@@ -21,7 +21,7 @@ pub(super) async fn handle_login(
 			return Err!(Request(NotFound("User {user_id} is not registered on this server.")));
 		}
 
-		services.users.check_signup_name(&user_id)?;
+		services.users.check_signup(&user_id)?;
 
 		services
 			.users
