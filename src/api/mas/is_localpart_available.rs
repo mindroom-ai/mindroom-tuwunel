@@ -32,6 +32,7 @@ pub(crate) async fn is_localpart_available_route(
 		return Err!(Request(UserInUse("Localpart is not available")));
 	}
 
+	services.users.check_signup(&user_id)?;
 	services.users.check_creation(&user_id).await?;
 
 	if services

@@ -35,6 +35,15 @@ pub struct Register<'a> {
 	pub external: bool,
 }
 
+/// Reserve configured admin IDs for explicit operator provisioning.
+#[implement(super::Service)]
+pub fn check_signup(&self, user_id: &UserId) -> Result {
+	if self.services.config.has_admin_grant(user_id) {
+		return Err!(Request(UserInUse("User ID is not available.")));
+	}
+	Ok(())
+}
+
 /// Fully register a local user
 ///
 /// Returns a device id and access token for the registered user
@@ -137,6 +146,7 @@ pub async fn full_register(
 		&& !is_appservice
 		&& !external
 		&& grant_first_user_admin
+		&& !self.services.config.has_admin_grant(user_id)
 		&& self
 			.services
 			.config

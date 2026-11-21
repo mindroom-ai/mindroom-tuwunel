@@ -22,6 +22,11 @@ pub(super) async fn auth_appservice(
 		return Err!(Request(Exclusive("User is not in namespace.")));
 	}
 
+	// An appservice cannot act as a listed ID before its account exists.
+	if services.config.has_admin_grant(&user_id) && !services.users.exists(&user_id).await {
+		return Err!(Request(Forbidden("This user ID is reserved.")));
+	}
+
 	// MSC4326: appservices may assert a device_id alongside user_id.
 	let sender_device = request.query.device_id().map(OwnedDeviceId::from);
 

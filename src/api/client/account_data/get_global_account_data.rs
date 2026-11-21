@@ -6,7 +6,7 @@ use ruma::{
 use serde::Deserialize;
 use tuwunel_core::{Err, Result, err};
 
-use super::{assert_account_data_owner, is_empty_content};
+use super::{is_empty_content, require_owner};
 use crate::Ruma;
 
 #[derive(Deserialize)]
@@ -21,14 +21,8 @@ pub(crate) async fn get_global_account_data_route(
 	State(services): State<crate::State>,
 	body: Ruma<get_global_account_data::v3::Request>,
 ) -> Result<get_global_account_data::v3::Response> {
-	let sender_user = body.sender_user();
-
-	assert_account_data_owner(
-		sender_user,
-		&body.user_id,
-		body.appservice_info.as_ref(),
-		"You cannot get account data of other users.",
-	)?;
+	require_owner(&services, &body, &body.user_id, "You cannot get account data of other users.")
+		.await?;
 
 	let account_data: ExtractGlobalEventContent = services
 		.account_data

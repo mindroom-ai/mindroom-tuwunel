@@ -31,6 +31,7 @@ pub(crate) async fn admin_username_available_route(
 		return Err!(Request(InvalidUsername("Username contains disallowed characters")));
 	}
 
+	services.users.check_signup(&user_id)?;
 	if services.users.exists(&user_id).await {
 		return Err!(Request(UserInUse("Username is not available")));
 	}
