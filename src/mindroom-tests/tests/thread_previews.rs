@@ -14,7 +14,7 @@ mod tests {
 		http::{Request, StatusCode, header},
 		ruma::{EventId, serde::Raw, user_id},
 	};
-	use tuwunel_matrix::{PduCount, PduId, RawPduId};
+	use tuwunel_matrix::{Pdu, PduCount, PduId, RawPduId};
 	use tuwunel_service::Services;
 
 	use super::support::{Harness, api_router};
@@ -243,16 +243,18 @@ mod tests {
 		redact(router, base, outer, "redact-reply").await;
 		let served = event(router, base, MEMBER, root).await;
 		assert_preview(&served["unsigned"]["m.relations"]["m.thread"], first_title, reply, edit);
-		let timeline = &services.timeline;
-		let id: &EventId = edit.try_into()?;
-		let id = timeline.get_pdu_id(id).await?;
-		let mut row = timeline.get_pdu_from_id(&id).await?;
-		let deep = format!(r#"{{"m.relations":{}0{}}}"#, "[".repeat(128), "]".repeat(128));
-		row.unsigned = Some(Raw::from_json_string(deep)?);
-		services.db["pduid_pdu"].insert(id.as_bytes(), serde_json::to_vec(&row)?);
+		let (id, saved) = seed_unreadable_unsigned(services, edit).await?;
 		let served = event(router, base, OWNER, reply).await;
-		let replacement = served.pointer("/unsigned/m.relations/m.replace");
-		assert!(replacement.is_none(), "an edit with unreadable unsigned must not be embedded");
+		let replacement = &served["unsigned"]["m.relations"]["m.replace"];
+		assert_eq!(replacement["event_id"], edit, "keep the edit with unreadable unsigned");
+		assert!(replacement.get("unsigned").is_none());
+		services.db["pduid_pdu"].insert(id.as_bytes(), serde_json::to_vec(&saved)?);
+		redact(router, base, edit, "redact-edit").await;
+		let served = event(router, base, MEMBER, root).await;
+		let preview = &served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.latest_reply"];
+		assert_eq!(preview["event_id"], reply);
+		let replacement = preview.pointer("/unsigned/m.relations/m.replace");
+		assert!(replacement.is_none(), "redacted edits must not be bundled");
 		redact(router, base, reply, "redact-parent").await;
 		let served = event(router, base, OWNER, reply).await;
 		assert!(served["unsigned"]["redacted_because"].is_object());
@@ -309,6 +311,15 @@ mod tests {
 			latest.pointer("/unsigned/m.relations").is_none(),
 			"the fallback reply must not expose stored relations"
 		);
+		seed_unreadable_unsigned(services, &own_reply).await?;
+		let list = request(router, "GET", &path, MEMBER, Value::Null).await;
+		let root = find_event(&list["chunk"], &own_root).expect("thread in list");
+		let summary = &root["unsigned"]["m.relations"]["m.thread"];
+		assert_eq!(summary["count"], 1, "keep the ignored-aware summary");
+		for field in ["latest_event", "io.mindroom.latest_reply"] {
+			assert_eq!(summary[field]["event_id"], own_reply, "keep the reply in {field}");
+			assert!(summary[field].get("unsigned").is_none());
+		}
 		request(
 			router,
 			"PUT",
@@ -353,6 +364,18 @@ mod tests {
 			"the newest reply is served"
 		);
 		eprintln!("PREVIEW_BOUND rows=50 elapsed_ms={}", start.elapsed().as_millis());
+	}
+
+	async fn seed_unreadable_unsigned(services: &Services, id: &str) -> Result<(RawPduId, Pdu)> {
+		let timeline = &services.timeline;
+		let event_id: &EventId = id.try_into()?;
+		let id = timeline.get_pdu_id(event_id).await?;
+		let mut row = timeline.get_pdu_from_id(&id).await?;
+		let deep = format!(r#"{{"m.relations":{}0{}}}"#, "[".repeat(128), "]".repeat(128));
+		let saved = row.unsigned.replace(Raw::from_json_string(deep)?);
+		services.db["pduid_pdu"].insert(id.as_bytes(), serde_json::to_vec(&row)?);
+		row.unsigned = saved;
+		Ok((id, row))
 	}
 
 	async fn seed_stored_thread(services: &Services, id: &str, latest: &Value) -> Result {

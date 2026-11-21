@@ -328,9 +328,7 @@ async fn bundle_thread_latest_edit(&self, sender_user: &UserId, pdu: &mut Pdu) {
 		return;
 	}
 
-	if !strip_stored_relations(&mut latest_event) {
-		return;
-	}
+	strip_stored_relations(&mut latest_event);
 	latest_event.remove_private_unless_sender(Some(sender_user));
 	let replacement =
 		bundle_replacement(&mut latest_event, replacement_event, sender_user).log_err();
@@ -529,11 +527,7 @@ pub async fn ignored_thread_view(
 				.await
 				.unwrap_or(reply);
 
-			if !strip_stored_relations(&mut reply) {
-				return WithoutSummary {
-					root: self.redacted_root(ignored, root).await,
-				};
-			}
+			strip_stored_relations(&mut reply);
 			Some(reply.into_format())
 		},
 	};
@@ -633,10 +627,10 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 				|| ignored.ignored_users.contains_key(child.sender())
 				|| config.is_forbidden_remote_server_name(child.sender().server_name())
 				|| !self.preview_visible(user, &child).await
-				|| !strip_stored_relations(&mut child)
 			{
 				continue;
 			}
+			strip_stored_relations(&mut child);
 			if config.rooms.relations.bundle_edits {
 				let edit = {
 					let edits = self
@@ -665,30 +659,23 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 }
 
 fn bundle_replacement(parent: &mut Pdu, mut edit: Pdu, user: &UserId) -> Result {
-	if strip_stored_relations(&mut edit) {
-		edit.remove_private_unless_sender(Some(user));
-		parent.set_replacement_bundle(&edit.into_format())?;
-	}
-	Ok(())
+	strip_stored_relations(&mut edit);
+	edit.remove_private_unless_sender(Some(user));
+	parent.set_replacement_bundle(&edit.into_format())
 }
 
-/// Strip stored relations before embedding; an unreadable event is not embedded.
-fn strip_stored_relations(pdu: &mut Pdu) -> bool {
-	if pdu.unsigned.is_none() {
-		return true;
+/// Strip stored relations from an already-selected embed, omitting unreadable unsigned.
+fn strip_stored_relations(pdu: &mut Pdu) {
+	if pdu.unsigned.is_some() {
+		pdu.unsigned = pdu
+			.get_unsigned::<serde_json::Map<String, Value>>()
+			.and_then(|mut unsigned| {
+				unsigned.remove("m.relations");
+				Ok(to_raw_value(&unsigned)?.into())
+			})
+			.log_err()
+			.ok();
 	}
-	let Ok(mut unsigned) = pdu
-		.get_unsigned::<serde_json::Map<String, Value>>()
-		.log_err()
-	else {
-		return false;
-	};
-	unsigned.remove("m.relations");
-	let Ok(unsigned) = to_raw_value(&unsigned).log_err() else {
-		return false;
-	};
-	pdu.unsigned = Some(unsigned.into());
-	true
 }
 
 /// A preview child or edit is shown only when the requester may see it and
