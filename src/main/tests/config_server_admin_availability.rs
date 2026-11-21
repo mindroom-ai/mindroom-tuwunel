@@ -43,7 +43,9 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		];
 		for (token, path) in probes {
 			let client = Client { services, base, token };
-			let response = client.request(Method::GET, &format!("{base}{path}"), &json!({})).await?;
+			let response = client
+				.request(Method::GET, &format!("{base}{path}"), &json!({}))
+				.await?;
 			let status = response.status();
 			let body: Value = response.json().await?;
 			if name == "reserved" {
