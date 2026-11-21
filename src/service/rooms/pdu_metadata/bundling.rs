@@ -1,6 +1,9 @@
-use std::collections::BTreeSet;
+use std::{
+	collections::BTreeSet,
+	sync::atomic::{AtomicUsize, Ordering::Relaxed},
+};
 
-use futures::{Stream, StreamExt, TryFutureExt, pin_mut};
+use futures::{Stream, StreamExt, TryFutureExt, TryStreamExt, pin_mut, stream};
 use ruma::{
 	EventId, OwnedEventId, OwnedUserId, UserId,
 	api::Direction,
@@ -19,7 +22,7 @@ use tuwunel_core::{
 	result::LogErr,
 	utils::{
 		BoolExt,
-		stream::{ReadyExt, TryIgnore},
+		stream::{ReadyExt, TryIgnore, WidebandExt},
 		u64_from_u8,
 	},
 };
@@ -411,7 +414,7 @@ fn replacement_children<'a>(
 	parent: &'a Pdu,
 	parent_id: PduId,
 	limit: usize,
-	mut rows: Option<&'a mut usize>,
+	rows: Option<&'a AtomicUsize>,
 ) -> impl Stream<Item = Pdu> + Send + 'a {
 	let shortroomid = parent_id.shortroomid;
 	let prefix = prefix(shortroomid, parent_id.count, Tag::Replace);
@@ -421,25 +424,33 @@ fn replacement_children<'a>(
 	seek.extend(prefix.iter().copied());
 	seek.extend([u8::MAX; size_of::<u64>() * 2]);
 
+	// Saturation distinguishes an unreadable scan from an exhausted one.
+	let record_error = move |error: &tuwunel_core::Error| {
+		if let Some(rows) = rows.filter(|_| !error.is_missing()) {
+			rows.store(usize::MAX, Relaxed);
+		}
+	};
 	self.db
 		.relatesto_typed
 		.rev_raw_keys_from(seek.as_slice())
+		.inspect_err(record_error)
 		.ignore_err()
 		.ready_take_while(move |key| key.starts_with(&prefix))
 		.take(limit)
 		.inspect(move |_| {
-			if let Some(rows) = &mut rows {
-				**rows = rows.saturating_add(1);
+			if let Some(rows) = rows {
+				rows.store(rows.load(Relaxed).saturating_add(1), Relaxed);
 			}
 		})
 		.map(|key| u64_from_u8(&key[CHILD_COUNT_OFFSET..KEY_LEN]))
 		.map(PduCount::from_unsigned)
 		.map(move |count| (shortroomid, count))
-		.filter_map(async |(shortroomid, count)| {
+		.filter_map(async move |(shortroomid, count)| {
 			let child_id: RawPduId = PduId { shortroomid, count }.into();
 			self.services
 				.timeline
 				.get_pdu_from_id(&child_id)
+				.inspect_err(record_error)
 				.await
 				.ok()
 				.filter(|child| !child.is_redacted())
@@ -629,8 +640,17 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			.await
 			.unwrap_or_default();
 		let PduId { shortroomid, count } = root_id.into();
-		// Drive raw rows without prefetching PDUs beyond the streaming window.
-		let rows = self.relation_counts(count, None, Direction::Backward, PREVIEW_ROWS);
+		// Prefetch in order without crossing the streaming-window boundary.
+		let timeline = &services.timeline;
+		let load = async |row: Result<PduCount>| -> Result<_> {
+			let id = PduId { shortroomid, count: row? };
+			let pdu = timeline.get_pdu_from_id(&id.into()).await?;
+			Ok((id, pdu))
+		};
+		let rows = self
+			.relation_counts(count, None, Direction::Backward, PREVIEW_ROWS)
+			.chunks(STREAM_ROWS)
+			.flat_map(|rows| stream::iter(rows).wide_then(load));
 		pin_mut!(rows);
 		let bundle_edits = config.rooms.relations.bundle_edits;
 		let mut have_previews = false;
@@ -641,22 +661,14 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 		{
 			let search_stream = stream_budget > 0 && stream_rows > 0;
 			stream_rows = stream_rows.saturating_sub(1);
-			let Ok(count) = row else { continue };
-			let id = PduId { shortroomid, count };
-			let timeline = &services.timeline;
-			let child = timeline.get_pdu_from_id(&id.into()).await;
-			let Ok(mut child) = child else { continue };
-			if child.room_id() != root.room_id()
+			let Ok((id, mut child)) = row else { continue };
+			if (have_previews && !child.content().get().contains(STREAM_STATUS))
+				|| child.room_id() != root.room_id()
 				|| child.state_key().is_some()
 				|| *child.kind() == TimelineEventType::RoomEncrypted
 				|| child.is_redacted()
 				|| !is_thread_reply(&child)
 			{
-				continue;
-			}
-			// Timeline content is stored as canonical JSON. Once the other
-			// previews are filled, ordinary replies need no content decode.
-			if have_previews && !child.content().get().contains(STREAM_STATUS) {
 				continue;
 			}
 			let content = child.get_content::<Value>().unwrap_or_default();
@@ -687,10 +699,10 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 
 			// Stream detection needs the current edit even if clients aren't
 			// configured to receive edit bundles. Reuse it for the preview.
-			let mut edit_rows = 0_usize;
+			let edit_rows = AtomicUsize::new(0);
 			let edit = if candidate || (preview && bundle_edits) {
 				let edits = self
-					.replacement_children(&child, id, PREVIEW_ROWS, Some(&mut edit_rows))
+					.replacement_children(&child, id, PREVIEW_ROWS, Some(&edit_rows))
 					.filter_map(async |edit| {
 						let active = edit_streaming(&edit, candidate)?;
 						self.preview_visible(user, &edit)
@@ -702,9 +714,10 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			} else {
 				None
 			};
-			let original = || edit_rows < PREVIEW_ROWS && original_streaming(&child);
+			let rows = edit_rows.load(Relaxed);
+			let original = || rows < PREVIEW_ROWS && original_streaming(&child);
 			let active = edit.as_ref().map(|(_, active)| *active);
-			let streaming = candidate && active.unwrap_or_else(original);
+			let streaming = candidate && rows != usize::MAX && active.unwrap_or_else(original);
 			if candidate {
 				stream_budget = if streaming { 0 } else { stream_budget.saturating_sub(1) };
 			}
@@ -717,12 +730,15 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 				continue;
 			};
 			child.remove_private();
-			let mut child_unsigned = child.get_unsigned_as_value();
-			if let Some(object) = child_unsigned.as_object_mut() {
-				object.remove("m.relations");
-				child.unsigned = Some(to_raw_value(&child_unsigned)?.into());
+			let mut edit = edit.filter(|_| bundle_edits && rows != usize::MAX);
+			for pdu in std::iter::once(&mut child).chain(edit.as_mut().map(|(edit, _)| edit)) {
+				let mut unsigned = pdu.get_unsigned_as_value();
+				if let Some(object) = unsigned.as_object_mut() {
+					object.remove("m.relations");
+					pdu.unsigned = Some(to_raw_value(&unsigned)?.into());
+				}
 			}
-			if bundle_edits && let Some((mut edit, _)) = edit {
+			if let Some((mut edit, _)) = edit {
 				edit.remove_private_unless_sender(Some(user));
 				child.set_replacement_bundle(&edit.into_format())?;
 			}
@@ -746,18 +762,22 @@ struct StreamContent<'a> {
 }
 
 fn original_streaming(child: &Pdu) -> bool {
-	serde_json::from_str(child.content().get())
-		.is_ok_and(|original| preview_streaming(original, StreamContent::default()))
+	serde_json::from_str(child.content().get()).is_ok_and(preview_streaming)
 }
 
 fn edit_streaming(edit: &Pdu, candidate: bool) -> Option<bool> {
 	let outer: StreamContent<'_> = serde_json::from_str(edit.content().get()).ok()?;
-	let inner = outer.new_content?.get();
-	inner.starts_with('{').then_some(())?;
-	Some(candidate && preview_streaming(outer, serde_json::from_str(inner).ok()?))
+	let inner = outer.new_content?;
+	inner.get().starts_with('{').then_some(())?;
+	Some(candidate && preview_streaming(outer))
 }
 
-fn preview_streaming(outer: StreamContent<'_>, inner: StreamContent<'_>) -> bool {
+fn preview_streaming(outer: StreamContent<'_>) -> bool {
+	let inner: StreamContent<'_> = outer
+		.new_content
+		.filter(|raw| raw.get().starts_with('{'))
+		.and_then(|raw| serde_json::from_str(raw.get()).ok())
+		.unwrap_or_default();
 	let terminal_run = |raw: &RawValue| {
 		#[derive(Deserialize)]
 		struct Run<'a> {
