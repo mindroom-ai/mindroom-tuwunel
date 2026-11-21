@@ -366,20 +366,40 @@ mod tests {
 		let visible_title_edit = send(router, base, OWNER, "visible-title-edit", json!({"msgtype":"m.notice","body":"* visible topic","m.new_content":{"msgtype":"m.notice","body":"visible topic","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":first_title}})).await;
 		request(router, "POST", &format!("{base}/leave"), MEMBER, json!({})).await;
 		let hidden = send(router, base, OWNER, "hidden-title", title(root, "hidden topic")).await;
-		send(router,base,OWNER,"hidden-edit",json!({"msgtype":"m.text","body":"* hidden","m.new_content":{"msgtype":"m.text","body":"hidden"},"m.relates_to":{"rel_type":"m.replace","event_id":edit_reply}})).await;
-		send(router, base, OWNER, "hidden-title-edit", json!({"msgtype":"m.notice","body":"* hidden topic","m.new_content":{"msgtype":"m.notice","body":"hidden topic","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":first_title}})).await;
-		request(router, "POST", &format!("{base}/join"), MEMBER, json!({})).await;
 		// Model stored bundles with the title sent during the membership gap.
 		let latest_event = event(router, base, OWNER, &hidden).await;
 		let relations = json!({"m.thread": {"latest_event": latest_event}});
 		let timeline = &services.timeline;
-		for edit in [&visible_edit, &visible_title_edit] {
-			let event_id: &EventId = edit.as_str().try_into()?;
+		for id in [&edit_reply, &visible_edit, &visible_title_edit] {
+			let event_id: &EventId = id.as_str().try_into()?;
 			let id = timeline.get_pdu_id(event_id).await?;
 			let mut stored: Value = timeline.get_from_id(&id).await?;
 			stored["unsigned"]["m.relations"] = relations.clone();
 			services.db["pduid_pdu"].insert(id.as_bytes(), serde_json::to_vec(&stored)?);
 		}
+		// Check the standard bundles before a newer edit can take precedence.
+		let direct = event(router, base, MEMBER, &edit_reply).await;
+		let served = event(router, base, MEMBER, &edit_root).await;
+		let latest = &served["unsigned"]["m.relations"]["m.thread"]["latest_event"];
+		let latest_edit = &latest["unsigned"]["m.relations"]["m.replace"];
+		let direct_edit = &direct["unsigned"]["m.relations"]["m.replace"];
+		assert_eq!(latest["event_id"], edit_reply);
+		assert_eq!(latest_edit["event_id"], visible_edit);
+		assert_eq!(direct_edit["event_id"], visible_edit);
+		let leaked = [
+			latest.pointer("/unsigned/m.relations/m.thread"),
+			latest_edit.pointer("/unsigned/m.relations"),
+			direct_edit.pointer("/unsigned/m.relations"),
+		]
+		.map(|bundle| bundle.is_some());
+		assert_eq!(
+			leaked, [false; 3],
+			"stored relations in latest reply, its edit, or direct edit"
+		);
+
+		send(router,base,OWNER,"hidden-edit",json!({"msgtype":"m.text","body":"* hidden","m.new_content":{"msgtype":"m.text","body":"hidden"},"m.relates_to":{"rel_type":"m.replace","event_id":edit_reply}})).await;
+		send(router, base, OWNER, "hidden-title-edit", json!({"msgtype":"m.notice","body":"* hidden topic","m.new_content":{"msgtype":"m.notice","body":"hidden topic","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":first_title}})).await;
+		request(router, "POST", &format!("{base}/join"), MEMBER, json!({})).await;
 		send(router, base, OWNER, "edit-title", title(&edit_root, "visible title")).await;
 		let served = event(router, base, MEMBER, &edit_root).await;
 		let preview = &served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.latest_reply"];

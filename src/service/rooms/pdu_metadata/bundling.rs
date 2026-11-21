@@ -88,9 +88,7 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 			.child_visible(sender_user, &replacement)
 			.await
 	{
-		let replacement = replacement.without_private_unless_sender(Some(sender_user));
-
-		pdu.set_replacement_bundle(&replacement.into_format())
+		bundle_replacement(&mut pdu, replacement, sender_user)
 			.log_err()
 			.ok();
 	}
@@ -310,7 +308,7 @@ async fn bundle_thread_latest_edit(&self, sender_user: &UserId, pdu: &mut Pdu) {
 		return;
 	}
 
-	let Some(mut replacement_event) = self.newest_replacement(&latest_event).await else {
+	let Some(replacement_event) = self.newest_replacement(&latest_event).await else {
 		return;
 	};
 
@@ -330,11 +328,10 @@ async fn bundle_thread_latest_edit(&self, sender_user: &UserId, pdu: &mut Pdu) {
 		return;
 	}
 
-	replacement_event.remove_private_unless_sender(Some(sender_user));
 	latest_event.remove_private_unless_sender(Some(sender_user));
 
-	let replacement = latest_event
-		.set_replacement_bundle(&replacement_event.into_format())
+	let replacement = strip_stored_relations(&mut latest_event)
+		.and_then(|()| bundle_replacement(&mut latest_event, replacement_event, sender_user))
 		.log_err();
 
 	if thread_result_or_drop(pdu, replacement).is_none() {
@@ -633,7 +630,7 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			{
 				continue;
 			}
-			strip_preview_relations(&mut child)?;
+			strip_stored_relations(&mut child)?;
 			if config.rooms.relations.bundle_edits {
 				let edit = {
 					let edits = self
@@ -646,11 +643,8 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 					pin_mut!(edits);
 					edits.next().await
 				};
-				if let Some(mut edit) = edit {
-					strip_preview_relations(&mut edit)?;
-					// The preview itself already loses sender-private fields at lookup.
-					edit.remove_private();
-					child.set_replacement_bundle(&edit.into_format())?;
+				if let Some(edit) = edit {
+					bundle_replacement(&mut child, edit, user)?;
 				}
 			}
 			let event: Raw<AnySyncMessageLikeEvent> = child.into_format();
@@ -664,8 +658,14 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 	Ok(())
 }
 
+fn bundle_replacement(parent: &mut Pdu, mut edit: Pdu, user: &UserId) -> Result {
+	strip_stored_relations(&mut edit)?;
+	edit.remove_private_unless_sender(Some(user));
+	parent.set_replacement_bundle(&edit.into_format())
+}
+
 /// Drop stored relations: nested events have not been checked for this requester.
-fn strip_preview_relations(pdu: &mut Pdu) -> Result {
+fn strip_stored_relations(pdu: &mut Pdu) -> Result {
 	let mut unsigned = pdu.get_unsigned_as_value();
 	if let Some(object) = unsigned.as_object_mut() {
 		object.remove("m.relations");
