@@ -69,7 +69,7 @@ mod tests {
 		let case = fresh_device(&router, &base).await;
 		let outer = endpoint_bundles(&services, &router, &base, &room, &case).await;
 		redactions(&router, &base, &case, &outer).await;
-		ignored_users(&router, &base).await;
+		ignored_users(&services, &router, &base).await?;
 		bounded_seeks(&router, &base).await;
 		history_visibility(&services, &router, &base, &case).await?;
 		title_rule(&router).await;
@@ -248,7 +248,7 @@ mod tests {
 		);
 	}
 
-	async fn ignored_users(router: &Router, base: &str) {
+	async fn ignored_users(services: &Services, router: &Router, base: &str) -> Result {
 		// Ignore changes take effect on the next read, without a shared cache.
 		let own_root =
 			send(router, base, MEMBER, "own-root", json!({"msgtype":"m.text","body":"own root"}))
@@ -264,7 +264,10 @@ mod tests {
 			thread(&own_root, "m.text", "ignored reply"),
 		)
 		.await;
-		send(router, base, OWNER, "ignored-title", title(&own_root, "ignored title")).await;
+		let ignored =
+			send(router, base, OWNER, "ignored-title", title(&own_root, "ignored title")).await;
+		let latest = event(router, base, OWNER, &ignored).await;
+		seed_stored_thread(services, &own_reply, &latest).await?;
 		request(
 			router,
 			"PUT",
@@ -283,6 +286,16 @@ mod tests {
 			summary["io.mindroom.latest_reply"]["event_id"], own_reply,
 			"an ignored latest reply must fall back to an unignored reply"
 		);
+		let path = format!("{}/threads?limit=100", base.replace("/v3/", "/v1/"));
+		let list = request(router, "GET", &path, MEMBER, Value::Null).await;
+		let root = find_event(&list["chunk"], &own_root).expect("thread in list");
+		let latest = &root["unsigned"]["m.relations"]["m.thread"]["latest_event"];
+		assert_eq!(latest["event_id"], own_reply);
+		assert_eq!(latest["unsigned"]["transaction_id"], "own-reply");
+		assert!(
+			latest.pointer("/unsigned/m.relations").is_none(),
+			"the fallback reply must not expose stored relations"
+		);
 		request(
 			router,
 			"PUT",
@@ -291,6 +304,7 @@ mod tests {
 			json!({"ignored_users":{}}),
 		)
 		.await;
+		Ok(())
 	}
 
 	async fn bounded_seeks(router: &Router, base: &str) {
@@ -326,6 +340,16 @@ mod tests {
 			"the newest reply is served"
 		);
 		eprintln!("PREVIEW_BOUND rows=50 elapsed_ms={}", start.elapsed().as_millis());
+	}
+
+	async fn seed_stored_thread(services: &Services, id: &str, latest: &Value) -> Result {
+		let event_id: &EventId = id.try_into()?;
+		let timeline = &services.timeline;
+		let id = timeline.get_pdu_id(event_id).await?;
+		let mut stored: Value = timeline.get_from_id(&id).await?;
+		stored["unsigned"]["m.relations"] = json!({"m.thread": {"latest_event": latest}});
+		services.db["pduid_pdu"].insert(id.as_bytes(), serde_json::to_vec(&stored)?);
+		Ok(())
 	}
 
 	async fn history_visibility(
@@ -368,14 +392,8 @@ mod tests {
 		let hidden = send(router, base, OWNER, "hidden-title", title(root, "hidden topic")).await;
 		// Model stored bundles with the title sent during the membership gap.
 		let latest_event = event(router, base, OWNER, &hidden).await;
-		let relations = json!({"m.thread": {"latest_event": latest_event}});
-		let timeline = &services.timeline;
 		for id in [&edit_reply, &visible_edit, &visible_title_edit] {
-			let event_id: &EventId = id.as_str().try_into()?;
-			let id = timeline.get_pdu_id(event_id).await?;
-			let mut stored: Value = timeline.get_from_id(&id).await?;
-			stored["unsigned"]["m.relations"] = relations.clone();
-			services.db["pduid_pdu"].insert(id.as_bytes(), serde_json::to_vec(&stored)?);
+			seed_stored_thread(services, id, &latest_event).await?;
 		}
 		// Check the standard bundles before a newer edit can take precedence.
 		let direct = event(router, base, MEMBER, &edit_reply).await;

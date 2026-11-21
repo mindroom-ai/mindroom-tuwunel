@@ -2156,7 +2156,7 @@ clients read the title only from `io.mindroom.title`.
 
 Reads skip redacted, ignored-user, forbidden-server and erased events and
 enforce the requester's history visibility for each candidate and each edit.
-Edit folding strips stored relations from the edit and rebuilt latest reply.
+Bundled edits and rebuilt latest replies never carry their stored relations.
 A redacted root keeps previews of its live children.
 
 Cost: each served root reads its native relation rows (every event relating

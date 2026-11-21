@@ -521,13 +521,19 @@ pub async fn ignored_thread_view(
 		| Some(reply) => {
 			// MSC4025: the swapped-in reply must not reopen the erased-sender
 			// seam the bundle pass gates on the stored latest.
-			let reply = self
+			let mut reply = self
 				.services
 				.state_accessor
 				.erased_view(sender_user, &reply)
 				.await
 				.unwrap_or(reply);
 
+			if strip_stored_relations(&mut reply)
+				.log_err()
+				.is_err()
+			{
+				reply.unsigned = None;
+			}
 			Some(reply.into_format())
 		},
 	};
