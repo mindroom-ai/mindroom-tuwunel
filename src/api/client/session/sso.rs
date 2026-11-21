@@ -1302,15 +1302,17 @@ async fn claimed_account(
 
 	// Only the record says who made the account: one without a password that
 	// anything else made, as a registration may, has none. The appservice must
-	// still be registered for the name. Both are read, and the appservices
-	// released, before the account is held: registering an appservice holds
-	// them while it takes its own user's lock.
+	// still be registered for the name. A name in any appservice's exclusive
+	// namespace is never claimed, as a sign-in never names a new account there:
+	// such accounts are the appservice's ghosts. All are read, and the
+	// appservices released, before the account is held: registering an
+	// appservice holds them while it takes its own user's lock.
 	let recorded = services
 		.users
 		.registering_appservice(&user_id)
 		.await;
 
-	let (made, owned) = {
+	let (made, owned, exclusive) = {
 		let appservices = services.appservice.read().await;
 		let made = recorded.as_deref() == Some(appservice.as_str())
 			&& appservices
@@ -1322,6 +1324,9 @@ async fn claimed_account(
 			appservices
 				.values()
 				.any(|info| info.sender == user_id),
+			appservices
+				.values()
+				.any(|info| info.is_exclusive_user_match(&user_id)),
 		)
 	};
 
@@ -1336,6 +1341,7 @@ async fn claimed_account(
 		(!verified, "is claimed by an address not known to be verified"),
 		(!made, "the appservice did not register, or no longer has in its namespace"),
 		(owned, "is an appservice's own user"),
+		(exclusive, "is in an appservice's exclusive namespace"),
 		(forbidden, "has a forbidden name"),
 		(services.admin.user_is_admin(&user_id).await, "is a server admin"),
 		(services.users.is_locked(&user_id).await, "is locked"),
