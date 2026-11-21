@@ -445,7 +445,7 @@ fn replacement_children<'a>(
 		.map(|key| u64_from_u8(&key[CHILD_COUNT_OFFSET..KEY_LEN]))
 		.map(PduCount::from_unsigned)
 		.map(move |count| (shortroomid, count))
-		.filter_map(async move |(shortroomid, count)| {
+		.filter_map(move |(shortroomid, count)| async move {
 			let child_id: RawPduId = PduId { shortroomid, count }.into();
 			self.services
 				.timeline
