@@ -21,6 +21,8 @@ use self::{
 mod admin_api;
 mod appservice;
 mod client;
+#[path = "client/get.rs"]
+mod client_get;
 mod fixture;
 mod timeline;
 
