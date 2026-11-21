@@ -47,8 +47,11 @@ pub(crate) async fn admin_create_or_modify_route(
 		return Err!(Request(InvalidParam("An account cannot be deactivated and locked")));
 	}
 
-	if body.admin == Some(false) && sender_user == body.user_id {
-		return Err!(Request(InvalidParam("You may not demote yourself.")));
+	if body.admin == Some(false) {
+		services.admin.check_admin_revocation(user_id)?;
+		if sender_user == body.user_id {
+			return Err!(Request(InvalidParam("You may not demote yourself.")));
+		}
 	}
 
 	// A malformed address is refused before any field is written.
@@ -65,6 +68,11 @@ pub(crate) async fn admin_create_or_modify_route(
 		refuse_server_user(services, user_id)?;
 	}
 
+	if body.admin == Some(true) {
+		let users = &services.users;
+		users.external_admin_check(user_id).await?;
+	}
+
 	let profile = requested_profile(&body);
 	let credentials = write_credentials(services, &body, created);
 
@@ -75,8 +83,9 @@ pub(crate) async fn admin_create_or_modify_route(
 		.await?;
 
 	match body.admin {
-		| None => {},
-		| Some(true) => services.admin.make_user_admin(user_id).await?,
+		| Some(true) if !services.config.has_admin_grant(user_id) =>
+			services.admin.make_user_admin(user_id).await?,
+		| None | Some(true) => {},
 		| Some(false) => {
 			services.admin.revoke_admin(user_id).await?;
 		},

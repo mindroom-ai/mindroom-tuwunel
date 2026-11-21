@@ -456,6 +456,20 @@ pub struct Config {
 	#[serde(default)]
 	pub external_forbidden_rooms: Vec<OwnedRoomOrAliasId>,
 
+	/// MindRoom: Local accounts with full server-admin permissions without the
+	/// admin room. This grants no chat commands or access for external accounts.
+	///
+	/// List only accounts you provision yourself (e.g. `["@helper:example.com"]`).
+	/// Keep them outside appservice namespaces. Startup fails if a listed
+	/// appservice sender does not exist.
+	///
+	/// This list is startup-only. Remove the ID and restart to revoke the
+	/// grant. Remove any existing admin-room membership separately to stop sync.
+	///
+	/// default: []
+	#[serde(default)]
+	pub server_admins: Vec<OwnedUserId>,
+
 	/// MindRoom: Collapse multiple m.replace (edit) events per target into
 	/// only the latest one in `/sync` timeline responses.
 	///
@@ -3148,6 +3162,13 @@ pub fn lists_identity_providers(&self) -> bool {
 #[must_use]
 pub fn allows_password_registration(&self) -> bool {
 	self.registration.enable && self.authentication.login.with_password
+}
+
+/// Whether a user ID has a config grant, regardless of room or account state.
+#[implement(Config)]
+#[must_use]
+pub fn has_admin_grant(&self, user: &ruma::UserId) -> bool {
+	self.server_admins.iter().any(|id| &**id == user)
 }
 
 /// Lists the storage provider sections the storage service builds from.

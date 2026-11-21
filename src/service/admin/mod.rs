@@ -270,12 +270,23 @@ impl Service {
 	/// account never is, even when it is in the admin room: admin routes act
 	/// as the server user and would carry it out of its rooms.
 	pub async fn user_is_admin(&self, user_id: &UserId) -> bool {
+		self.is_admin(user_id, true).await
+	}
+
+	async fn is_admin(&self, user_id: &UserId, include_config: bool) -> bool {
 		if user_id == self.services.globals.server_user {
 			return true;
 		}
 
 		if self.services.users.is_external(user_id).await {
 			return false;
+		}
+
+		if include_config
+			&& self.services.config.has_admin_grant(user_id)
+			&& self.services.users.exists(user_id).await
+		{
+			return true;
 		}
 
 		let Ok(admin_room) = self.get_admin_room().await else {
@@ -385,7 +396,7 @@ impl Service {
 	///
 	/// Only an `m.text` from an admin qualifies: prefixed with `!admin` or the
 	/// server user's ID in the admin room, or escaped as `\!admin` by a local
-	/// admin anywhere when escape commands are enabled. The server user's own
+	/// admin-room member anywhere when escape commands are enabled. The server user's own
 	/// messages in the admin room are refused unless the emergency password is
 	/// set.
 	pub async fn is_admin_command<Pdu>(&self, event: &Pdu, body: &str) -> bool
@@ -437,8 +448,8 @@ impl Service {
 			return false;
 		}
 
-		// Only senders who are admin can proceed
-		if !self.user_is_admin(event.sender()).await {
+		// A config grant alone does not authorize commands from chat.
+		if !self.is_admin(event.sender(), false).await {
 			return false;
 		}
 

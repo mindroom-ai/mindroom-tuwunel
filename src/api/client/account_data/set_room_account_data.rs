@@ -2,7 +2,7 @@ use axum::extract::State;
 use ruma::api::client::config::set_room_account_data;
 use tuwunel_core::Result;
 
-use super::{assert_account_data_owner, set_account_data};
+use super::{require_owner, set_account_data};
 use crate::Ruma;
 
 /// # `PUT /_matrix/client/r0/user/{userId}/rooms/{roomId}/account_data/{type}`
@@ -12,14 +12,7 @@ pub(crate) async fn set_room_account_data_route(
 	State(services): State<crate::State>,
 	body: Ruma<set_room_account_data::v3::Request>,
 ) -> Result<set_room_account_data::v3::Response> {
-	let sender_user = body.sender_user();
-
-	assert_account_data_owner(
-		sender_user,
-		&body.user_id,
-		body.appservice_info.as_ref(),
-		"You cannot set account data for other users.",
-	)?;
+	require_owner(&services, &body, &body.user_id).await?;
 
 	set_account_data(
 		&services,

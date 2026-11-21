@@ -72,6 +72,7 @@ fn sso_fallback_account() -> Result {
 	let options = [
 		// The capture below is the global subscriber, in the server's place.
 		"logging.enable=false",
+		r#"server_admins=["@service_account:localhost"]"#,
 		"authentication.oidc.registration_allowed_redirect_hosts=[\"client.example\"]",
 		&option("client_id", IDP),
 		&option("client_secret", "test-secret"),
@@ -293,6 +294,16 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let response = sign_in(&client, base, "dave", "bridge_dave").await?;
 
 	assert_eq!(fallback_localpart(&dave), signed_in(services, &response).await?.localpart());
+
+	let erin = unique_id_sub((&provider, "erin"))?;
+	let response = sign_in(&client, base, "erin", "service_account").await?;
+	assert_eq!(fallback_localpart(&erin), signed_in(services, &response).await?.localpart());
+	assert!(
+		!services
+			.users
+			.exists(tuwunel_core::ruma::user_id!("@service_account:localhost"))
+			.await
+	);
 
 	Ok(())
 }

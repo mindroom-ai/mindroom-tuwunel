@@ -1122,6 +1122,41 @@ Upstream has no such option. Files: `src/database/maps.rs`,
 `docs/authentication/providers.md`; tests in
 `src/main/tests/sso_assigned_account.rs` and `src/core/config/tests.rs`.
 
+### Configured server admins do not need to join the admin room
+
+`server_admins` in `[global]` is an optional, startup-only list of local
+Matrix user IDs. For example, `server_admins = ["@helper:example.com"]` gives
+that account full server-admin permissions once provisioned, without joining
+it to `#admins`. Listing an existing member does not remove its membership or
+stop it syncing the room; remove membership separately. Nonmembers do not
+receive the room in normal sync, but admins can still read it through the
+admin API. An absent ID or external account gains no privileges. Invalid or
+remote IDs and the server user are refused in config.
+
+Provision and control listed accounts yourself and keep them out of appservice
+namespaces; the server warns about namespace overlaps when loading or
+registering an appservice. Sign-up and username availability checks treat
+listed IDs as reserved, but operators can still provision them directly.
+Appservices cannot act as an unprovisioned listed user, including by targeting
+its account data or profile. Startup fails if an appservice registration names
+an unprovisioned listed sender. First-time SSO username mapping skips listed
+IDs even when an account already exists. Config grants do not authorize chat
+admin commands. First-user promotion skips listed IDs; it and last-admin
+protection still count only admin-room members.
+
+LDAP does not change a listed user's admin-room membership. Shared-secret
+registration and v2 user updates with `admin: true` do not join a listed
+account to the admin room. A v2 user update refuses external accounts with
+`admin: true` and listed IDs with `admin: false` before any write. Remove the
+ID and restart to revoke the config grant, and remove any existing admin-room
+membership separately.
+
+Files: `src/core/config/`, `src/service/{admin,appservice,users}/`,
+`src/api/{admin,client,mas,oidc,router}/`, `docs/authentication/ldap.md`,
+`tuwunel-example.toml`; tests in
+`src/core/config/tests.rs` and
+`src/main/tests/{config_server_admin_availability,config_server_admins,sso_fallback_account}.rs`.
+
 ### External accounts are kept out of listed rooms
 
 An external account joins only rooms it is invited to, but nothing kept it out

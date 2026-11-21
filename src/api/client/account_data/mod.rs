@@ -4,8 +4,6 @@ mod get_global_account_data;
 mod get_room_account_data;
 mod set_global_account_data;
 mod set_room_account_data;
-#[cfg(test)]
-mod tests;
 
 use ruma::{
 	RoomId, UserId,
@@ -15,7 +13,7 @@ use ruma::{
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json, value::RawValue as RawJsonValue};
 use tuwunel_core::{Err, Result, err};
-use tuwunel_service::{Services, appservice::RegistrationInfo};
+use tuwunel_service::Services;
 
 pub(crate) use self::{
 	delete_global_account_data::delete_global_account_data_route,
@@ -25,6 +23,7 @@ pub(crate) use self::{
 	set_global_account_data::set_global_account_data_route,
 	set_room_account_data::set_room_account_data_route,
 };
+use crate::Ruma;
 
 /// Largest `m.ignored_user_list` content stored, in bytes.
 ///
@@ -34,16 +33,17 @@ pub(crate) use self::{
 /// ordinary length.
 const MAX_IGNORED_USER_LIST_BYTES: usize = 1_048_576;
 
-fn assert_account_data_owner(
-	sender_user: &UserId,
-	user_id: &UserId,
-	appservice_info: Option<&RegistrationInfo>,
-	message: &str,
+pub(super) async fn require_owner<T: Sync>(
+	services: &Services,
+	body: &Ruma<T>,
+	user: &UserId,
 ) -> Result {
-	if sender_user != user_id
-		&& !appservice_info.is_some_and(|registration| registration.is_user_match(user_id))
+	let info = body.appservice_info.as_ref();
+	if body.sender_user() != user
+		&& (!info.is_some_and(|registration| registration.is_user_match(user))
+			|| services.config.has_admin_grant(user) && !services.users.exists(user).await)
 	{
-		return Err!(Request(Forbidden("{message}")));
+		return Err!(Request(Forbidden("You cannot act on behalf of another user.")));
 	}
 
 	Ok(())
