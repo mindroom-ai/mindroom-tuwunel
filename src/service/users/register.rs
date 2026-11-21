@@ -35,6 +35,15 @@ pub struct Register<'a> {
 	pub external: bool,
 }
 
+/// Reserve configured admin IDs for explicit operator provisioning.
+#[implement(super::Service)]
+pub fn check_signup_name(&self, user_id: &UserId) -> Result {
+	if self.services.admin.user_is_configured_admin(user_id) {
+		return Err!(Request(UserInUse("User ID is not available.")));
+	}
+	Ok(())
+}
+
 /// Fully register a local user
 ///
 /// Returns a device id and access token for the registered user

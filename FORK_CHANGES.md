@@ -1122,6 +1122,25 @@ Upstream has no such option. Files: `src/database/maps.rs`,
 `docs/authentication/providers.md`; tests in
 `src/main/tests/sso_assigned_account.rs` and `src/core/config/tests.rs`.
 
+### Configured server admins do not need to join the admin room
+
+`server_admins` in `[global]` is an optional list of local Matrix user IDs.
+For example, `server_admins = ["@helper:example.com"]` grants full server-admin
+permissions to the provisioned `@helper:example.com` account without joining
+it to `#admins` or giving it that room's power levels. It no longer receives
+admin-room messages through normal sync, but its admin permissions still allow
+it to read those messages through the admin API. External accounts never gain
+admin access, and config rejects remote IDs and the server user.
+
+Provision and control the listed accounts yourself and keep them out of
+appservice namespaces. Sign-up, including appservice registration and
+first-time SSO registration, cannot claim a listed ID. A config grant does not
+let an account run chat admin commands (including escaped commands). First-user
+promotion and last-admin protection still use admin-room membership only.
+Remove the ID from config to revoke the grant. Demotion while the ID is listed
+is refused; if the account is also in the admin room, remove its membership
+separately to revoke that grant too.
+
 ### External accounts are kept out of listed rooms
 
 An external account joins only rooms it is invited to, but nothing kept it out

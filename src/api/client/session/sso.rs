@@ -1073,6 +1073,8 @@ async fn register_user(
 	user_id: &UserId,
 	origin: &str,
 ) -> Result<RegistrationTerms> {
+	services.users.check_signup_name(user_id)?;
+
 	let terms = registration_terms(services, provider, userinfo).await?;
 
 	debug_info!(%user_id, external = terms.external, "Creating new user account...");
@@ -1491,6 +1493,10 @@ async fn try_user_id(
 		.await
 	{
 		debug_warn!(?username, "Username reserved by an appservice.");
+		return None;
+	}
+
+	if services.users.check_signup_name(&user_id).is_err() {
 		return None;
 	}
 

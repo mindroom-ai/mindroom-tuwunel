@@ -456,6 +456,21 @@ pub struct Config {
 	#[serde(default)]
 	pub external_forbidden_rooms: Vec<OwnedRoomOrAliasId>,
 
+	/// MindRoom: Local accounts with full server-admin permissions without
+	/// joining the admin room. This does not grant access to chat admin
+	/// commands, and external accounts never become admins.
+	///
+	/// List only accounts you provision and control yourself, outside appservice
+	/// namespaces. Remove an ID from this list to revoke its config grant. Remove
+	/// any existing admin-room membership separately.
+	///
+	/// For example `["@helper:example.com"]`.
+	///
+	/// reloadable: yes
+	/// default: []
+	#[serde(default)]
+	pub server_admins: Vec<OwnedUserId>,
+
 	/// MindRoom: Collapse multiple m.replace (edit) events per target into
 	/// only the latest one in `/sync` timeline responses.
 	///

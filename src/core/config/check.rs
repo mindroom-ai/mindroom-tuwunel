@@ -123,6 +123,15 @@ pub fn check(config: &Config) -> Result {
 	check_room_version(config)?;
 	check_identity_providers(config)?;
 	check_external_forbidden_rooms(config)?;
+	for user_id in &config.server_admins {
+		if user_id.server_name() != config.server_name
+			|| user_id.localpart() == config.admin.server_user_localpart.as_str()
+		{
+			return Err!(Config(
+				"server_admins", "{user_id} must be a local account other than the server user."
+			));
+		}
+	}
 	warn_oidc_registration_token(config);
 	warn_oidc_client_approval(config);
 	warn_native_auth_without_sign_in(config);

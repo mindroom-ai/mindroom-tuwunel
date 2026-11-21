@@ -22,6 +22,12 @@ pub(super) async fn auth_appservice(
 		return Err!(Request(Exclusive("User is not in namespace.")));
 	}
 
+	// A namespace can assert a user before an account exists, but it cannot
+	// claim a configured grant that has not been provisioned.
+	if services.admin.user_is_configured_admin(&user_id) && !services.users.exists(&user_id).await {
+		return Err!(Request(Forbidden("This user ID is reserved.")));
+	}
+
 	// MSC4326: appservices may assert a device_id alongside user_id.
 	let sender_device = request.query.device_id().map(OwnedDeviceId::from);
 

@@ -133,6 +133,8 @@ async fn create_account(services: crate::State, user_id: &UserId, created: bool)
 		return Ok(());
 	}
 
+	services.users.check_signup_name(user_id)?;
+
 	// An account created since the route's check is refused, not overwritten.
 	services
 		.users

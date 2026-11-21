@@ -308,6 +308,13 @@ pub async fn revoke_admin(&self, user_id: &UserId) -> Result<bool> {
 		return Err!(Request(InvalidParam("The server user's admin rights cannot be revoked.")));
 	}
 
+	if self.user_is_configured_admin(user_id) {
+		return Err!(Request(InvalidParam(
+			"This admin grant comes from server_admins. Remove the user from config; if \
+			 they are in the admin room, force them to leave it separately."
+		)));
+	}
+
 	let Some(room_id) = self.get_admin_room().await.present()? else {
 		return Ok(false);
 	};
