@@ -26,7 +26,9 @@ mod tests {
 
 	#[test]
 	fn thread_previews() -> Result {
-		Harness::new("mindroom_thread_previews", [])?.with_services(run)
+		Harness::new("mindroom_thread_previews", [])?.with_services(|s| run(s, true))?;
+		Harness::new("previews_without_edits", ["rooms.relations.bundle_edits=false".to_owned()])?
+			.with_services(|s| run(s, false))
 	}
 
 	struct ThreadCase {
@@ -37,10 +39,11 @@ mod tests {
 		newest_title: String,
 	}
 
-	async fn run(services: Arc<Services>) -> Result {
-		for (user, token) in
-			[(user_id!("@owner:localhost"), OWNER), (user_id!("@member:localhost"), MEMBER)]
-		{
+	async fn run(services: Arc<Services>, bundle_edits: bool) -> Result {
+		for (user, token) in [
+			(user_id!("@mindroom_aster:localhost"), OWNER),
+			(user_id!("@member:localhost"), MEMBER),
+		] {
 			services
 				.users
 				.create(user, Some("password"), None)
@@ -68,6 +71,10 @@ mod tests {
 		let base = format!("/_matrix/client/v3/rooms/{}", enc(&room));
 		request(&router, "POST", &format!("{base}/join"), MEMBER, json!({})).await;
 
+		streaming_replies(&router, &base, bundle_edits).await;
+		if !bundle_edits {
+			return Ok(());
+		}
 		let case = fresh_device(&router, &base).await;
 		let outer = endpoint_bundles(&services, &router, &base, &room, &case).await;
 		redactions(&router, &base, &case, &outer).await;
@@ -77,7 +84,6 @@ mod tests {
 		title_rule(&router).await;
 		backfilled_root(&services, &router, &base).await?;
 		large_room(&router, &base).await;
-		streaming_replies(&router, &base).await;
 		streaming_reply_budget(&router, &base).await;
 		marker_and_encryption(&router, &base, &case.root).await;
 		Ok(())
@@ -274,7 +280,7 @@ mod tests {
 			"PUT",
 			"/_matrix/client/v3/user/%40member%3Alocalhost/account_data/m.ignored_user_list",
 			MEMBER,
-			json!({"ignored_users":{"@owner:localhost":{}}}),
+			json!({"ignored_users":{"@mindroom_aster:localhost":{}}}),
 		)
 		.await;
 		let served = event(router, base, MEMBER, &own_root).await;
@@ -573,18 +579,30 @@ mod tests {
 		Ok(back_id)
 	}
 
-	async fn streaming_replies(router: &Router, base: &str) {
-		let root =
-			send(router, base, OWNER, "run-root", json!({"msgtype":"m.text","body":"question"}))
-				.await;
-		let reply = send(router, base, OWNER, "run-placeholder", stream_reply(&root)).await;
-		let mut topic = title(&root, "report");
-		topic[STREAM_STATUS] = json!("active");
-		send(router, base, OWNER, "run-title", topic).await;
-		let edit = send(router, base, OWNER, "run-edit", stream_edit(&reply, "RUNNING")).await;
+	async fn stream_root(router: &Router, base: &str, txn: &str) -> String {
+		send(router, base, OWNER, txn, json!({"msgtype":"m.text","body":"question"})).await
+	}
 
-		let served = event(router, base, MEMBER, &root).await;
-		let summary = &served["unsigned"]["m.relations"]["m.thread"];
+	async fn stream_summary(router: &Router, base: &str, root: &str) -> Value {
+		event(router, base, MEMBER, root).await["unsigned"]["m.relations"]["m.thread"].take()
+	}
+
+	async fn streaming_replies(router: &Router, base: &str, bundle_edits: bool) {
+		let root = stream_root(router, base, "run-root").await;
+		let mut paused = stream_reply(&root);
+		paused[STREAM_STATUS] = json!("approval_pending");
+		let reply = send(router, base, OWNER, "run-placeholder", paused).await;
+		send(router, base, OWNER, "run-title", title(&root, "report")).await;
+		let mut resumed = stream_edit(&reply, "RUNNING");
+		resumed["m.new_content"][STREAM_STATUS] = Value::Null;
+		resumed[STREAM_STATUS] = json!("RUNNING");
+		let edit = send(router, base, OWNER, "run-edit", resumed).await;
+		let mut invalid = stream_edit(&reply, "completed");
+		invalid["m.new_content"] = json!([]);
+		invalid[STREAM_STATUS] = json!("completed");
+		send(router, base, OWNER, "run-invalid", invalid).await;
+
+		let summary = stream_summary(router, base, &root).await;
 		assert_eq!(summary["io.mindroom.latest_reply"]["event_id"], reply);
 		assert!(summary.get(STREAMING_REPLY).is_none(), "do not duplicate the latest reply");
 
@@ -592,45 +610,49 @@ mod tests {
 		let mut file = thread(&root, "m.file", "report.txt");
 		file["url"] = json!("mxc://example.com/report");
 		let file = send(router, base, OWNER, "run-file", file).await;
-		let served = event(router, base, MEMBER, &root).await;
-		let summary = &served["unsigned"]["m.relations"]["m.thread"];
+		let summary = stream_summary(router, base, &root).await;
 		assert_eq!(summary["io.mindroom.latest_reply"]["event_id"], file);
 		let stream = &summary[STREAMING_REPLY];
 		assert_eq!(stream["event_id"], reply, "a later file must not hide the stream");
-		assert_eq!(stream["content"][STREAM_STATUS], "pending");
-		assert_eq!(stream["type"], "m.room.message");
 		assert!(stream.get("room_id").is_none());
 		let bundled_edit = &stream["unsigned"]["m.relations"]["m.replace"];
-		assert_eq!(bundled_edit["event_id"], edit);
-		assert_eq!(bundled_edit["content"]["m.new_content"][STREAM_STATUS], "RUNNING");
-		assert!(
-			bundled_edit["unsigned"]
-				.get("transaction_id")
-				.is_none()
-		);
+		let expected = bundle_edits.then_some(edit.as_str());
+		assert_eq!(bundled_edit["event_id"].as_str(), expected, "skip the unusable edit");
 
 		let terminal = stream_edit(&reply, "interrupted");
 		let mut cached = stream_edit(&reply, "streaming");
 		cached["m.new_content"]["io.mindroom.ai_run"] = json!({"version":1,"status":"CaChEd"});
 		for (txn, content) in [("run-terminal", terminal), ("run-cached", cached)] {
-			send(router, base, OWNER, txn, content).await;
-			let served = event(router, base, MEMBER, &root).await;
-			let summary = &served["unsigned"]["m.relations"]["m.thread"];
+			let edit = send(router, base, OWNER, txn, content).await;
+			let summary = stream_summary(router, base, &root).await;
 			assert!(summary.get(STREAMING_REPLY).is_none(), "{txn} ended the stream: {summary}");
+			// The typed index forgets redacted edits, including finishing edits.
+			redact(router, base, &edit, &format!("redact-{txn}")).await;
+		}
+		// Title, text and file already occupy three raw rows ahead of the stream.
+		for i in 0..17 {
+			let reference = json!({"msgtype":"m.text","body":"reference","m.relates_to":{"rel_type":"m.reference","event_id":root}});
+			send(router, base, OWNER, &format!("run-reference-{i}"), reference).await;
+			if i >= 15 {
+				let summary = stream_summary(router, base, &root).await;
+				let expected = (i == 15).then_some(reply.as_str());
+				assert_eq!(summary[STREAMING_REPLY]["event_id"].as_str(), expected, "row cutoff");
+			}
 		}
 	}
 
 	async fn streaming_reply_budget(router: &Router, base: &str) {
-		let root = send(
-			router,
-			base,
-			OWNER,
-			"run-budget-root",
-			json!({"msgtype":"m.text","body":"question"}),
-		)
-		.await;
+		let root = stream_root(router, base, "run-budget-root").await;
 		let active = send(router, base, OWNER, "run-budget-active", stream_reply(&root)).await;
 		send(router, base, OWNER, "run-budget-title", title(&root, "topic")).await;
+		request(router, "POST", &format!("{base}/leave"), MEMBER, json!({})).await;
+		for i in 0..4 {
+			send(router, base, OWNER, &format!("hidden-run-{i}"), stream_reply(&root)).await;
+		}
+		request(router, "POST", &format!("{base}/join"), MEMBER, json!({})).await;
+		for i in 0..4 {
+			send(router, base, MEMBER, &format!("untrusted-run-{i}"), stream_reply(&root)).await;
+		}
 		for i in 0..5 {
 			let reply =
 				send(router, base, OWNER, &format!("run-budget-reply-{i}"), stream_reply(&root))
@@ -644,21 +666,20 @@ mod tests {
 			)
 			.await;
 			if i >= 2 {
-				let served = event(router, base, MEMBER, &root).await;
-				let summary = &served["unsigned"]["m.relations"]["m.thread"];
-				if i == 2 {
-					assert_eq!(
-						summary[STREAMING_REPLY]["event_id"], active,
-						"fourth candidate is read"
-					);
-				} else {
-					assert!(
-						summary.get(STREAMING_REPLY).is_none(),
-						"only the four newest candidates are checked"
-					);
-				}
+				let summary = stream_summary(router, base, &root).await;
+				let expected = (i == 2).then_some(active.as_str());
+				assert_eq!(summary[STREAMING_REPLY]["event_id"].as_str(), expected);
 			}
 		}
+		let reply = send(router, base, OWNER, "edit-window-parent", stream_reply(&root)).await;
+		send(router, base, OWNER, "edit-window-end", stream_edit(&reply, "completed")).await;
+		send(router, base, OWNER, "edit-window-latest", thread(&root, "m.text", "latest")).await;
+		let wrong = stream_edit(&reply, "streaming");
+		for i in 0..50 {
+			send(router, base, MEMBER, &format!("wrong-edit-{i}"), wrong.clone()).await;
+		}
+		let summary = stream_summary(router, base, &root).await;
+		assert!(summary.get(STREAMING_REPLY).is_none());
 	}
 
 	async fn marker_and_encryption(router: &Router, base: &str, root: &str) {
