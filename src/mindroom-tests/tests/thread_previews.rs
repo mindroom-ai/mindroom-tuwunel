@@ -623,7 +623,7 @@ mod tests {
 
 		let mut wrapped = stream_reply(&root);
 		wrapped["m.new_content"] = json!({(STREAM_STATUS): "completed"});
-		send(router, base, OWNER, "run-wrapped", wrapped).await;
+		send(router, base, OWNER, "run-wrapped", wrapped.clone()).await;
 		send(router, base, OWNER, "run-text", thread(&root, "m.text", "see attached")).await;
 		let mut file = thread(&root, "m.file", "report.txt");
 		file["url"] = json!("mxc://example.com/report");
@@ -658,6 +658,12 @@ mod tests {
 				assert_eq!(summary[STREAMING_REPLY]["event_id"].as_str(), expected, "row cutoff");
 			}
 		}
+		wrapped[STREAM_STATUS] = json!("completed");
+		wrapped["m.new_content"][STREAM_STATUS] = json!("running");
+		let reply = send(router, base, OWNER, "run-nested", wrapped).await;
+		send(router, base, OWNER, "run-later", thread(&root, "m.text", "later")).await;
+		let summary = stream_summary(router, base, &root).await;
+		assert_eq!(summary[STREAMING_REPLY]["event_id"], reply);
 		Ok(())
 	}
 
@@ -691,22 +697,42 @@ mod tests {
 				assert_eq!(summary[STREAMING_REPLY]["event_id"].as_str(), expected);
 			}
 		}
-		let reply = send(router, base, OWNER, "edit-window-parent", stream_reply(&root)).await;
+		let mut paused = stream_reply(&root);
+		paused[STREAM_STATUS] = json!("approval_pending");
+		let reply = send(router, base, OWNER, "edit-window-parent", paused).await;
 		let terminal =
-			send(router, base, OWNER, "edit-window-end", stream_edit(&reply, "completed")).await;
-		send(router, base, OWNER, "edit-window-latest", thread(&root, "m.text", "latest")).await;
+			send(router, base, OWNER, "terminal", stream_edit(&reply, "completed")).await;
+		let broken = send(router, base, OWNER, "broken", stream_edit(&reply, "streaming")).await;
 		let timeline = &services.timeline;
-		let event_id = terminal.as_str().try_into()?;
+		let event_id = broken.as_str().try_into()?;
 		let id = timeline.get_pdu_id(event_id).await?;
-		services.db["pduid_pdu"].insert(id.as_bytes(), b"{}");
+		let broken_pdu = timeline.get_pdu_json_from_id(&id).await?;
+		let pdus = &services.db["pduid_pdu"];
+		pdus.insert(id.as_bytes(), b"{}");
+		let summary = stream_summary(router, base, &root).await;
+		let latest = &summary["io.mindroom.latest_reply"];
+		assert_eq!(latest["unsigned"]["m.relations"]["m.replace"]["event_id"], terminal);
+
+		let event_id = terminal.as_str().try_into()?;
+		let readable = timeline.get_pdu_id(event_id).await?;
+		let mut stored: Value = timeline.get_from_id(&readable).await?;
+		stored["content"]["m.new_content"][STREAM_STATUS] = json!("streaming");
+		pdus.insert(readable.as_bytes(), serde_json::to_vec(&stored)?);
+		send(router, base, OWNER, "edit-window-latest", thread(&root, "m.text", "latest")).await;
 		let summary = stream_summary(router, base, &root).await;
 		assert!(summary.get(STREAMING_REPLY).is_none());
+		let relations = &services.pdu_metadata;
+		relations.delete_typed_relation(&id, &broken_pdu).await;
+
 		let wrong = stream_edit(&reply, "streaming");
 		for i in 0..50 {
 			send(router, base, MEMBER, &format!("wrong-edit-{i}"), wrong.clone()).await;
+			if i >= 48 {
+				let summary = stream_summary(router, base, &root).await;
+				let expected = (i == 48).then_some(reply.as_str());
+				assert_eq!(summary[STREAMING_REPLY]["event_id"].as_str(), expected);
+			}
 		}
-		let summary = stream_summary(router, base, &root).await;
-		assert!(summary.get(STREAMING_REPLY).is_none());
 		Ok(())
 	}
 

@@ -680,7 +680,11 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			};
 			let field = if title { TITLE } else { REPLY };
 			let preview = !thread.contains_key(field);
-			let status = content[STREAM_STATUS].as_str();
+			let status = content["m.new_content"]
+				.get(STREAM_STATUS)
+				.filter(|status| !status.is_null())
+				.unwrap_or(&content[STREAM_STATUS])
+				.as_str();
 			let sender = child.sender();
 			let prefix = sender.localpart().get(..AGENT_PREFIX.len());
 			let candidate = search_stream
@@ -729,7 +733,7 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 				continue;
 			};
 			child.remove_private();
-			let mut edit = edit.filter(|_| bundle_edits && rows != usize::MAX);
+			let mut edit = edit.filter(|_| bundle_edits);
 			for pdu in std::iter::once(&mut child).chain(edit.as_mut().map(|(edit, _)| edit)) {
 				let mut unsigned = pdu.get_unsigned_as_value();
 				if let Some(object) = unsigned.as_object_mut() {
