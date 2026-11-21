@@ -21,7 +21,7 @@ mod client;
 mod fixture;
 mod timeline;
 
-const SERVICE_TOKEN: &str = "config-admin-service-token";
+const SERVICE_TOKEN: &str = "config-admin-service-token-0123456789";
 
 #[test]
 fn configured_admins_have_http_authority_but_not_room_membership() -> Result {
@@ -55,7 +55,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		"username": "operator", "password": "test-password", "auth": { "type": "m.login.dummy" },
 	})).await?;
 	let human = Client { token: response["access_token"].as_str().expect("registration token"), ..service };
-	let ordinary = register(services, "ordinary", "config-admin-ordinary-token").await?;
+	let ordinary = register(services, "ordinary", "config-admin-ordinary-token-0123456789").await?;
 	let admin_room = services.admin.get_admin_room().await?;
 	assert!(services.state_cache.is_joined(operator, &admin_room).await, "room bootstrap");
 	assert!(services.admin.user_is_last_admin(operator).await);
@@ -64,7 +64,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 	let status = async |user: &UserId| -> Result<Value> {
 		let url = format!("{base}/_synapse/admin/v1/users/{user}/admin");
-		Ok(human.request(Method::GET, &url, &json!(null)).await?.error_for_status()?.json().await?)
+		Ok(human.request(Method::GET, &url, &json!({})).await?.error_for_status()?.json().await?)
 	};
 	assert_eq!(status(&ordinary).await?["admin"], false);
 	assert_eq!(status(visitor).await?["admin"], false);
@@ -88,7 +88,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	register_appservice(services, &bridge).await?;
 	let bridge = Client { token: bridge.token, ..service };
 	let impersonation = format!("{base}/_synapse/admin/v1/users/{helper}/admin?user_id=@reserved_bridge:localhost");
-	assert_eq!(bridge.request(Method::GET, &impersonation, &json!(null)).await?.status().as_u16(), 403);
+	assert_eq!(bridge.request(Method::GET, &impersonation, &json!({})).await?.status().as_u16(), 403);
 	let bridge_refused = bridge.post_url(&bridge.url("register"), &json!({
 		"username": "reserved_bridge", "type": "m.login.application_service",
 	})).await?.json::<Value>().await?["errcode"] == "M_USER_IN_USE";
