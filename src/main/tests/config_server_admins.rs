@@ -290,14 +290,32 @@ async fn check_appservice_target_writes(
 			(&account_data, json!({"enabled": true})),
 			(&profile, json!({"displayname": "Example"})),
 		] {
-			let reply = appservice.request(Method::PUT, &appservice.url(path), &body).await?;
+			let reply = appservice
+				.request(Method::PUT, &appservice.url(path), &body)
+				.await?;
 			assert_eq!(reply.status().as_u16(), expected, "{path}");
 		}
 	}
-	assert_eq!(appservice.get(&format!("user/{unlisted}/account_data/{KIND}")).await?,
-		json!({"enabled": true}));
+	assert_eq!(
+		appservice
+			.get(&format!("user/{unlisted}/account_data/{KIND}"))
+			.await?,
+		json!({"enabled": true})
+	);
 	assert_eq!(services.profile.displayname(unlisted).await?, "Example");
-	assert!(services.account_data.get_raw(None, reserved, KIND).await.is_err_and(|e| e.is_not_found()));
-	assert!(services.profile.displayname(reserved).await.is_err_and(|e| e.is_not_found()));
+	assert!(
+		services
+			.account_data
+			.get_raw(None, reserved, KIND)
+			.await
+			.is_err_and(|e| e.is_not_found())
+	);
+	assert!(
+		services
+			.profile
+			.displayname(reserved)
+			.await
+			.is_err_and(|e| e.is_not_found())
+	);
 	Ok(())
 }
