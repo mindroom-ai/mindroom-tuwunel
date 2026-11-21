@@ -268,11 +268,12 @@
 ################################################################################
 # Server administration
 #
-# Controls how admin commands run and how their output is posted. Admins
-# are the accounts joined to the admin room, `#admins:<server_name>` (see
-# `[global.admin.room]`), where a text message starting with `!admin` or
-# the server user's ID (`@conduit:<server_name>` by default) runs a
-# command. Commands can also run from the terminal console (`--console`),
+# Controls how admin commands run and how their output is posted. Chat
+# commands require membership in `#admins:<server_name>` (see
+# `[global.admin.room]`); `server_admins` grants server admin permissions
+# without granting chat command access. In the admin room, a message starting
+# with `!admin` or the server user's ID (`@conduit:<server_name>` by default)
+# runs a command. Commands also run from the terminal console (`--console`),
 # at startup (`execute` or `--execute`), or on `SIGUSR2` (`signal_execute`).
 #
 # Tips:
@@ -387,7 +388,7 @@
 ################################################################################
 # Admin room
 #
-# The invite-only room whose members are the server's admins. It is created
+# The invite-only room whose members can run chat admin commands. It is created
 # the first time the server starts with an empty database, under the alias
 # `#admins:<server_name>`, with the server user in charge.
 # `!admin users make-user-admin <username>` joins a local account to it.

@@ -69,7 +69,8 @@ pub(crate) async fn admin_create_or_modify_route(
 	}
 
 	if body.admin == Some(true) {
-		services.users.external_admin_check(user_id).await?;
+		let users = &services.users;
+		users.external_admin_check(user_id).await?;
 	}
 
 	let profile = requested_profile(&body);

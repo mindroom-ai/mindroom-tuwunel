@@ -157,7 +157,9 @@ async fn check_admin_updates(
 
 async fn check_external_promotion(human: &Client<'_>, visitor: &UserId) -> Result {
 	let profile = &human.services.profile;
-	profile.set_displayname(visitor, Some("Visitor"), None).await?;
+	profile
+		.set_displayname(visitor, Some("Visitor"), None)
+		.await?;
 	human
 		.admin_api(
 			Method::PUT,
@@ -173,7 +175,9 @@ async fn check_external_promotion(human: &Client<'_>, visitor: &UserId) -> Resul
 async fn check_shared_secret_provisioning(signup: &Client<'_>) -> Result {
 	let username = "provisioned";
 	let password = "test-password";
-	let response = signup.admin_api(Method::GET, "v1/register", &json!({}), 200).await?;
+	let response = signup
+		.admin_api(Method::GET, "v1/register", &json!({}), 200)
+		.await?;
 	let response: Value = serde_json::from_str(&response)?;
 	let nonce = field(&response, "nonce")?;
 	let mut mac = Hmac::<Sha1>::new_from_slice(REGISTRATION_SECRET.as_bytes())
@@ -228,11 +232,18 @@ async fn check_reserved_signup(signup: &Client<'_>, helper: &UserId) -> Result {
 	assert!(!services.users.exists(reserved).await);
 
 	register_appservice(services, &bridge).await?;
-	assert!(services.users.exists(user_id!("@bridge:localhost")).await);
+	assert!(
+		services
+			.users
+			.exists(user_id!("@bridge:localhost"))
+			.await
+	);
 	let appservice = Client { token: bridge.token, ..*signup };
 	let unlisted = user_id!("@unlisted:localhost");
 	assert!(!services.users.exists(unlisted).await);
-	let whoami = appservice.get(&format!("account/whoami?user_id={unlisted}")).await?;
+	let whoami = appservice
+		.get(&format!("account/whoami?user_id={unlisted}"))
+		.await?;
 	assert_eq!(whoami["user_id"], unlisted.as_str());
 	let refusal = appservice
 		.get_url(&appservice.url(&format!("account/whoami?user_id={reserved}")))
@@ -240,11 +251,18 @@ async fn check_reserved_signup(signup: &Client<'_>, helper: &UserId) -> Result {
 	assert_eq!(refusal.status().as_u16(), 403);
 	assert_eq!(refusal.json::<Value>().await?["errcode"], "M_FORBIDDEN");
 	let form = json!({ "username": "reserved", "type": "m.login.application_service" });
-	let response: Value = appservice.post_url(&url, &form).await?.json().await?;
+	let response: Value = appservice
+		.post_url(&url, &form)
+		.await?
+		.json()
+		.await?;
 	assert_eq!(response["errcode"], "M_USER_IN_USE");
 	assert!(!services.users.exists(reserved).await);
 
-	let provisioned = Bridge { sender_localpart: helper.localpart(), ..bridge };
+	let provisioned = Bridge {
+		sender_localpart: helper.localpart(),
+		..bridge
+	};
 	register_appservice(services, &provisioned).await?;
 	Ok(())
 }

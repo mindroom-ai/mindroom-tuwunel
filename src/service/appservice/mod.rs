@@ -353,6 +353,7 @@ async fn admit_registration(
 		return Err!("Duplicate as_token: {holder} {id}");
 	}
 
+	let config = &self.services.config;
 	let appservice_user = &registration_info.sender;
 
 	if self
@@ -362,7 +363,7 @@ async fn admit_registration(
 		.await
 		.is_false()
 	{
-		if self.services.config.has_admin_grant(appservice_user) {
+		if config.has_admin_grant(appservice_user) {
 			return Err!("Appservice {id} sender {appservice_user} is reserved by server_admins");
 		}
 
@@ -372,7 +373,7 @@ async fn admit_registration(
 			.await?;
 	}
 
-	for user_id in &self.services.config.server_admins {
+	for user_id in &config.server_admins {
 		if registration_info.is_user_match(user_id) {
 			warn!(appservice = %id, %user_id, "Appservice namespace matches a configured server admin.");
 		}
