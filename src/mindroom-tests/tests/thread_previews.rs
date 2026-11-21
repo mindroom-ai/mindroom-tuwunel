@@ -311,7 +311,7 @@ mod tests {
 			latest.pointer("/unsigned/m.relations").is_none(),
 			"the fallback reply must not expose stored relations"
 		);
-		seed_unreadable_unsigned(services, &own_reply).await?;
+		let (id, saved) = seed_unreadable_unsigned(services, &own_reply).await?;
 		let list = request(router, "GET", &path, MEMBER, Value::Null).await;
 		let root = find_event(&list["chunk"], &own_root).expect("thread in list");
 		let summary = &root["unsigned"]["m.relations"]["m.thread"];
@@ -320,6 +320,7 @@ mod tests {
 			assert_eq!(summary[field]["event_id"], own_reply, "keep the reply in {field}");
 			assert!(summary[field].get("unsigned").is_none());
 		}
+		services.db["pduid_pdu"].insert(id.as_bytes(), serde_json::to_vec(&saved)?);
 		request(
 			router,
 			"PUT",

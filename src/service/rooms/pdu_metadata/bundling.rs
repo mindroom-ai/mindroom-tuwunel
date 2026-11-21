@@ -664,7 +664,8 @@ fn bundle_replacement(parent: &mut Pdu, mut edit: Pdu, user: &UserId) -> Result 
 	parent.set_replacement_bundle(&edit.into_format())
 }
 
-/// Strip stored relations from an already-selected embed, omitting unreadable unsigned.
+/// Remove stored `m.relations` from the embedded copy, dropping unreadable
+/// unsigned data. Fresh, requester-checked bundles may be added afterwards.
 fn strip_stored_relations(pdu: &mut Pdu) {
 	if pdu.unsigned.is_some() {
 		pdu.unsigned = pdu
