@@ -1154,7 +1154,8 @@ membership separately.
 Files: `src/core/config/`, `src/service/{admin,appservice,users}/`,
 `src/api/{admin,client,mas,oidc,router}/`, `docs/authentication/ldap.md`,
 `tuwunel-example.toml`; tests in
-`src/core/config/tests.rs`, `src/main/tests/{config_server_admins,sso_fallback_account}.rs`.
+`src/core/config/tests.rs` and
+`src/main/tests/{config_server_admin_availability,config_server_admins,sso_fallback_account}.rs`.
 
 ### External accounts are kept out of listed rooms
 

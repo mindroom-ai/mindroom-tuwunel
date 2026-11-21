@@ -26,7 +26,6 @@ mod client_get;
 mod fixture;
 mod timeline;
 
-const MAS_SECRET: &str = "config-admin-test-mas-secret";
 const REGISTRATION_SECRET: &str = "config-admin-test-shared-secret";
 
 #[test]
@@ -37,7 +36,6 @@ fn configured_admins_have_http_authority_but_not_room_membership() -> Result {
 			"admin.room.create=true",
 			"admin.escape_commands=true",
 			r#"admin.execute=["users create-user helper test-password"]"#,
-			&format!("authentication.mas_secret={MAS_SECRET:?}"),
 			"registration.enable=true",
 			"registration.grant_admin_to_first_user=true",
 			"registration.\
@@ -85,7 +83,6 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	assert!(!admin.user_is_last_admin(&helper).await);
 	assert!(!cache.is_joined(&helper, &admin_room).await);
 
-	check_availability(&human, &signup).await?;
 	check_admin_updates(&human, &service, &helper).await?;
 	check_external_promotion(&human, &visitor).await?;
 	check_shared_secret_provisioning(&signup).await?;
@@ -126,38 +123,6 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.await?;
 	assert!(admin.user_is_admin(reserved).await);
 	assert!(!cache.is_joined(reserved, &admin_room).await);
-	Ok(())
-}
-
-async fn check_availability(human: &Client<'_>, signup: &Client<'_>) -> Result {
-	let mas = Client { token: MAS_SECRET, ..*signup };
-	for username in ["unused", "reserved"] {
-		let probes = [
-			(signup, signup.url(&format!("register/available?username={username}"))),
-			(
-				human,
-				format!(
-					"{}/_synapse/admin/v1/username_available?username={username}",
-					human.base
-				),
-			),
-			(
-				&mas,
-				format!("{}/_synapse/mas/is_localpart_available?localpart={username}", mas.base),
-			),
-		];
-		for (client, url) in probes {
-			let response = client.get_url(&url).await?;
-			let status = response.status();
-			let body: Value = response.json().await?;
-			if username == "reserved" {
-				assert!(status.is_client_error(), "{url}: {status} {body}");
-				assert_eq!(body["errcode"], "M_USER_IN_USE", "{url}");
-			} else {
-				assert!(status.is_success(), "{url}: {status} {body}");
-			}
-		}
-	}
 	Ok(())
 }
 
