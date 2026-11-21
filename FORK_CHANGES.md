@@ -1135,15 +1135,14 @@ remote IDs and the server user are refused in config.
 
 Provision and control listed accounts yourself and keep them out of appservice
 namespaces; the server warns about namespace overlaps when loading or
-registering an appservice. Sign-up cannot claim a listed ID. Appservices
-cannot act as an unprovisioned listed user, including by targeting its account
-data or profile. Startup fails if an appservice registration names an
-unprovisioned listed sender. First-time SSO username mapping skips listed IDs even when an
-account already exists. Config grants do not authorize chat admin commands;
-first-user promotion and last-admin protection still count room members only.
-On a fresh server with first-user promotion enabled, console
-`users create-user` can join the first account to the admin room. Bootstrap a
-human first or provision the service account through shared-secret registration.
+registering an appservice. Sign-up and username availability checks treat
+listed IDs as reserved, but operators can still provision them directly.
+Appservices cannot act as an unprovisioned listed user, including by targeting
+its account data or profile. Startup fails if an appservice registration names
+an unprovisioned listed sender. First-time SSO username mapping skips listed
+IDs even when an account already exists. Config grants do not authorize chat
+admin commands. First-user promotion skips listed IDs; it and last-admin
+protection still count only admin-room members.
 
 LDAP does not change a listed user's admin-room membership. Shared-secret
 registration and v2 user updates with `admin: true` do not join a listed

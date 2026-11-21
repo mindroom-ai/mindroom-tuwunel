@@ -146,6 +146,7 @@ pub async fn full_register(
 		&& !is_appservice
 		&& !external
 		&& grant_first_user_admin
+		&& !self.services.config.has_admin_grant(user_id)
 		&& self
 			.services
 			.config
