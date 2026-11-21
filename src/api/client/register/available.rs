@@ -65,6 +65,8 @@ pub(crate) async fn get_register_available_route(
 			},
 		};
 
+	services.users.check_signup(&user_id)?;
+
 	// Check if username is creative enough
 	if services.users.exists(&user_id).await {
 		return Err!(Request(UserInUse("User ID is not available.")));

@@ -111,15 +111,20 @@ simple bind carries the user's password over that connection.
 
 ## Admin synchronization
 
-Setting `admin_filter` to a non-empty value turns the LDAP directory into the
-source of truth for who is a Tuwunel admin. On every successful LDAP login,
-Tuwunel runs a second search rooted at `admin_base_dn` (or `base_dn` if
-empty) using `admin_filter`. Membership in the result set is compared against
-the user's current admin status in Tuwunel:
+Setting `admin_filter` to a non-empty value lets LDAP manage admin-room
+membership for users not listed in `[global].server_admins`. When admin
+synchronization runs, Tuwunel uses a second search rooted at `admin_base_dn`
+(or `base_dn` if empty) with `admin_filter`. Membership in the result set is
+compared against the user's current admin status in Tuwunel:
 
 - In LDAP admin set, not a Tuwunel admin → granted admin.
 - Not in LDAP admin set, currently a Tuwunel admin → admin revoked.
 - Otherwise → no change.
+
+LDAP leaves the admin-room membership of listed users unchanged. Leaving the
+LDAP admin group does not revoke a config grant. Remove the ID from
+`server_admins` and restart to revoke that grant; remove any existing
+admin-room membership separately.
 
 Two examples:
 
@@ -146,8 +151,11 @@ Nextcloud, and Jellyfin behave). The account is registered with origin
 never consulted for an LDAP user, so they can only log in by re-authenticating
 against the directory.
 
-Subsequent logins reuse the existing account and only update admin status
-if `admin_filter` is configured.
+IDs listed in `server_admins` are reserved: an operator must provision those
+accounts before their first LDAP login.
+
+Subsequent logins reuse the existing account. Admin synchronization follows
+the rules above.
 
 ### Accounts that already existed locally
 

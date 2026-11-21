@@ -11,12 +11,13 @@ use super::{OwnedRoomOrAliasId, ServerUserLocalpart, true_fn};
 
 /// Server administration
 ///
-/// Controls how admin commands run and how their output is posted. Admins
+/// Controls how admin commands run and how their output is posted. Chat admins
 /// are the accounts joined to the admin room, `#admins:<server_name>` (see
 /// `[global.admin.room]`), where a text message starting with `!admin` or
 /// the server user's ID (`@conduit:<server_name>` by default) runs a
 /// command. Commands can also run from the terminal console (`--console`),
 /// at startup (`execute` or `--execute`), or on `SIGUSR2` (`signal_execute`).
+/// `server_admins` grants server-admin permissions, not chat-command access.
 ///
 /// Tips:
 /// - On a new server the first account to register becomes an admin while
@@ -161,7 +162,7 @@ pub struct Admin {
 
 /// Admin room
 ///
-/// The invite-only room whose members are the server's admins. It is created
+/// The invite-only room whose members can run chat admin commands. It is created
 /// the first time the server starts with an empty database, under the alias
 /// `#admins:<server_name>`, with the server user in charge.
 /// `!admin users make-user-admin <username>` joins a local account to it.
@@ -172,7 +173,7 @@ pub struct Admin {
 /// - The server finds the room through its `#admins:<server_name>` alias and
 ///   treats it as the admin room only while the server user is joined. With
 ///   `create` off, the alias removed or the server user gone from the room,
-///   there is no admin room and only the server user is an admin.
+///   there is no admin room. The server user and `server_admins` keep their grants.
 #[expect(rustdoc::broken_intra_doc_links, rustdoc::bare_urls)]
 #[derive(Clone, Debug, Deserialize)]
 #[config_example_generator(

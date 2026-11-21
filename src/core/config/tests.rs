@@ -866,6 +866,51 @@ client_secret = "oauth-secret"
 }
 
 #[test]
+fn server_admins_only_accepts_local_accounts_other_than_the_server_user() {
+	for (user, valid) in [
+		("@helper:example.com", true),
+		("@helper:elsewhere.example", false),
+		("@_server:example.com", false),
+		("@Helper:example.com", false),
+	] {
+		let config = config_from_toml(&format!(
+			r#"[global]
+server_name = "example.com"
+server_admins = ["{user}"]
+[global.admin]
+server_user_localpart = "_server"
+"#
+		))
+		.expect("server admins config parses");
+		let result = check(&config);
+		if valid {
+			result.expect("local service account is valid");
+		} else {
+			let error = result.expect_err("invalid server admin must be refused");
+			assert!(error.to_string().contains("server_admins"), "{error}");
+		}
+	}
+}
+
+#[test]
+fn server_admins_changes_require_restart() {
+	let none = config_from_toml("[global]\nserver_name = \"example.com\"\n").unwrap();
+	let listed = config_from_toml(
+		r#"[global]
+server_name = "example.com"
+server_admins = ["@helper:example.com"]
+"#,
+	)
+	.unwrap();
+
+	reload(&listed, &listed).expect("an unchanged list can be reloaded");
+	for (old, new) in [(&none, &listed), (&listed, &none)] {
+		let error = reload(old, new).expect_err("changing the admin list requires restart");
+		assert!(error.to_string().contains("server_admins"), "{error}");
+	}
+}
+
+#[test]
 fn check_refuses_bad_external_forbidden_rooms() {
 	let config = |rooms: &str, rule_rooms: &str, external: bool| {
 		config_from_toml(&format!(

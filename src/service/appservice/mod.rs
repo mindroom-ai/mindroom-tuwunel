@@ -156,9 +156,10 @@ impl Service {
 	/// Loads one registration into the runtime registry at startup.
 	///
 	/// An id already loaded is refused, as is an `as_token` another id holds,
-	/// and a missing sender user is created. An unknown scope is logged and
-	/// ignored, so a registration written for a later release still loads; so
-	/// is an invalid proxy claim, or one an earlier registration holds.
+	/// and a missing sender user is created unless reserved by `server_admins`.
+	/// An unknown scope is logged and ignored, so a registration written for a
+	/// later release still loads; so is an invalid proxy claim, or one an
+	/// earlier registration holds.
 	pub async fn load_appservice(&self, registration: Registration) -> Result {
 		let registration_info =
 			RegistrationInfo::new(registration, self.services.globals.server_name())?;
@@ -432,7 +433,8 @@ fn claim_holder<'a>(
 		.map(|holder| holder.registration.id.as_str())
 }
 
-/// Refuses an `as_token` another id holds, and creates a missing sender user.
+/// Refuses an `as_token` another id holds or a missing sender reserved by
+/// `server_admins`, and creates a missing sender user.
 ///
 /// The caller inserts the registration under the same write guard.
 #[implement(Service)]
@@ -456,6 +458,7 @@ async fn admit_registration(
 		return Err!("Duplicate as_token: {holder} {id}");
 	}
 
+	let config = &self.services.config;
 	let appservice_user = &registration_info.sender;
 
 	if self
@@ -465,10 +468,20 @@ async fn admit_registration(
 		.await
 		.is_false()
 	{
+		if config.has_admin_grant(appservice_user) {
+			return Err!("Appservice {id} sender {appservice_user} is reserved by server_admins");
+		}
+
 		self.services
 			.users
 			.create(appservice_user, None, None)
 			.await?;
+	}
+
+	for user_id in &config.server_admins {
+		if registration_info.is_user_match(user_id) {
+			warn!(appservice = %id, %user_id, "Appservice namespace matches a configured server admin.");
+		}
 	}
 
 	Ok(())

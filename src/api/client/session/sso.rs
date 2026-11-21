@@ -1068,6 +1068,8 @@ async fn register_user(
 	user_id: &UserId,
 	origin: &str,
 ) -> Result<RegistrationTerms> {
+	services.users.check_signup(user_id)?;
+
 	let terms = registration_terms(services, provider, userinfo).await?;
 
 	debug_info!(%user_id, external = terms.external, "Creating new user account...");
@@ -1473,6 +1475,8 @@ async fn try_user_id(
 		.await
 		.inspect_err(|e| debug_warn!(?username, error = %e, "Unavailable username."))
 		.ok()?;
+
+	services.users.check_signup(&user_id).ok()?;
 
 	let existed = services.users.exists(&user_id).await;
 	if existed {

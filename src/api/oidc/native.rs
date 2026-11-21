@@ -475,6 +475,7 @@ async fn do_register(
 		return Err!(Request(UserInUse("That username is taken.")));
 	}
 
+	services.users.check_signup(&user_id)?;
 	services.users.check_creation(&user_id).await?;
 
 	// Acceptance is checked before any token is consumed, so a missing checkbox

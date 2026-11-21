@@ -103,6 +103,7 @@ fn sso_fallback_account() -> Result {
 	let options = [
 		// The capture below is the global subscriber, in the server's place.
 		"logging.enable=false",
+		r#"server_admins=["@service_account:localhost"]"#,
 		"authentication.oidc.registration_allowed_redirect_hosts=[\"client.example\"]",
 		&option(IDP, "client_id", IDP),
 		&option(IDP, "client_secret", "test-secret"),
@@ -509,6 +510,16 @@ async fn reserved_usernames(services: &Services, base: &str, client: &Client) ->
 
 	assert_ne!(account, frank, "the trusted provider does not adopt frank's account");
 	assert_eq!(fallback_localpart(&grace_identity), account.localpart());
+
+	let riley = unique_id_sub((&provider, "riley"))?;
+	let response = sign_in(client, base, CALLBACK, "riley", "service_account").await?;
+	assert_eq!(fallback_localpart(&riley), signed_in(services, &response).await?.localpart());
+	assert!(
+		!services
+			.users
+			.exists(tuwunel_core::ruma::user_id!("@service_account:localhost"))
+			.await
+	);
 
 	Ok(())
 }

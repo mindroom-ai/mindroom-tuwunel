@@ -68,7 +68,7 @@ pub(crate) async fn admin_register_route(
 		})
 		.await?;
 
-	if body.admin {
+	if body.admin && !services.config.has_admin_grant(&user_id) {
 		services.admin.make_user_admin(&user_id).await?;
 	}
 

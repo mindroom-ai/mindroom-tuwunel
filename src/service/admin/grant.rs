@@ -311,6 +311,19 @@ async fn invite_new_admin(
 	Ok(())
 }
 
+/// Refuse to demote a config-listed ID, even before its account exists.
+#[implement(super::Service)]
+pub fn check_admin_revocation(&self, user_id: &UserId) -> Result {
+	if self.services.config.has_admin_grant(user_id) {
+		return Err!(Request(InvalidParam(
+			"This admin grant comes from server_admins. Remove the ID from config and restart. \
+			 If joined to the admin room, force the user to leave separately."
+		)));
+	}
+
+	Ok(())
+}
+
 /// Demote an admin, removing its rights.
 ///
 /// Returns whether there was a grant to revoke. A user holding no invite, knock
@@ -325,6 +338,8 @@ pub async fn revoke_admin(&self, user_id: &UserId) -> Result<bool> {
 	if user_id == self.services.globals.server_user {
 		return Err!(Request(InvalidParam("The server user's admin rights cannot be revoked.")));
 	}
+
+	self.check_admin_revocation(user_id)?;
 
 	let Some(room_id) = self.get_admin_room().await.present()? else {
 		return Ok(false);

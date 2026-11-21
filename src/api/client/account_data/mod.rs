@@ -24,6 +24,7 @@ pub(crate) use self::{
 	set_global_account_data::set_global_account_data_route,
 	set_room_account_data::set_room_account_data_route,
 };
+use crate::Ruma;
 
 /// Largest `m.ignored_user_list` content stored, in bytes.
 ///
@@ -41,6 +42,23 @@ fn assert_account_data_owner(
 ) -> Result {
 	if sender_user != user_id
 		&& !appservice_info.is_some_and(|registration| registration.is_user_match(user_id))
+	{
+		return Err!(Request(Forbidden("{message}")));
+	}
+
+	Ok(())
+}
+
+pub(super) async fn require_owner<T: Sync>(
+	services: &Services,
+	body: &Ruma<T>,
+	user: &UserId,
+	message: &str,
+) -> Result {
+	assert_account_data_owner(body.sender_user(), user, body.appservice_info.as_ref(), message)?;
+	if body.sender_user() != user
+		&& services.config.has_admin_grant(user)
+		&& !services.users.exists(user).await
 	{
 		return Err!(Request(Forbidden("{message}")));
 	}
