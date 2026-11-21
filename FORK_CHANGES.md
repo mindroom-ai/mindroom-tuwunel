@@ -2108,7 +2108,7 @@ native_client_ids = ["chat.mindroom.app"]
 
 The shared read-time thread bundler adds three optional fields beside the
 standard `unsigned.m.relations.m.thread` fields, so a new device can list
-threads with their titles and real last replies without opening each one:
+threads with titles, last replies and active streams without opening them:
 
 - `io.mindroom.title`: the newest title event in the thread.
 - `io.mindroom.latest_reply`: the newest direct thread event that is not a
@@ -2148,8 +2148,8 @@ Reads skip redacted, ignored-user, forbidden-server and erased events and
 enforce the requester's history visibility for each candidate and each edit.
 A redacted root keeps previews of its live children.
 
-Backfilled children and edits are not indexed. Redaction removes a finishing
-edit from the typed index, so an earlier streaming state can reappear.
+Children and edits that themselves arrive by backfill are not indexed. Redacting
+a finishing edit removes its index row, so an earlier stream can reappear.
 
 One newest-first walk serves all previews. Title and latest reply can look
 through **50 native relation rows**; streaming checks only the newest **20**,
