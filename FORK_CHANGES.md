@@ -2142,7 +2142,9 @@ visible edit decides whether the reply is still `active`, `pending`,
 `running` or `streaming` (case-insensitive), even with edit bundles off.
 An edit needs an object `m.new_content`; its metadata takes precedence over
 the wrapper. A version-1 `io.mindroom.ai_run` status of `completed`, `cached`,
-`error` or `cancelled` cancels the streaming hint.
+`error` or `cancelled` cancels the streaming hint. When usable edits share
+`origin_server_ts`, the server selects the later local PDU; Chat selects the
+greater event ID, so their streaming states can disagree.
 
 Reads skip redacted, ignored-user, forbidden-server and erased events and
 enforce the requester's history visibility for each candidate and each edit.
@@ -2150,6 +2152,8 @@ A redacted root keeps previews of its live children.
 
 Children and edits that themselves arrive by backfill are not indexed. Redacting
 a finishing edit removes its index row, so an earlier stream can reappear.
+A non-missing edit read error suppresses the streaming hint and drops the
+edit bundle from `io.mindroom.latest_reply` and `io.mindroom.title`.
 
 One newest-first walk serves all previews. Title and latest reply can look
 through **50 native relation rows**; streaming checks only the newest **20**,

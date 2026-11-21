@@ -22,7 +22,7 @@ use tuwunel_core::{
 	result::LogErr,
 	utils::{
 		BoolExt,
-		stream::{ReadyExt, TryIgnore, WidebandExt},
+		stream::{ReadyExt, WidebandExt},
 		u64_from_u8,
 	},
 };
@@ -433,7 +433,7 @@ fn replacement_children<'a>(
 		.relatesto_typed
 		.rev_raw_keys_from(seek.as_slice())
 		.inspect_err(record_error)
-		.ignore_err()
+		.ready_filter_map(Result::ok)
 		.ready_take_while(move |key| key.starts_with(&prefix))
 		.take(limit)
 		.inspect(move |_| {
