@@ -663,16 +663,14 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 				None
 			};
 			let streaming = if candidate {
-				stream_budget -= 1;
 				let streaming = match &edit {
 					| Some(edit) => edit.get_content::<Value>().is_ok_and(|content| {
 						preview_streaming(&content, &content["m.new_content"])
 					}),
 					| None => preview_streaming(&content, &Value::Null),
 				};
-				if streaming {
-					stream_budget = 0;
-				}
+				// Resolve the search even when latest_reply already names this event.
+				stream_budget = if streaming { 0 } else { stream_budget.saturating_sub(1) };
 				streaming
 			} else {
 				false
