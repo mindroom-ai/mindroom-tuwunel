@@ -461,12 +461,12 @@ pub struct Config {
 	/// commands, and external accounts never become admins.
 	///
 	/// List only accounts you provision and control yourself, outside appservice
-	/// namespaces. Remove an ID from this list to revoke its config grant. Remove
-	/// any existing admin-room membership separately.
+	/// namespaces. Listing an account does not remove its existing admin-room
+	/// membership or stop its sync. Remove that membership separately.
 	///
-	/// For example `["@helper:example.com"]`.
+	/// This list is read at startup. To revoke the config grant, remove the ID
+	/// and restart. For example, list `["@helper:example.com"]`.
 	///
-	/// reloadable: yes
 	/// default: []
 	#[serde(default)]
 	pub server_admins: Vec<OwnedUserId>,

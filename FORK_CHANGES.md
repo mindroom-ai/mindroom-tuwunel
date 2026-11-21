@@ -1124,22 +1124,29 @@ Upstream has no such option. Files: `src/database/maps.rs`,
 
 ### Configured server admins do not need to join the admin room
 
-`server_admins` in `[global]` is an optional list of local Matrix user IDs.
-For example, `server_admins = ["@helper:example.com"]` grants full server-admin
-permissions to the provisioned `@helper:example.com` account without joining
-it to `#admins` or giving it that room's power levels. It no longer receives
-admin-room messages through normal sync, but its admin permissions still allow
-it to read those messages through the admin API. External accounts never gain
-admin access, and config rejects remote IDs and the server user.
+`server_admins` in `[global]` is an optional, startup-only list of local
+Matrix user IDs. For example, `server_admins = ["@helper:example.com"]` gives
+that account full server-admin permissions once provisioned, without joining
+it to `#admins`. Listing an existing member does not remove its membership or
+stop it syncing the room; remove membership separately. Nonmembers do not
+receive the room in normal sync, but admins can still read it through the
+admin API. An absent ID or external account gains no privileges. Invalid or
+remote IDs and the server user are refused in config.
 
-Provision and control the listed accounts yourself and keep them out of
-appservice namespaces. Sign-up, including appservice registration and
-first-time SSO registration, cannot claim a listed ID. A config grant does not
-let an account run chat admin commands (including escaped commands). First-user
-promotion and last-admin protection still use admin-room membership only.
-Remove the ID from config to revoke the grant. Demotion while the ID is listed
-is refused; if the account is also in the admin room, remove its membership
-separately to revoke that grant too.
+Provision and control listed accounts yourself and keep them out of appservice
+namespaces; the server warns about namespace overlaps at startup. Sign-up
+cannot claim a listed ID, appservices cannot act as an unprovisioned listed
+user, and first-time SSO username mapping skips listed IDs even when an
+account already exists. Config grants do not authorize chat admin commands;
+first-user promotion and last-admin protection still count room members only.
+LDAP does not change a listed user's admin-room membership. A v2 user update
+with `admin: true` leaves that membership alone; `admin: false` is refused
+before any write. Remove the ID and restart to revoke the config grant, and
+remove any existing admin-room membership separately.
+
+Files: `src/core/config/`, `src/service/{admin,appservice,users}/`,
+`src/api/{admin,client,mas,oidc,router}/`, `tuwunel-example.toml`; tests in
+`src/core/config/tests.rs`, `src/main/tests/{config_server_admins,sso_fallback_account}.rs`.
 
 ### External accounts are kept out of listed rooms
 

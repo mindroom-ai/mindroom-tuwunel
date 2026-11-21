@@ -153,6 +153,12 @@ impl Service {
 		self.admit_registration(&registrations, &registration_info)
 			.await?;
 
+		for user_id in &self.services.config.server_admins {
+			if registration_info.is_user_match(user_id) {
+				warn!(appservice = %id, %user_id, "Appservice namespace matches a configured server admin.");
+			}
+		}
+
 		registrations.insert(id.clone(), registration_info);
 
 		Ok(())

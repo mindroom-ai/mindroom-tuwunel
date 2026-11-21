@@ -282,7 +282,10 @@ impl Service {
 			return false;
 		}
 
-		if include_config && self.services.config.has_admin_grant(user_id) {
+		if include_config
+			&& self.services.config.has_admin_grant(user_id)
+			&& self.services.users.exists(user_id).await
+		{
 			return true;
 		}
 

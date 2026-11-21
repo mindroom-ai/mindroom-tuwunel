@@ -73,8 +73,10 @@ pub(super) async fn ldap_login(
 			.await?;
 	}
 
-	// only perform admin add/remove check if admin_filter is set
-	if !services.config.ldap.admin_filter.is_empty() {
+	// LDAP manages room grants, not privileges fixed by server_admins.
+	if !services.config.ldap.admin_filter.is_empty()
+		&& !services.config.has_admin_grant(lowercased_user_id)
+	{
 		let is_tuwunel_admin = services
 			.admin
 			.user_is_admin(lowercased_user_id)

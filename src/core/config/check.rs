@@ -55,6 +55,10 @@ pub fn reload(old: &Config, new: &Config) -> Result {
 		));
 	}
 
+	if new.server_admins != old.server_admins {
+		return Err!(Config("server_admins", "Changing server_admins requires a restart."));
+	}
+
 	if new.http.ip_source != old.http.ip_source {
 		return Err!(Config(
 			"http.ip_source",
@@ -126,10 +130,11 @@ pub fn check(config: &Config) -> Result {
 	for user_id in &config.server_admins {
 		if user_id.server_name() != config.server_name
 			|| user_id.localpart() == config.admin.server_user_localpart.as_str()
+			|| user_id.validate_strict().is_err()
 		{
 			return Err!(Config(
 				"server_admins",
-				"{user_id} must be a local account other than the server user."
+				"Expected a valid local user ID other than the server user: {user_id}."
 			));
 		}
 	}

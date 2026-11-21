@@ -172,7 +172,8 @@ pub struct Admin {
 /// - The server finds the room through its `#admins:<server_name>` alias and
 ///   treats it as the admin room only while the server user is joined. With
 ///   `create` off, the alias removed or the server user gone from the room,
-///   there is no admin room and only the server user is an admin.
+///   there is no admin room. The server user and accounts granted admin
+///   permissions by `server_admins` do not need the room.
 #[expect(rustdoc::broken_intra_doc_links, rustdoc::bare_urls)]
 #[derive(Clone, Debug, Deserialize)]
 #[config_example_generator(
