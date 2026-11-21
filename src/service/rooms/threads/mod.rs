@@ -921,7 +921,7 @@ fn unreadable_only(error: Error) -> Result {
 		.map_or(Ok(()), Err)
 }
 
-fn is_thread_reply(pdu: &impl Event) -> bool {
+pub(super) fn is_thread_reply(pdu: &impl Event) -> bool {
 	pdu.get_content()
 		.is_ok_and(|content: ExtractRelatesTo| matches!(content.relates_to, Relation::Thread(_)))
 }

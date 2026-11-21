@@ -7,7 +7,11 @@ use ruma::{
 	events::{AnySyncMessageLikeEvent, TimelineEventType, room::encrypted::Relation},
 	serde::Raw,
 };
-use serde_json::{Value, value::to_raw_value};
+use serde::Deserialize;
+use serde_json::{
+	Value,
+	value::{RawValue, to_raw_value},
+};
 use tuwunel_core::{
 	Result,
 	arrayvec::ArrayVec,
@@ -27,6 +31,7 @@ use super::{
 	Service,
 	typed_relations::{CHILD_COUNT_OFFSET, KEY_LEN, Tag, prefix},
 };
+use crate::rooms::threads::is_thread_reply;
 
 type Seek = ArrayVec<u8, KEY_LEN>;
 
@@ -367,7 +372,7 @@ async fn newest_replacement(&self, parent: &Pdu) -> Option<Pdu> {
 		.await
 		.ok()?;
 
-	let replacements = self.replacement_children(parent, parent_id, usize::MAX);
+	let replacements = self.replacement_children(parent, parent_id, usize::MAX, None);
 
 	pin_mut!(replacements);
 	replacements.next().await
@@ -391,7 +396,7 @@ pub async fn replacement_ids(&self, parent: &EventId) -> Vec<OwnedEventId> {
 		return Vec::new();
 	};
 
-	self.replacement_children(&parent, parent_id.into(), usize::MAX)
+	self.replacement_children(&parent, parent_id.into(), usize::MAX, None)
 		.map(|child| child.event_id().to_owned())
 		.collect()
 		.await
@@ -406,6 +411,7 @@ fn replacement_children<'a>(
 	parent: &'a Pdu,
 	parent_id: PduId,
 	limit: usize,
+	mut rows: Option<&'a mut usize>,
 ) -> impl Stream<Item = Pdu> + Send + 'a {
 	let shortroomid = parent_id.shortroomid;
 	let prefix = prefix(shortroomid, parent_id.count, Tag::Replace);
@@ -421,6 +427,11 @@ fn replacement_children<'a>(
 		.ignore_err()
 		.ready_take_while(move |key| key.starts_with(&prefix))
 		.take(limit)
+		.inspect(move |_| {
+			if let Some(rows) = &mut rows {
+				**rows = rows.saturating_add(1);
+			}
+		})
 		.map(|key| u64_from_u8(&key[CHILD_COUNT_OFFSET..KEY_LEN]))
 		.map(PduCount::from_unsigned)
 		.map(move |count| (shortroomid, count))
@@ -575,11 +586,22 @@ const STREAM_STATUS: &str = "io.mindroom.stream_status";
 
 /// Thread relation rows, and edit rows per preview, read for the previews.
 const PREVIEW_ROWS: usize = 50;
+const STREAM_ROWS: usize = 20;
 const STREAM_CANDIDATES: usize = 4;
+const AGENT_PREFIX: &str = "mindroom_";
+const ACTIVE_STREAM: &[&str] = &["active", "pending", "running", "streaming"];
+const TERMINAL_STREAM: &[&str] = &[
+	"complete",
+	"completed",
+	"done",
+	"error",
+	"failed",
+	"stopped",
+	"cancelled",
+	"interrupted",
+];
 
-/// MindRoom previews beside the standard thread summary: the newest title,
-/// the newest other thread event, and the newest still-streaming reply if
-/// different. Unencrypted rooms only; a field outside the window is omitted.
+/// MindRoom's title, latest reply and active stream previews (unencrypted rooms only).
 #[implement(Service)]
 async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result {
 	let services = &self.services;
@@ -606,39 +628,55 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			.ignored_users(user)
 			.await
 			.unwrap_or_default();
-		let shortroomid = PduId::from(root_id).shortroomid;
-		// Boxed: the walk stays open across the per-candidate reads below.
-		let mut replies = Box::pin(
-			services
-				.threads
-				.thread_replies(root_id, PREVIEW_ROWS)
-				.ignore_err()
-				.ready_filter(|(_, pdu)| {
-					pdu.room_id() == root.room_id()
-						&& pdu.state_key().is_none()
-						&& *pdu.kind() != TimelineEventType::RoomEncrypted
-				}),
-		);
+		let PduId { shortroomid, count } = root_id.into();
+		// Drive raw rows without prefetching PDUs beyond the streaming window.
+		let rows = self.relation_counts(count, None, Direction::Backward, PREVIEW_ROWS);
+		pin_mut!(rows);
 		let bundle_edits = config.rooms.relations.bundle_edits;
 		let mut have_previews = false;
 		let mut stream_budget = STREAM_CANDIDATES;
-		while (!have_previews || stream_budget > 0)
-			&& let Some((count, mut child)) = replies.next().await
+		let mut stream_rows = STREAM_ROWS;
+		while (!have_previews || (stream_budget > 0 && stream_rows > 0))
+			&& let Some(row) = rows.next().await
 		{
+			let search_stream = stream_budget > 0 && stream_rows > 0;
+			stream_rows = stream_rows.saturating_sub(1);
+			let Ok(count) = row else { continue };
+			let id = PduId { shortroomid, count };
+			let timeline = &services.timeline;
+			let child = timeline.get_pdu_from_id(&id.into()).await;
+			let Ok(mut child) = child else { continue };
+			if child.room_id() != root.room_id()
+				|| child.state_key().is_some()
+				|| *child.kind() == TimelineEventType::RoomEncrypted
+				|| child.is_redacted()
+				|| !is_thread_reply(&child)
+			{
+				continue;
+			}
 			// Timeline content is stored as canonical JSON. Once the other
 			// previews are filled, ordinary replies need no content decode.
 			if have_previews && !child.content().get().contains(STREAM_STATUS) {
 				continue;
 			}
 			let content = child.get_content::<Value>().unwrap_or_default();
-			let marker = &content["io.mindroom.thread_summary"];
-			// Truthy in JavaScript. Canonical JSON rules out floats.
-			let title = content["msgtype"] == "m.notice"
-				&& !(marker.is_null() || *marker == false || *marker == 0 || *marker == "");
+			let title = {
+				let marker = &content["io.mindroom.thread_summary"];
+				// Truthy in JavaScript, as both clients test the marker. Events
+				// hold no floats (canonical JSON), so 0 is the only zero.
+				content["msgtype"] == "m.notice"
+					&& !(marker.is_null() || *marker == false || *marker == 0 || *marker == "")
+			};
 			let field = if title { TITLE } else { REPLY };
 			let preview = !thread.contains_key(field);
-			let candidate =
-				stream_budget > 0 && !title && active_stream_status(&content[STREAM_STATUS]);
+			let status = content[STREAM_STATUS].as_str();
+			let sender = child.sender();
+			let prefix = sender.localpart().get(..AGENT_PREFIX.len());
+			let candidate = search_stream
+				&& !title
+				&& status.is_some_and(|s| !s.is_empty() && !status_in(s, TERMINAL_STREAM))
+				&& sender.server_name() == user.server_name()
+				&& prefix.is_some_and(|p| p.eq_ignore_ascii_case(AGENT_PREFIX));
 			if !(preview || candidate)
 				|| ignored.ignored_users.contains_key(child.sender())
 				|| config.is_forbidden_remote_server_name(child.sender().server_name())
@@ -649,32 +687,27 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 
 			// Stream detection needs the current edit even if clients aren't
 			// configured to receive edit bundles. Reuse it for the preview.
+			let mut edit_rows = 0_usize;
 			let edit = if candidate || (preview && bundle_edits) {
 				let edits = self
-					.replacement_children(&child, PduId { shortroomid, count }, PREVIEW_ROWS)
+					.replacement_children(&child, id, PREVIEW_ROWS, Some(&mut edit_rows))
 					.filter_map(async |edit| {
+						let active = edit_streaming(&edit, candidate)?;
 						self.preview_visible(user, &edit)
 							.await
-							.then_some(edit)
+							.then_some((edit, active))
 					});
 				pin_mut!(edits);
 				edits.next().await
 			} else {
 				None
 			};
-			let streaming = if candidate {
-				let streaming = match &edit {
-					| Some(edit) => edit.get_content::<Value>().is_ok_and(|content| {
-						preview_streaming(&content, &content["m.new_content"])
-					}),
-					| None => preview_streaming(&content, &Value::Null),
-				};
-				// Resolve the search even when latest_reply already names this event.
+			let original = || edit_rows < PREVIEW_ROWS && original_streaming(&child);
+			let active = edit.as_ref().map(|(_, active)| *active);
+			let streaming = candidate && active.unwrap_or_else(original);
+			if candidate {
 				stream_budget = if streaming { 0 } else { stream_budget.saturating_sub(1) };
-				streaming
-			} else {
-				false
-			};
+			}
 
 			let field = if preview {
 				field
@@ -683,12 +716,13 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			} else {
 				continue;
 			};
+			child.remove_private();
 			let mut child_unsigned = child.get_unsigned_as_value();
 			if let Some(object) = child_unsigned.as_object_mut() {
 				object.remove("m.relations");
 				child.unsigned = Some(to_raw_value(&child_unsigned)?.into());
 			}
-			if bundle_edits && let Some(mut edit) = edit {
+			if bundle_edits && let Some((mut edit, _)) = edit {
 				edit.remove_private_unless_sender(Some(user));
 				child.set_replacement_bundle(&edit.into_format())?;
 			}
@@ -701,34 +735,55 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 	Ok(())
 }
 
-/// MindRoom Chat's active stream statuses. Terminal and unknown statuses
-/// both fail this allowlist.
-fn active_stream_status(status: &Value) -> bool {
-	status.as_str().is_some_and(|status| {
-		["active", "pending", "running", "streaming"]
-			.iter()
-			.any(|active| status.eq_ignore_ascii_case(active))
-	})
+#[derive(Clone, Copy, Default, Deserialize)]
+struct StreamContent<'a> {
+	#[serde(rename = "io.mindroom.stream_status", borrow)]
+	status: Option<&'a RawValue>,
+	#[serde(rename = "io.mindroom.ai_run", borrow)]
+	run: Option<&'a RawValue>,
+	#[serde(rename = "m.new_content", borrow)]
+	new_content: Option<&'a RawValue>,
 }
 
-/// Mirror Chat's edit metadata precedence and version-1 terminal AI runs.
-fn preview_streaming(content: &Value, new_content: &Value) -> bool {
-	const AI_RUN: &str = "io.mindroom.ai_run";
-	let status = &new_content[STREAM_STATUS];
-	let status = if status.is_null() {
-		&content[STREAM_STATUS]
-	} else {
-		status
+fn original_streaming(child: &Pdu) -> bool {
+	serde_json::from_str(child.content().get())
+		.is_ok_and(|original| preview_streaming(original, StreamContent::default()))
+}
+
+fn edit_streaming(edit: &Pdu, candidate: bool) -> Option<bool> {
+	let outer: StreamContent<'_> = serde_json::from_str(edit.content().get()).ok()?;
+	let inner = outer.new_content?.get();
+	inner.starts_with('{').then_some(())?;
+	Some(candidate && preview_streaming(outer, serde_json::from_str(inner).ok()?))
+}
+
+fn preview_streaming(outer: StreamContent<'_>, inner: StreamContent<'_>) -> bool {
+	let terminal_run = |raw: &RawValue| {
+		#[derive(Deserialize)]
+		struct Run<'a> {
+			version: u64,
+			#[serde(borrow)]
+			status: Option<&'a RawValue>,
+		}
+		raw.get().starts_with('{').then_some(())?;
+		let run: Run<'_> = serde_json::from_str(raw.get()).ok()?;
+		(run.version == 1)
+			.then(|| raw_status(run.status, &["completed", "cached", "error", "cancelled"]))
 	};
-	let run = &new_content[AI_RUN];
-	let run = if run["version"] == 1 { run } else { &content[AI_RUN] };
-	active_stream_status(status)
-		&& !(run["version"] == 1
-			&& run["status"].as_str().is_some_and(|status| {
-				["completed", "cached", "error", "cancelled"]
-					.iter()
-					.any(|terminal| status.eq_ignore_ascii_case(terminal))
-			}))
+	let run = inner.run.and_then(terminal_run);
+	let terminal = run.or_else(|| outer.run.and_then(terminal_run));
+	terminal != Some(true) && raw_status(inner.status.or(outer.status), ACTIVE_STREAM)
+}
+
+fn raw_status(raw: Option<&RawValue>, statuses: &[&str]) -> bool {
+	raw.and_then(|raw| serde_json::from_str::<&str>(raw.get()).ok())
+		.is_some_and(|status| status_in(status, statuses))
+}
+
+fn status_in(status: &str, statuses: &[&str]) -> bool {
+	statuses
+		.iter()
+		.any(|expected| status.eq_ignore_ascii_case(expected))
 }
 
 /// A preview child or edit is shown only when the requester may see it and
