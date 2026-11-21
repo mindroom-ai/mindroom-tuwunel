@@ -21,6 +21,8 @@ mod tests {
 
 	const OWNER: &str = "preview-owner-token-01234567890123456789";
 	const MEMBER: &str = "preview-member-token-0123456789012345678";
+	const STREAMING_REPLY: &str = "io.mindroom.streaming_reply";
+	const STREAM_STATUS: &str = "io.mindroom.stream_status";
 
 	#[test]
 	fn thread_previews() -> Result {
@@ -75,6 +77,8 @@ mod tests {
 		title_rule(&router).await;
 		backfilled_root(&services, &router, &base).await?;
 		large_room(&router, &base).await;
+		streaming_replies(&router, &base).await;
+		streaming_reply_budget(&router, &base).await;
 		marker_and_encryption(&router, &base, &case.root).await;
 		Ok(())
 	}
@@ -569,7 +573,96 @@ mod tests {
 		Ok(back_id)
 	}
 
+	async fn streaming_replies(router: &Router, base: &str) {
+		let root =
+			send(router, base, OWNER, "run-root", json!({"msgtype":"m.text","body":"question"}))
+				.await;
+		let reply = send(router, base, OWNER, "run-placeholder", stream_reply(&root)).await;
+		let mut topic = title(&root, "report");
+		topic[STREAM_STATUS] = json!("active");
+		send(router, base, OWNER, "run-title", topic).await;
+		let edit = send(router, base, OWNER, "run-edit", stream_edit(&reply, "RUNNING")).await;
+
+		let served = event(router, base, MEMBER, &root).await;
+		let summary = &served["unsigned"]["m.relations"]["m.thread"];
+		assert_eq!(summary["io.mindroom.latest_reply"]["event_id"], reply);
+		assert!(summary.get(STREAMING_REPLY).is_none(), "do not duplicate the latest reply");
+
+		send(router, base, OWNER, "run-text", thread(&root, "m.text", "see attached")).await;
+		let mut file = thread(&root, "m.file", "report.txt");
+		file["url"] = json!("mxc://example.com/report");
+		let file = send(router, base, OWNER, "run-file", file).await;
+		let served = event(router, base, MEMBER, &root).await;
+		let summary = &served["unsigned"]["m.relations"]["m.thread"];
+		assert_eq!(summary["io.mindroom.latest_reply"]["event_id"], file);
+		let stream = &summary[STREAMING_REPLY];
+		assert_eq!(stream["event_id"], reply, "a later file must not hide the stream");
+		assert_eq!(stream["content"][STREAM_STATUS], "pending");
+		assert_eq!(stream["type"], "m.room.message");
+		assert!(stream.get("room_id").is_none());
+		let bundled_edit = &stream["unsigned"]["m.relations"]["m.replace"];
+		assert_eq!(bundled_edit["event_id"], edit);
+		assert_eq!(bundled_edit["content"]["m.new_content"][STREAM_STATUS], "RUNNING");
+		assert!(
+			bundled_edit["unsigned"]
+				.get("transaction_id")
+				.is_none()
+		);
+
+		let terminal = stream_edit(&reply, "interrupted");
+		let mut cached = stream_edit(&reply, "streaming");
+		cached["m.new_content"]["io.mindroom.ai_run"] = json!({"version":1,"status":"CaChEd"});
+		for (txn, content) in [("run-terminal", terminal), ("run-cached", cached)] {
+			send(router, base, OWNER, txn, content).await;
+			let served = event(router, base, MEMBER, &root).await;
+			let summary = &served["unsigned"]["m.relations"]["m.thread"];
+			assert!(summary.get(STREAMING_REPLY).is_none(), "{txn} ended the stream: {summary}");
+		}
+	}
+
+	async fn streaming_reply_budget(router: &Router, base: &str) {
+		let root = send(
+			router,
+			base,
+			OWNER,
+			"run-budget-root",
+			json!({"msgtype":"m.text","body":"question"}),
+		)
+		.await;
+		let active = send(router, base, OWNER, "run-budget-active", stream_reply(&root)).await;
+		send(router, base, OWNER, "run-budget-title", title(&root, "topic")).await;
+		for i in 0..5 {
+			let reply =
+				send(router, base, OWNER, &format!("run-budget-reply-{i}"), stream_reply(&root))
+					.await;
+			send(
+				router,
+				base,
+				OWNER,
+				&format!("run-budget-edit-{i}"),
+				stream_edit(&reply, "completed"),
+			)
+			.await;
+			if i >= 2 {
+				let served = event(router, base, MEMBER, &root).await;
+				let summary = &served["unsigned"]["m.relations"]["m.thread"];
+				if i == 2 {
+					assert_eq!(
+						summary[STREAMING_REPLY]["event_id"], active,
+						"fourth candidate is read"
+					);
+				} else {
+					assert!(
+						summary.get(STREAMING_REPLY).is_none(),
+						"only the four newest candidates are checked"
+					);
+				}
+			}
+		}
+	}
+
 	async fn marker_and_encryption(router: &Router, base: &str, root: &str) {
+		let streaming = send(router, base, OWNER, "before-encryption", stream_reply(root)).await;
 		// The clients take a notice with any truthy marker, such as the older
 		// `true`, as a title, so it never becomes the conversational preview.
 		let reply =
@@ -652,7 +745,10 @@ mod tests {
 			"a redacted root must retain its live title"
 		);
 
-		// Encryption suppresses both fields, even for prior plaintext history.
+		let served = event(router, base, MEMBER, root).await;
+		let summary = &served["unsigned"]["m.relations"]["m.thread"];
+		assert_eq!(summary[STREAMING_REPLY]["event_id"], streaming);
+		// Encryption suppresses all previews, even for prior plaintext history.
 		request(
 			router,
 			"PUT",
@@ -670,6 +766,10 @@ mod tests {
 		assert!(
 			summary.get("io.mindroom.latest_reply").is_none(),
 			"encrypted rooms omit conversational previews"
+		);
+		assert!(
+			summary.get(STREAMING_REPLY).is_none(),
+			"encrypted rooms omit streaming previews"
 		);
 	}
 
@@ -707,6 +807,18 @@ mod tests {
 
 	fn thread(root: &str, kind: &str, body: &str) -> Value {
 		json!({"msgtype":kind,"body":body,"m.relates_to":{"rel_type":"m.thread","event_id":root}})
+	}
+	fn stream_reply(root: &str) -> Value {
+		let mut reply = thread(root, "m.text", "working");
+		reply[STREAM_STATUS] = json!("pending");
+		reply
+	}
+	fn stream_edit(reply: &str, status: &str) -> Value {
+		json!({
+			"msgtype":"m.text","body":"* report",
+			"m.new_content":{"msgtype":"m.text","body":"report",(STREAM_STATUS):status},
+			"m.relates_to":{"rel_type":"m.replace","event_id":reply}
+		})
 	}
 	fn title(root: &str, body: &str) -> Value {
 		let mut content = thread(root, "m.notice", body);
