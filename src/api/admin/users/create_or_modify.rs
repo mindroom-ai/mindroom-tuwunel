@@ -68,6 +68,10 @@ pub(crate) async fn admin_create_or_modify_route(
 		refuse_server_user(services, user_id)?;
 	}
 
+	if body.admin == Some(true) {
+		services.users.external_admin_check(user_id).await?;
+	}
+
 	let profile = requested_profile(&body);
 	let credentials = write_credentials(services, &body, created);
 

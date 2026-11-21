@@ -1134,18 +1134,22 @@ admin API. An absent ID or external account gains no privileges. Invalid or
 remote IDs and the server user are refused in config.
 
 Provision and control listed accounts yourself and keep them out of appservice
-namespaces; the server warns about namespace overlaps at startup. Sign-up
-cannot claim a listed ID, appservices cannot act as an unprovisioned listed
-user, and first-time SSO username mapping skips listed IDs even when an
+namespaces; the server warns about namespace overlaps when loading or
+registering an appservice. Sign-up cannot claim a listed ID. Appservices
+cannot create an unprovisioned listed sender or act as an unprovisioned
+listed user. First-time SSO username mapping skips listed IDs even when an
 account already exists. Config grants do not authorize chat admin commands;
 first-user promotion and last-admin protection still count room members only.
-LDAP does not change a listed user's admin-room membership. A v2 user update
-with `admin: true` leaves that membership alone; `admin: false` is refused
-before any write. Remove the ID and restart to revoke the config grant, and
-remove any existing admin-room membership separately.
+LDAP does not change a listed user's admin-room membership. Shared-secret
+registration and v2 user updates with `admin: true` do not join a listed
+account to the admin room. A v2 user update refuses external accounts with
+`admin: true` and listed IDs with `admin: false` before any write. Remove the
+ID and restart to revoke the config grant, and remove any existing admin-room
+membership separately.
 
 Files: `src/core/config/`, `src/service/{admin,appservice,users}/`,
-`src/api/{admin,client,mas,oidc,router}/`, `tuwunel-example.toml`; tests in
+`src/api/{admin,client,mas,oidc,router}/`, `docs/authentication/ldap.md`,
+`tuwunel-example.toml`; tests in
 `src/core/config/tests.rs`, `src/main/tests/{config_server_admins,sso_fallback_account}.rs`.
 
 ### External accounts are kept out of listed rooms
