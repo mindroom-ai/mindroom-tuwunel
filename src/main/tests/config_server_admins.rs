@@ -250,6 +250,7 @@ async fn check_reserved_signup(signup: &Client<'_>, helper: &UserId) -> Result {
 		.await?;
 	assert_eq!(refusal.status().as_u16(), 403);
 	assert_eq!(refusal.json::<Value>().await?["errcode"], "M_FORBIDDEN");
+	check_appservice_target_writes(&appservice, unlisted, reserved).await?;
 	let form = json!({ "username": "reserved", "type": "m.login.application_service" });
 	let response: Value = appservice
 		.post_url(&url, &form)
@@ -264,5 +265,32 @@ async fn check_reserved_signup(signup: &Client<'_>, helper: &UserId) -> Result {
 		..bridge
 	};
 	register_appservice(services, &provisioned).await?;
+	Ok(())
+}
+
+async fn check_appservice_target_writes(
+	appservice: &Client<'_>,
+	unlisted: &UserId,
+	reserved: &UserId,
+) -> Result {
+	const KIND: &str = "org.example.settings";
+	let services = appservice.services;
+	for (user, expected) in [(unlisted, 200), (reserved, 403)] {
+		assert!(!services.users.exists(user).await);
+		let account_data = format!("user/{user}/account_data/{KIND}");
+		let profile = format!("profile/{user}/displayname");
+		for (path, body) in [
+			(&account_data, json!({"enabled": true})),
+			(&profile, json!({"displayname": "Example"})),
+		] {
+			let reply = appservice.request(Method::PUT, &appservice.url(path), &body).await?;
+			assert_eq!(reply.status().as_u16(), expected, "{path}");
+		}
+	}
+	assert_eq!(appservice.get(&format!("user/{unlisted}/account_data/{KIND}")).await?,
+		json!({"enabled": true}));
+	assert_eq!(services.profile.displayname(unlisted).await?, "Example");
+	assert!(services.account_data.get_raw(None, reserved, KIND).await.is_err_and(|e| e.is_not_found()));
+	assert!(services.profile.displayname(reserved).await.is_err_and(|e| e.is_not_found()));
 	Ok(())
 }
