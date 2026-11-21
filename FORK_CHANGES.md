@@ -2128,21 +2128,24 @@ native_client_ids = ["chat.mindroom.app"]
 
 ### Fresh-device thread titles and conversational previews
 
-The shared read-time thread bundler adds two optional fields beside the
+The shared read-time thread bundler adds three optional fields beside the
 standard `unsigned.m.relations.m.thread` fields, so a new device can list
-threads with their titles and real last replies without opening each one:
+threads with titles, last replies and active streams without opening them:
 
 - `io.mindroom.title`: the newest title event in the thread.
 - `io.mindroom.latest_reply`: the newest direct thread event that is not a
   title.
+- `io.mindroom.streaming_reply`: the newest direct non-title reply still
+  streaming, omitted if it is already `io.mindroom.latest_reply` or none
+  qualify. Ordinary replies sent mid-stream do not hide the active reply.
 
-Both are full client events without `room_id`, like `latest_event`. With
+All three are full client events without `room_id`, like `latest_event`. With
 `rooms.relations.bundle_edits` on, each carries its newest valid `m.replace`
 edit (same sender and type, not redacted) that the requester may see; a
 rejected newer edit falls back to an earlier valid one. `latest_event`, `count`
 and `current_user_participated` are unchanged. The fields reach `/messages`,
 `/context`, `/event`, `/relations`, `/threads` and the v3 and sliding sync
-timelines through the shared bundler. Encrypted rooms receive neither field.
+timelines through the shared bundler. Encrypted rooms receive no previews.
 
 A title is a direct, non-state, unencrypted `m.thread` event with
 `msgtype: m.notice` and an `io.mindroom.thread_summary` that JavaScript treats
@@ -2154,17 +2157,34 @@ Every other direct thread event is a conversational reply, including an
 `null`. A marker inside an edit's `m.new_content` never makes a title:
 clients read the title only from `io.mindroom.title`.
 
+Streaming candidates are agent replies (`mindroom_` localpart on the
+requester's server) with an original nonempty, non-terminal string
+`io.mindroom.stream_status`, including `approval_pending`. The newest valid
+visible edit decides whether the reply is still `active`, `pending`,
+`running` or `streaming` (case-insensitive), even with edit bundles off.
+An edit needs an object `m.new_content`. For originals and edits alike,
+a non-null status in `m.new_content` takes precedence over the outer status.
+Version-1 `io.mindroom.ai_run` statuses `completed`, `cached`, `error` and
+`cancelled` suppress the streaming hint. When usable edits share
+`origin_server_ts`, the server selects the later local PDU; Chat selects the
+greater event ID, so their streaming states can disagree.
+
 Reads skip redacted, ignored-user, forbidden-server and erased events and
 enforce the requester's history visibility for each candidate and each edit.
 A redacted root keeps previews of its live children.
 
-Cost: each served root reads its native relation rows (every event relating
-to the root: thread events, reactions, edits of the root, rich replies)
-newest first and stops as soon as both fields are found, reading at most
-**50 rows**, plus at most 50 edit rows per selected preview. A field whose
-event is not within those 50 rows is omitted; clients fall back to opening
-the thread. There is no preview index, migration, purge hook or
-configuration option.
+Children and edits that themselves arrive by backfill are not indexed. Redacting
+a finishing edit removes its index row, so an earlier stream can reappear.
+A non-missing edit read error suppresses the streaming hint for that reply.
+
+One newest-first walk serves all previews. Title and latest reply can look
+through **50 native relation rows**; streaming checks only the newest **20**,
+including non-thread rows, and at most **four** eligible agent replies.
+Already-filled previews do not trigger more visibility or edit checks for
+ordinary replies, but the walk still loads their PDUs. Each lookup reads at
+most 50 typed edit rows. If none is usable at the limit, the candidate is
+unresolved; original content is used only when the edit scan ends sooner.
+There is no preview index, migration, purge hook or configuration option.
 
 Live relations to backfilled events now enter the native relation index
 (`add_relation`), so a backfilled root's live replies are found. Such
