@@ -1090,8 +1090,9 @@ before a claim's lookup is seen; one registered after it has the same result as
 one registered just after the link, and registering an appservice never
 revisits accounts already claimed in its namespace. So operators register an
 exclusive namespace, or a wider one, before its new ghost accounts exist or
-before setting the option. To widen one live, they pause the provider's first
-sign-ins, let callbacks under way finish, check the existing links in the newly
+before setting the option. To widen one live, they pause first sign-ins on
+every provider that can name an account in the newly reserved range, let
+callbacks under way finish, check the existing links in the newly
 reserved range, register, then resume. Unsetting the option is no such pause:
 it does not wait for claims already past their lookup, and first sign-ins
 meanwhile get ordinary naming instead.

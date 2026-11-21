@@ -501,8 +501,9 @@ namespace. So:
 
 - Register an exclusive namespace, or a wider one, before its new ghost
   accounts exist or before setting `claim_accounts_of_appservice`.
-- To widen an exclusive namespace on a live server, pause this provider's first
-  sign-ins, let callbacks already under way finish, check the existing links in
+- To widen an exclusive namespace on a live server, pause first sign-ins on
+  every provider that can name an account in the newly reserved range (the
+  namespace is server-wide), let callbacks already under way finish, check the existing links in
   the newly reserved range, register the wider namespace, then resume.
 - Unsetting `claim_accounts_of_appservice` is no such pause: it does not wait
   for claims already past their lookup, and first sign-ins meanwhile get

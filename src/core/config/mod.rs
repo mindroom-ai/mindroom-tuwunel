@@ -2070,7 +2070,8 @@ pub struct IdentityProvider {
 	/// registering an appservice never revisits accounts already claimed.
 	/// Register an exclusive namespace, or a wider one, before its new ghost
 	/// accounts exist or this option is set. To widen one on a live server,
-	/// pause this provider's first sign-ins, let callbacks under way finish,
+	/// pause first sign-ins on every provider that can name an account in the
+	/// newly reserved range, let callbacks under way finish,
 	/// check the existing links in the newly reserved range, register, then
 	/// resume. Unsetting this option is no such pause: it does not wait for
 	/// claims past their lookup, and gives first sign-ins ordinary naming
