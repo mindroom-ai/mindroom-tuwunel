@@ -697,9 +697,7 @@ mod tests {
 				assert_eq!(summary[STREAMING_REPLY]["event_id"].as_str(), expected);
 			}
 		}
-		let mut paused = stream_reply(&root);
-		paused[STREAM_STATUS] = json!("approval_pending");
-		let reply = send(router, base, OWNER, "edit-window-parent", paused).await;
+		let reply = send(router, base, OWNER, "edit-window-parent", stream_reply(&root)).await;
 		let terminal =
 			send(router, base, OWNER, "terminal", stream_edit(&reply, "completed")).await;
 		let broken = send(router, base, OWNER, "broken", stream_edit(&reply, "streaming")).await;
