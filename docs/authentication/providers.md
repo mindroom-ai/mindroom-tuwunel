@@ -94,7 +94,7 @@ provider links that provider instead.
 | `trusted` | `false` | Inverts user matching: instead of registering a new account when claims conflict with existing users, Tuwunel finds the first matching user and grants access to it. **Only set this for providers you self-host and fully control. Never use with public providers (GitHub, GitLab, Google, etc.); it enables account takeover.** For migrated databases, prefer durable bulk adoption or individual association to temporarily enabling this option. A trusted provider's `email` claim is also bound to a new account when it sends no `email_verified` claim. |
 | `assigned_accounts` | `{}` | Assigns existing local accounts to people by the address in their `email` claim, matched ignoring ASCII case. A listed address's first sign-in gets that account or is refused, never another account. **Only for an app restricted to your own organization, or with `assigned_accounts_claims`; whoever controls a listed address gets the account.** See [Assigning accounts created before the first sign-in](#assigning-accounts-created-before-the-first-sign-in). |
 | `assigned_accounts_claims` | `{}` | Claims every sign-in of an address `assigned_accounts` lists must all hold, such as `{ hd = "example.com" }`, named and matched as in `registration_rules`. A listed address's sign-in that lacks one is refused, whatever account it would get, linked ones included while they send the listed address. It refuses sign-ins only, so set it before the app admits accounts outside your organization. See [Assigning accounts created before the first sign-in](#assigning-accounts-created-before-the-first-sign-in). |
-| `claim_accounts_of_appservice` | unset | The ID of an appservice whose accounts their people claim: a first sign-in gets the existing account `userid_claims` (required) name, when that appservice registered it with `m.login.application_service` (recorded as the account is created) and still has it in its namespace, the account has no password and is not deactivated, locked, an admin or linked, and the sign-in holds `assigned_accounts_claims`. A sign-in whose `email_verified` is false claims nothing, and one whose name is read from `email` needs `email_verified` to be true. Any other sign-in is mapped as without it. Not with `trusted`. **Only the name is compared, never the address's domain.** See [Claiming accounts created before the first sign-in](#claiming-accounts-created-before-the-first-sign-in). |
+| `claim_accounts_of_appservice` | unset | The ID of an appservice whose accounts their people claim: a first sign-in gets the existing account `userid_claims` (required) name, when that appservice registered it with `m.login.application_service` (recorded as the account is created) and still has it in its namespace, the name is in no appservice's exclusive namespace, the account has no password and is not deactivated, locked, an admin or linked, and the sign-in holds `assigned_accounts_claims`. A sign-in whose `email_verified` is false claims nothing, and one whose name is read from `email` needs `email_verified` to be true. Any other sign-in is mapped as without it. Not with `trusted`. **Only the name is compared, never the address's domain.** See [Claiming accounts created before the first sign-in](#claiming-accounts-created-before-the-first-sign-in). |
 | `registration_rules` | `[]` | Rules a sign-in must meet to create an account, each a set of claims, the rooms a new account meeting it joins, and whether that account is external (joins only by invite). Empty, registration works as before. See [Letting only some people register](#letting-only-some-people-register). |
 | `unique_id_fallbacks` | `true` | When no claim maps cleanly to an available username, generate a unique random localpart as a fallback. Set to `false` on private servers where random usernames are undesirable — a misconfiguration will produce an error instead. |
 | `registration` | `true` | Whether this provider can create new Matrix accounts. Set to `false` to restrict the provider to existing users only. |
@@ -439,8 +439,11 @@ is linked to no account, has no listed address and no admin association gets
 the account when all of this holds:
 
 - the record names the configured appservice, that appservice is registered
-  and the account is in its `users` namespace now, exclusive or not, and the
-  account is not an appservice's own user;
+  and the account is in its `users` namespace now, and the account is not an
+  appservice's own user;
+- the name is in no appservice's exclusive namespace, such as one for an
+  import appservice's ghost accounts: name selection skips names reserved at
+  lookup, for a claim as for a new account's name;
 - the account has no password or other sign-in system's marker, and is not
   deactivated, locked, a server admin, linked to any identity (also one adopted
   from another server's database) or listed in an `assigned_accounts`;
@@ -473,10 +476,39 @@ as `alice@example.com`. Use this only when:
 - `userid_claims` lists only claims the organization assigns.
 
 Otherwise list the accounts in `assigned_accounts`. Keep bots and bridged
-users out of the appservice's namespace, or make them with another appservice.
+users in an exclusive namespace, which is never claimed, or make them with
+another appservice.
 The appservice can act as any account in its namespace, also after its person
 has claimed it, so guard its token accordingly. A reload applies to the next
 sign-in.
+
+**Upgrading from v2.0.0-mindroom.4 or .5:** those releases also claimed an
+account whose name is in an exclusive namespace. Accounts meant to be claimed
+must now be in a namespace that is not exclusive. A deployment that keeps them
+in an exclusive one sees their first sign-ins refused the claim. Each then gets
+the account it would get without the option: ordinary naming tries the later
+names `userid_claims` gives and by default ends at a generated fallback name;
+with `unique_id_fallbacks = false` it may refuse the sign-in, linking nothing.
+Only when ordinary naming succeeds is the identity linked to that account, for
+good, until an admin deletes the link (`!admin query oauth delete`).
+
+Known limits: the exclusive namespaces are checked when the sign-in looks the
+account up, as ordinary naming checks them, and are not held until the link is
+stored. An appservice registered before that lookup is seen. One registered
+after it has the same result as one registered just after the link is stored,
+and registering an appservice never revisits accounts already claimed in its
+namespace. So:
+
+- Register an exclusive namespace, or a wider one, before its new ghost
+  accounts exist or before setting `claim_accounts_of_appservice`.
+- To widen an exclusive namespace on a live server, pause first sign-ins on
+  every provider that can name an account in the newly reserved range (the
+  namespace is server-wide), let callbacks already under way finish, check the existing links in
+  the newly reserved range, register the wider namespace, then resume.
+- Unsetting `claim_accounts_of_appservice` is no such pause: it does not wait
+  for claims already past their lookup, and first sign-ins meanwhile get
+  ordinary naming instead, linked for good.
+- Claims made before the registration are never revisited.
 
 ### Letting only some people register
 

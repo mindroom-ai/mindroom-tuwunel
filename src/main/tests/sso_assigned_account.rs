@@ -853,9 +853,11 @@ async fn claimed(services: &Services, base: &str, client: &Client) -> Result {
 /// claims; with an address the provider says is unverified or says nothing
 /// about; spelled with a non-ASCII lookalike; for an account that has a
 /// password, is linked to another identity, deactivated, a server admin,
-/// locked, or listed in `assigned_accounts`. A listed address still gets its
-/// listed account, not the one its name gives. `provenance` has the accounts
-/// the appservice did not register.
+/// locked, or listed in `assigned_accounts`; or for a ghost account the
+/// appservice registered in its own exclusive namespace, or in a namespace of
+/// its own that only another appservice has exclusive. A listed address still
+/// gets its listed account, not the one its name gives. `provenance` has the
+/// accounts the appservice did not register.
 async fn premade(services: &Services, base: &str, client: &Client) -> Result {
 	let hosted = |localpart: &str| format!("{localpart}:example.com");
 	let mut made = Vec::new();
@@ -913,6 +915,20 @@ async fn premade(services: &Services, base: &str, client: &Client) -> Result {
 
 		assert_eq!(signed_in(services, &response).await?, *account);
 	}
+
+	// A ghost the appservice registered in its exclusive namespace is not
+	// claimed, though the record names the appservice.
+	let ghost = register_ahead(services, base, "ghost-gil").await?;
+
+	unclaimed(services, client, base, "verified-ghost-gil", &hosted("ghost-gil")).await?;
+	as_made(services, &ghost).await?;
+
+	// Nor is one it registered in a namespace of its own that is not
+	// exclusive, when another appservice has the name exclusive.
+	let shade = register_ahead(services, base, "shade-sid").await?;
+
+	unclaimed(services, client, base, "verified-shade-sid", &hosted("shade-sid")).await?;
+	as_made(services, &shade).await?;
 
 	// A non-ASCII lookalike of the name, which lowercases to it, claims nothing.
 	unclaimed(services, client, base, "verified-kelvin", &hosted("made-KELVINit")).await?;
@@ -1195,18 +1211,23 @@ async fn refused_keeping_link(
 ///
 /// The first one's namespace for the assigned people is exclusive, as a
 /// migration's often is: SSO never names a new account in it, so only the
-/// assignment signs the people in to theirs. The names `made-…` are in a
-/// namespace that is not exclusive, of both appservices: anything may register
-/// there.
+/// assignment signs the people in to theirs. So is its namespace for its ghost
+/// accounts, `ghost-…`. The names `made-…` are in a namespace that is not
+/// exclusive, of both appservices: anything may register there. The names
+/// `shade-…` are in the first one's namespace, not exclusive, and in the
+/// other's, exclusive.
 async fn register_appservice(services: &Services) -> Result {
 	let assigned = "^@(alice|carol|dave|gina|hank|kim|rita|uma|vera|wes):.*$";
 	let made = || Namespace::new(false, "^@made-[a-z]+:.*$".to_owned());
+	let shade = |exclusive| Namespace::new(exclusive, "^@shade-[a-z]+:.*$".to_owned());
 	let appservices = [
 		(APPSERVICE, AS_TOKEN, "migration", vec![
 			Namespace::new(true, assigned.to_owned()),
+			Namespace::new(true, "^@ghost-[a-z]+:.*$".to_owned()),
+			shade(false),
 			made(),
 		]),
-		(OTHER, OTHER_TOKEN, "other-migration", vec![made()]),
+		(OTHER, OTHER_TOKEN, "other-migration", vec![shade(true), made()]),
 	];
 
 	for (id, token, sender, users) in appservices {
