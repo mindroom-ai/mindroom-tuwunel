@@ -27,8 +27,12 @@ mod tests {
 	#[test]
 	fn thread_previews() -> Result {
 		Harness::new("mindroom_thread_previews", [])?.with_services(|s| run(s, true))?;
-		Harness::new("previews_without_edits", ["rooms.relations.bundle_edits=false".to_owned()])?
-			.with_services(|s| run(s, false))
+		// The first harness already installed the process-global subscriber.
+		Harness::new("previews_without_edits", [
+			"logging.global_default=false".to_owned(),
+			"rooms.relations.bundle_edits=false".to_owned(),
+		])?
+		.with_services(|s| run(s, false))
 	}
 
 	struct ThreadCase {
