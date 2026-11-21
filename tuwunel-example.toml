@@ -173,12 +173,11 @@
 # commands, and external accounts never become admins.
 #
 # List only accounts you provision and control yourself, outside appservice
-# namespaces. Remove an ID from this list to revoke its config grant. Remove
-# any existing admin-room membership separately.
+# namespaces. Listing an account does not remove its existing admin-room
+# membership or stop its sync. Remove that membership separately.
 #
-# For example `["@helper:example.com"]`.
-#
-# reloadable: yes
+# This list is read at startup. To revoke the config grant, remove the ID
+# and restart. For example, list `["@helper:example.com"]`.
 #
 #server_admins = []
 
@@ -399,7 +398,8 @@
 # - The server finds the room through its `#admins:<server_name>` alias and
 #   treats it as the admin room only while the server user is joined. With
 #   `create` off, the alias removed or the server user gone from the room,
-#   there is no admin room and only the server user is an admin.
+#   there is no admin room. The server user and accounts granted admin
+#   permissions by `server_admins` do not need the room.
 #
 #[global.admin.room]
 

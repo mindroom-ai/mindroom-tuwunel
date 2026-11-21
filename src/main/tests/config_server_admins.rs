@@ -67,7 +67,9 @@ async fn exercise(services: &Services, base: &str) -> Result {
 
 	check_admin_updates(&human, &service, &helper).await?;
 	let reserved = user_id!("@reserved:localhost");
-	for (user, expected) in [(&*helper, true), (&*ordinary, false), (&*visitor, false), (reserved, false)] {
+	for (user, expected) in
+		[(&*helper, true), (&*ordinary, false), (&*visitor, false), (reserved, false)]
+	{
 		let status = human
 			.admin_api(Method::GET, &format!("v1/users/{user}/admin"), &json!({}), 200)
 			.await?;
@@ -98,24 +100,49 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	check_reserved_signup(&signup, &helper).await
 }
 
-async fn check_admin_updates(human: &Client<'_>, service: &Client<'_>, helper: &UserId) -> Result {
+async fn check_admin_updates(
+	human: &Client<'_>,
+	service: &Client<'_>,
+	helper: &UserId,
+) -> Result {
 	let services = human.services;
 	let helper_path = format!("v2/users/{helper}");
 	let reserved = user_id!("@reserved:localhost");
-	let demote = json!({ "admin": false, "password": "different-password", "logout_devices": true });
+	let demote =
+		json!({ "admin": false, "password": "different-password", "logout_devices": true });
 	let password = services.users.password_hash(helper).await?;
-	let device = services.users.find_from_token(service.token).await?;
+	let device = services
+		.users
+		.find_from_token(service.token)
+		.await?;
 
-	human.admin_api(Method::PUT, &helper_path, &demote, 400).await?;
+	human
+		.admin_api(Method::PUT, &helper_path, &demote, 400)
+		.await?;
 	assert_eq!(services.users.password_hash(helper).await?, password);
-	assert_eq!(services.users.find_from_token(service.token).await?, device);
-	human.admin_api(Method::PUT, &format!("v2/users/{reserved}"), &demote, 400).await?;
+	assert_eq!(
+		services
+			.users
+			.find_from_token(service.token)
+			.await?,
+		device
+	);
+	human
+		.admin_api(Method::PUT, &format!("v2/users/{reserved}"), &demote, 400)
+		.await?;
 	assert!(!services.users.exists(reserved).await);
 
-	let body = human.admin_api(Method::PUT, &helper_path, &json!({ "admin": true }), 200).await?;
+	let body = human
+		.admin_api(Method::PUT, &helper_path, &json!({ "admin": true }), 200)
+		.await?;
 	assert_eq!(serde_json::from_str::<Value>(&body)?["admin"], true);
 	let room = services.admin.get_admin_room().await?;
-	assert!(!services.state_cache.is_joined(helper, &room).await);
+	assert!(
+		!services
+			.state_cache
+			.is_joined(helper, &room)
+			.await
+	);
 	Ok(())
 }
 

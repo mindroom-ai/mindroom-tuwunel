@@ -878,7 +878,8 @@ fn server_admins_changes_require_restart() {
 server_name = "example.com"
 server_admins = ["@helper:example.com"]
 "#,
-	).unwrap();
+	)
+	.unwrap();
 
 	reload(&listed, &listed).expect("an unchanged list can be reloaded");
 	for (old, new) in [(&none, &listed), (&listed, &none)] {

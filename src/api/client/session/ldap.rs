@@ -75,7 +75,9 @@ pub(super) async fn ldap_login(
 
 	// LDAP manages room grants, not privileges fixed by server_admins.
 	if !services.config.ldap.admin_filter.is_empty()
-		&& !services.config.has_admin_grant(lowercased_user_id)
+		&& !services
+			.config
+			.has_admin_grant(lowercased_user_id)
 	{
 		let is_tuwunel_admin = services
 			.admin
