@@ -268,6 +268,27 @@ mod tests {
 			send(router, base, OWNER, "ignored-title", title(&own_root, "ignored title")).await;
 		let latest = event(router, base, OWNER, &ignored).await;
 		seed_stored_thread(services, &own_reply, &latest).await?;
+		let timeline = &services.timeline;
+		let root_id: &EventId = own_root.as_str().try_into()?;
+		let id = timeline.get_pdu_id(root_id).await?;
+		let mut stored: Value = services.timeline.get_from_id(&id).await?;
+		let relations = &mut stored["unsigned"]["m.relations"];
+		let extra = json!({"m.replace": latest});
+		relations["m.thread"]["latest_event"]["unsigned"]["m.relations"] = extra;
+		relations["m.replace"] = latest;
+		services.db["pduid_pdu"].insert(id.as_bytes(), serde_json::to_vec(&stored)?);
+		let served = event(router, base, MEMBER, &own_root).await;
+		let relations = &served["unsigned"]["m.relations"];
+		assert_eq!(relations["m.thread"]["latest_event"]["event_id"], ignored);
+		assert_eq!(
+			[
+				relations.pointer("/m.thread/latest_event/unsigned/m.relations"),
+				relations.get("m.replace"),
+			]
+			.map(|value| value.is_some()),
+			[false; 2],
+			"stored relations in cached latest reply or top-level replacement"
+		);
 		request(
 			router,
 			"PUT",

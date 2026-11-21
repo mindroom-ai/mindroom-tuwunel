@@ -39,8 +39,8 @@ type Seek = ArrayVec<u8, KEY_LEN>;
 /// `bundle_reference_relations` is enabled, the `m.reference` children are
 /// folded in as a `{ chunk: [{ event_id }] }` summary. A requester who is not
 /// in the room gets no thread summary or edit they may not see. The thread
-/// presence gate keeps the common no-bundle case to a substring scan; the edit
-/// and reference folds are skipped unless enabled.
+/// presence gate skips preview work on events without a summary; the edit and
+/// reference folds are skipped unless enabled.
 #[implement(Service)]
 #[tracing::instrument(skip_all, level = "trace")]
 pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> Pdu {
@@ -55,6 +55,7 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 		return pruned;
 	}
 
+	strip_stored_relations(&mut pdu, true);
 	let has_thread = pdu.has_thread_bundle().log_err().unwrap_or(true);
 
 	self.bundle_thread_for(sender_user, &mut pdu)
@@ -330,9 +331,9 @@ async fn bundle_thread_latest_edit(&self, sender_user: &UserId, pdu: &mut Pdu) {
 
 	latest_event.remove_private_unless_sender(Some(sender_user));
 
-	let replacement = strip_stored_relations(&mut latest_event)
-		.and_then(|()| bundle_replacement(&mut latest_event, replacement_event, sender_user))
-		.log_err();
+	strip_stored_relations(&mut latest_event, false);
+	let replacement =
+		bundle_replacement(&mut latest_event, replacement_event, sender_user).log_err();
 
 	if thread_result_or_drop(pdu, replacement).is_none() {
 		return;
@@ -528,12 +529,7 @@ pub async fn ignored_thread_view(
 				.await
 				.unwrap_or(reply);
 
-			if strip_stored_relations(&mut reply)
-				.log_err()
-				.is_err()
-			{
-				reply.unsigned = None;
-			}
+			strip_stored_relations(&mut reply, false);
 			Some(reply.into_format())
 		},
 	};
@@ -636,7 +632,7 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			{
 				continue;
 			}
-			strip_stored_relations(&mut child)?;
+			strip_stored_relations(&mut child, false);
 			if config.rooms.relations.bundle_edits {
 				let edit = {
 					let edits = self
@@ -665,19 +661,42 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 }
 
 fn bundle_replacement(parent: &mut Pdu, mut edit: Pdu, user: &UserId) -> Result {
-	strip_stored_relations(&mut edit)?;
+	strip_stored_relations(&mut edit, false);
 	edit.remove_private_unless_sender(Some(user));
 	parent.set_replacement_bundle(&edit.into_format())
 }
 
-/// Drop stored relations: nested events have not been checked for this requester.
-fn strip_stored_relations(pdu: &mut Pdu) -> Result {
-	let mut unsigned = pdu.get_unsigned_as_value();
-	if let Some(object) = unsigned.as_object_mut() {
-		object.remove("m.relations");
-		pdu.unsigned = Some(to_raw_value(&unsigned)?.into());
+/// Only the top-level event may keep its cached thread summary. Its cached
+/// latest reply must have no unsigned data, just like a newly written summary.
+fn strip_stored_relations(pdu: &mut Pdu, keep_thread: bool) {
+	if pdu.unsigned.is_none() {
+		return;
 	}
-	Ok(())
+	let Ok(Value::Object(mut unsigned)) = pdu.get_unsigned::<Value>().log_err() else {
+		pdu.unsigned = None;
+		return;
+	};
+	let Some(relations) = unsigned.remove("m.relations") else {
+		return;
+	};
+	if keep_thread
+		&& let Value::Object(mut relations) = relations
+		&& let Some(Value::Object(mut thread)) = relations.remove("m.thread")
+	{
+		thread.retain(|key, _| {
+			matches!(key.as_str(), "latest_event" | "count" | "current_user_participated")
+		});
+		if let Some(Value::Object(latest)) = thread.get_mut("latest_event") {
+			latest.remove("unsigned");
+		}
+		relations.clear();
+		relations.insert("m.thread".to_owned(), Value::Object(thread));
+		unsigned.insert("m.relations".to_owned(), Value::Object(relations));
+	}
+	pdu.unsigned = to_raw_value(&unsigned)
+		.log_err()
+		.ok()
+		.map(Into::into);
 }
 
 /// A preview child or edit is shown only when the requester may see it and
@@ -694,9 +713,8 @@ mod tests {
 
 	use super::*;
 
-	#[test]
-	fn thread_latest_load_error_drops_bundle() {
-		let mut pdu: Pdu = serde_json::from_value(json!({
+	fn thread_fixture() -> Pdu {
+		serde_json::from_value(json!({
 			"type": "m.room.member",
 			"content": { "membership": "join" },
 			"event_id": "$member:example.com",
@@ -716,8 +734,25 @@ mod tests {
 				},
 			},
 		}))
-		.expect("test fixture should deserialize as a valid PDU");
+		.expect("test fixture should deserialize as a valid PDU")
+	}
 
+	#[test]
+	fn strip_drops_unreadable_unsigned() -> Result {
+		let mut pdu = thread_fixture();
+		let deep = format!("{}0{}", "[".repeat(128), "]".repeat(128));
+		let unsigned = format!(r#"{{"m.relations":{deep}}}"#);
+		pdu.unsigned = Some(Raw::from_json_string(unsigned)?);
+		pdu.get_unsigned::<Value>()
+			.expect_err("fixture exceeds the JSON depth limit");
+		strip_stored_relations(&mut pdu, false);
+		assert!(pdu.unsigned.is_none(), "retained unreadable unsigned");
+		Ok(())
+	}
+
+	#[test]
+	fn thread_latest_load_error_drops_bundle() {
+		let mut pdu = thread_fixture();
 		let latest: Option<()> = thread_result_or_drop(&mut pdu, Err("missing latest event"));
 
 		assert!(latest.is_none(), "load failure returned a latest event");
