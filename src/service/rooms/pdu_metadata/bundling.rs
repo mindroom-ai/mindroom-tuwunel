@@ -683,7 +683,7 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			let status = content["m.new_content"]
 				.get(STREAM_STATUS)
 				.filter(|status| !status.is_null())
-				.unwrap_or(&content[STREAM_STATUS])
+				.unwrap_or_else(|| &content[STREAM_STATUS])
 				.as_str();
 			let sender = child.sender();
 			let prefix = sender.localpart().get(..AGENT_PREFIX.len());
