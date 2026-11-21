@@ -1,7 +1,9 @@
 #![cfg(test)]
 
+use hmac::{Hmac, Mac};
 use reqwest::Method;
 use serde_json::{Value, json};
+use sha1::Sha1;
 use tuwunel_core::{
 	Result,
 	ruma::{UserId, events::room::message::RoomMessageEventContent, user_id},
@@ -22,6 +24,8 @@ mod client;
 mod fixture;
 mod timeline;
 
+const REGISTRATION_SECRET: &str = "config-admin-test-shared-secret";
+
 #[test]
 fn configured_admins_have_http_authority_but_not_room_membership() -> Result {
 	boot(
@@ -32,7 +36,8 @@ fn configured_admins_have_http_authority_but_not_room_membership() -> Result {
 			"registration.enable=true",
 			"registration.\
 			 yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse=true",
-			r#"server_admins=["@helper:localhost","@visitor:localhost","@reserved:localhost"]"#,
+			&format!("registration.shared_secret={REGISTRATION_SECRET:?}"),
+			r#"server_admins=["@helper:localhost","@visitor:localhost","@reserved:localhost","@provisioned:localhost"]"#,
 		],
 		exercise,
 	)
@@ -66,6 +71,8 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	assert!(!cache.is_joined(&helper, &admin_room).await);
 
 	check_admin_updates(&human, &service, &helper).await?;
+	check_external_promotion(&human, &visitor).await?;
+	check_shared_secret_provisioning(&signup).await?;
 	let reserved = user_id!("@reserved:localhost");
 	for (user, expected) in
 		[(&*helper, true), (&*ordinary, false), (&*visitor, false), (reserved, false)]
@@ -146,6 +153,49 @@ async fn check_admin_updates(
 	Ok(())
 }
 
+async fn check_external_promotion(human: &Client<'_>, visitor: &UserId) -> Result {
+	let profile = &human.services.profile;
+	profile.set_displayname(visitor, Some("Visitor"), None).await?;
+	human
+		.admin_api(
+			Method::PUT,
+			&format!("v2/users/{visitor}"),
+			&json!({ "admin": true, "displayname": "Changed" }),
+			403,
+		)
+		.await?;
+	assert_eq!(profile.displayname(visitor).await?, "Visitor");
+	Ok(())
+}
+
+async fn check_shared_secret_provisioning(signup: &Client<'_>) -> Result {
+	let username = "provisioned";
+	let password = "test-password";
+	let response = signup.admin_api(Method::GET, "v1/register", &json!({}), 200).await?;
+	let response: Value = serde_json::from_str(&response)?;
+	let nonce = field(&response, "nonce")?;
+	let mut mac = Hmac::<Sha1>::new_from_slice(REGISTRATION_SECRET.as_bytes())
+		.expect("HMAC accepts any key size");
+	mac.update(format!("{nonce}\0{username}\0{password}\0admin").as_bytes());
+	let mac = format!("{:x}", mac.finalize().into_bytes());
+	let response = signup
+		.admin_api(
+			Method::POST,
+			"v1/register",
+			&json!({ "nonce": nonce, "username": username, "password": password,
+				"admin": true, "mac": mac, "inhibit_login": true }),
+			200,
+		)
+		.await?;
+	let user = user_id!("@provisioned:localhost");
+	assert_eq!(serde_json::from_str::<Value>(&response)?["user_id"], user.as_str());
+	let services = signup.services;
+	assert!(services.admin.user_is_admin(user).await);
+	let room = services.admin.get_admin_room().await?;
+	assert!(!services.state_cache.is_joined(user, &room).await);
+	Ok(())
+}
+
 fn signup_form(username: &str) -> Value {
 	json!({ "username": username, "password": "test-password", "auth": { "type": "m.login.dummy" } })
 }
@@ -164,18 +214,35 @@ async fn check_reserved_signup(signup: &Client<'_>, helper: &UserId) -> Result {
 		id: "example-bridge",
 		token: "config-admin-bridge-token",
 		sender_localpart: "bridge",
-		users: "^@reserved:localhost$",
+		users: "^@(reserved|unlisted):localhost$",
 		aliases: None,
 	};
-	register_appservice(signup.services, &bridge).await?;
-	let bridge = Client { token: bridge.token, ..*signup };
-	let lookup = format!("v1/users/{helper}/admin?user_id={reserved}");
-	bridge
-		.admin_api(Method::GET, &lookup, &json!({}), 403)
+	let services = signup.services;
+	let collision = Bridge { sender_localpart: "reserved", ..bridge };
+	let refusal = register_appservice(services, &collision)
+		.await
+		.expect_err("an appservice must not provision a reserved sender");
+	assert!(refusal.to_string().contains("server_admins"), "{refusal}");
+	assert!(!services.users.exists(reserved).await);
+
+	register_appservice(services, &bridge).await?;
+	assert!(services.users.exists(user_id!("@bridge:localhost")).await);
+	let appservice = Client { token: bridge.token, ..*signup };
+	let unlisted = user_id!("@unlisted:localhost");
+	assert!(!services.users.exists(unlisted).await);
+	let whoami = appservice.get(&format!("account/whoami?user_id={unlisted}")).await?;
+	assert_eq!(whoami["user_id"], unlisted.as_str());
+	let refusal = appservice
+		.get_url(&appservice.url(&format!("account/whoami?user_id={reserved}")))
 		.await?;
+	assert_eq!(refusal.status().as_u16(), 403);
+	assert_eq!(refusal.json::<Value>().await?["errcode"], "M_FORBIDDEN");
 	let form = json!({ "username": "reserved", "type": "m.login.application_service" });
-	let response: Value = bridge.post_url(&url, &form).await?.json().await?;
+	let response: Value = appservice.post_url(&url, &form).await?.json().await?;
 	assert_eq!(response["errcode"], "M_USER_IN_USE");
-	assert!(!signup.services.users.exists(reserved).await);
+	assert!(!services.users.exists(reserved).await);
+
+	let provisioned = Bridge { sender_localpart: helper.localpart(), ..bridge };
+	register_appservice(services, &provisioned).await?;
 	Ok(())
 }
