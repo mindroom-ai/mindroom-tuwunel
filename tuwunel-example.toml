@@ -173,9 +173,7 @@
 #
 # List only accounts you provision yourself (e.g. `["@helper:example.com"]`).
 # Keep them outside appservice namespaces. Startup fails if a listed
-# appservice sender does not exist. On a fresh server, `users create-user`
-# from the console can join the first account to the admin room. Bootstrap
-# a human first or use shared-secret registration for the service account.
+# appservice sender does not exist.
 #
 # This list is startup-only. Remove the ID and restart to revoke the
 # grant. Remove any existing admin-room membership separately to stop sync.

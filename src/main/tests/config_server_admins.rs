@@ -77,7 +77,10 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let operator = user_id!("@operator:localhost");
 	let ordinary =
 		register(services, "ordinary", "config-admin-ordinary-token-0123456789").await?;
-	assert!(cache.is_joined(operator, &admin_room).await, "unlisted user must still bootstrap");
+	assert!(
+		cache.is_joined(operator, &admin_room).await,
+		"unlisted user must still bootstrap"
+	);
 	assert!(admin.user_is_last_admin(operator).await);
 	assert!(!admin.user_is_last_admin(&helper).await);
 	assert!(!cache.is_joined(&helper, &admin_room).await);
@@ -131,8 +134,17 @@ async fn check_availability(human: &Client<'_>, signup: &Client<'_>) -> Result {
 	for username in ["unused", "reserved"] {
 		let probes = [
 			(signup, signup.url(&format!("register/available?username={username}"))),
-			(human, format!("{}/_synapse/admin/v1/username_available?username={username}", human.base)),
-			(&mas, format!("{}/_synapse/mas/is_localpart_available?localpart={username}", mas.base)),
+			(
+				human,
+				format!(
+					"{}/_synapse/admin/v1/username_available?username={username}",
+					human.base
+				),
+			),
+			(
+				&mas,
+				format!("{}/_synapse/mas/is_localpart_available?localpart={username}", mas.base),
+			),
 		];
 		for (client, url) in probes {
 			let response = client.get_url(&url).await?;
