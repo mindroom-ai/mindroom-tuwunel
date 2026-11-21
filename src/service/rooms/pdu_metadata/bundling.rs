@@ -570,15 +570,16 @@ async fn redacted_root(&self, ignored: &BTreeSet<OwnedUserId>, root: &Pdu) -> Op
 
 const TITLE: &str = "io.mindroom.title";
 const REPLY: &str = "io.mindroom.latest_reply";
+const STREAMING_REPLY: &str = "io.mindroom.streaming_reply";
+const STREAM_STATUS: &str = "io.mindroom.stream_status";
 
 /// Thread relation rows, and edit rows per preview, read for the previews.
 const PREVIEW_ROWS: usize = 50;
+const STREAM_CANDIDATES: usize = 4;
 
-/// MindRoom previews beside the standard thread summary: the newest title (an
-/// `m.notice` thread event with a truthy `io.mindroom.thread_summary`) and
-/// the newest other thread event, each with its newest valid edit the
-/// requester may see. Unencrypted rooms only; a field outside the window is
-/// omitted.
+/// MindRoom previews beside the standard thread summary: the newest title,
+/// the newest other thread event, and the newest still-streaming reply if
+/// different. Unencrypted rooms only; a field outside the window is omitted.
 #[implement(Service)]
 async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result {
 	let services = &self.services;
@@ -593,6 +594,7 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 	};
 	thread.remove(TITLE);
 	thread.remove(REPLY);
+	thread.remove(STREAMING_REPLY);
 	if !access.is_encrypted_room(root.room_id()).await
 		&& let Ok(root_id) = services
 			.timeline
@@ -617,53 +619,118 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 						&& *pdu.kind() != TimelineEventType::RoomEncrypted
 				}),
 		);
-		while let Some((count, mut child)) = replies.next().await {
-			let title = child.get_content::<Value>().is_ok_and(|content| {
-				let marker = &content["io.mindroom.thread_summary"];
-				// Truthy in JavaScript, as both clients test the marker. Events
-				// hold no floats (canonical JSON), so 0 is the only zero.
-				content["msgtype"] == "m.notice"
-					&& !(marker.is_null() || *marker == false || *marker == 0 || *marker == "")
-			});
+		let bundle_edits = config.rooms.relations.bundle_edits;
+		let mut have_previews = false;
+		let mut stream_budget = STREAM_CANDIDATES;
+		while (!have_previews || stream_budget > 0)
+			&& let Some((count, mut child)) = replies.next().await
+		{
+			// Timeline content is stored as canonical JSON. Once the other
+			// previews are filled, ordinary replies need no content decode.
+			if have_previews && !child.content().get().contains(STREAM_STATUS) {
+				continue;
+			}
+			let content = child.get_content::<Value>().unwrap_or_default();
+			let marker = &content["io.mindroom.thread_summary"];
+			// Truthy in JavaScript. Canonical JSON rules out floats.
+			let title = content["msgtype"] == "m.notice"
+				&& !(marker.is_null() || *marker == false || *marker == 0 || *marker == "");
 			let field = if title { TITLE } else { REPLY };
-			if thread.contains_key(field)
+			let preview = !thread.contains_key(field);
+			let candidate =
+				stream_budget > 0 && !title && active_stream_status(&content[STREAM_STATUS]);
+			if !(preview || candidate)
 				|| ignored.ignored_users.contains_key(child.sender())
 				|| config.is_forbidden_remote_server_name(child.sender().server_name())
 				|| !self.preview_visible(user, &child).await
 			{
 				continue;
 			}
+
+			// Stream detection needs the current edit even if clients aren't
+			// configured to receive edit bundles. Reuse it for the preview.
+			let edit = if candidate || (preview && bundle_edits) {
+				let edits = self
+					.replacement_children(&child, PduId { shortroomid, count }, PREVIEW_ROWS)
+					.filter_map(async |edit| {
+						self.preview_visible(user, &edit)
+							.await
+							.then_some(edit)
+					});
+				pin_mut!(edits);
+				edits.next().await
+			} else {
+				None
+			};
+			let streaming = if candidate {
+				stream_budget -= 1;
+				let streaming = match &edit {
+					| Some(edit) => edit.get_content::<Value>().is_ok_and(|content| {
+						preview_streaming(&content, &content["m.new_content"])
+					}),
+					| None => preview_streaming(&content, &Value::Null),
+				};
+				if streaming {
+					stream_budget = 0;
+				}
+				streaming
+			} else {
+				false
+			};
+
+			let field = if preview {
+				field
+			} else if streaming {
+				STREAMING_REPLY
+			} else {
+				continue;
+			};
 			let mut child_unsigned = child.get_unsigned_as_value();
 			if let Some(object) = child_unsigned.as_object_mut() {
 				object.remove("m.relations");
 				child.unsigned = Some(to_raw_value(&child_unsigned)?.into());
 			}
-			if config.rooms.relations.bundle_edits {
-				let edit = {
-					let edits = self
-						.replacement_children(&child, PduId { shortroomid, count }, PREVIEW_ROWS)
-						.filter_map(async |edit| {
-							self.preview_visible(user, &edit)
-								.await
-								.then_some(edit)
-						});
-					pin_mut!(edits);
-					edits.next().await
-				};
-				if let Some(mut edit) = edit {
-					edit.remove_private_unless_sender(Some(user));
-					child.set_replacement_bundle(&edit.into_format())?;
-				}
+			if bundle_edits && let Some(mut edit) = edit {
+				edit.remove_private_unless_sender(Some(user));
+				child.set_replacement_bundle(&edit.into_format())?;
 			}
 			let event: Raw<AnySyncMessageLikeEvent> = child.into_format();
 			thread.insert(field.to_owned(), serde_json::to_value(event)?);
-			if thread.contains_key(TITLE) && thread.contains_key(REPLY) {
-				break;
-			}
+			have_previews = thread.contains_key(TITLE) && thread.contains_key(REPLY);
 		}
 	}
 	root.unsigned = Some(to_raw_value(&unsigned)?.into());
 	Ok(())
+}
+
+/// MindRoom Chat's active stream statuses. Terminal and unknown statuses
+/// both fail this allowlist.
+fn active_stream_status(status: &Value) -> bool {
+	status.as_str().is_some_and(|status| {
+		["active", "pending", "running", "streaming"]
+			.iter()
+			.any(|active| status.eq_ignore_ascii_case(active))
+	})
+}
+
+/// Mirror Chat's edit metadata precedence and version-1 terminal AI runs.
+fn preview_streaming(content: &Value, new_content: &Value) -> bool {
+	const AI_RUN: &str = "io.mindroom.ai_run";
+	let status = &new_content[STREAM_STATUS];
+	let status = if status.is_null() {
+		&content[STREAM_STATUS]
+	} else {
+		status
+	};
+	let run = &new_content[AI_RUN];
+	let run = if run["version"] == 1 { run } else { &content[AI_RUN] };
+	active_stream_status(status)
+		&& !(run["version"] == 1
+			&& run["status"].as_str().is_some_and(|status| {
+				["completed", "cached", "error", "cancelled"]
+					.iter()
+					.any(|terminal| status.eq_ignore_ascii_case(terminal))
+			}))
 }
 
 /// A preview child or edit is shown only when the requester may see it and
