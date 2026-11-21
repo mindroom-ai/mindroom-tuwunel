@@ -12,7 +12,7 @@ mod tests {
 	use tuwunel_core::{
 		Result,
 		http::{Request, StatusCode, header},
-		ruma::{EventId, user_id},
+		ruma::{EventId, serde::Raw, user_id},
 	};
 	use tuwunel_matrix::{PduCount, PduId, RawPduId};
 	use tuwunel_service::Services;
@@ -68,7 +68,7 @@ mod tests {
 
 		let case = fresh_device(&router, &base).await;
 		let outer = endpoint_bundles(&services, &router, &base, &room, &case).await;
-		redactions(&router, &base, &case, &outer).await;
+		redactions(&services, &router, &base, &case, &outer).await?;
 		ignored_users(&services, &router, &base).await?;
 		bounded_seeks(&router, &base).await;
 		history_visibility(&services, &router, &base, &case).await?;
@@ -220,7 +220,13 @@ mod tests {
 		send(router, base, OWNER, "outer", thread(root, "m.text", "newer reply")).await
 	}
 
-	async fn redactions(router: &Router, base: &str, case: &ThreadCase, outer: &str) {
+	async fn redactions(
+		services: &Services,
+		router: &Router,
+		base: &str,
+		case: &ThreadCase,
+		outer: &str,
+	) -> Result {
 		let root = case.root.as_str();
 		let reply = case.reply.as_str();
 		let first_title = case.first_title.as_str();
@@ -237,15 +243,22 @@ mod tests {
 		redact(router, base, outer, "redact-reply").await;
 		let served = event(router, base, MEMBER, root).await;
 		assert_preview(&served["unsigned"]["m.relations"]["m.thread"], first_title, reply, edit);
-		redact(router, base, edit, "redact-edit").await;
-		let served = event(router, base, MEMBER, root).await;
-		assert!(
-			served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.latest_reply"]["unsigned"]
-				["m.relations"]
-				.get("m.replace")
-				.is_none(),
-			"redacted edits must not be bundled"
-		);
+		let timeline = &services.timeline;
+		let id: &EventId = edit.try_into()?;
+		let id = timeline.get_pdu_id(id).await?;
+		let mut row = timeline.get_pdu_from_id(&id).await?;
+		let deep = format!(r#"{{"m.relations":{}0{}}}"#, "[".repeat(128), "]".repeat(128));
+		row.unsigned = Some(Raw::from_json_string(deep)?);
+		services.db["pduid_pdu"].insert(id.as_bytes(), serde_json::to_vec(&row)?);
+		let served = event(router, base, OWNER, reply).await;
+		let replacement = served.pointer("/unsigned/m.relations/m.replace");
+		assert!(replacement.is_none(), "an edit with unreadable unsigned must not be embedded");
+		redact(router, base, reply, "redact-parent").await;
+		let served = event(router, base, OWNER, reply).await;
+		assert!(served["unsigned"]["redacted_because"].is_object());
+		let relations = &served["unsigned"]["m.relations"];
+		assert!(relations.get("m.replace").is_none());
+		Ok(())
 	}
 
 	async fn ignored_users(services: &Services, router: &Router, base: &str) -> Result {
@@ -268,27 +281,6 @@ mod tests {
 			send(router, base, OWNER, "ignored-title", title(&own_root, "ignored title")).await;
 		let latest = event(router, base, OWNER, &ignored).await;
 		seed_stored_thread(services, &own_reply, &latest).await?;
-		let timeline = &services.timeline;
-		let root_id: &EventId = own_root.as_str().try_into()?;
-		let id = timeline.get_pdu_id(root_id).await?;
-		let mut stored: Value = services.timeline.get_from_id(&id).await?;
-		let relations = &mut stored["unsigned"]["m.relations"];
-		let extra = json!({"m.replace": latest});
-		relations["m.thread"]["latest_event"]["unsigned"]["m.relations"] = extra;
-		relations["m.replace"] = latest;
-		services.db["pduid_pdu"].insert(id.as_bytes(), serde_json::to_vec(&stored)?);
-		let served = event(router, base, MEMBER, &own_root).await;
-		let relations = &served["unsigned"]["m.relations"];
-		assert_eq!(relations["m.thread"]["latest_event"]["event_id"], ignored);
-		assert_eq!(
-			[
-				relations.pointer("/m.thread/latest_event/unsigned/m.relations"),
-				relations.get("m.replace"),
-			]
-			.map(|value| value.is_some()),
-			[false; 2],
-			"stored relations in cached latest reply or top-level replacement"
-		);
 		request(
 			router,
 			"PUT",
@@ -417,24 +409,21 @@ mod tests {
 			seed_stored_thread(services, id, &latest_event).await?;
 		}
 		// Check the standard bundles before a newer edit can take precedence.
-		let direct = event(router, base, MEMBER, &edit_reply).await;
-		let served = event(router, base, MEMBER, &edit_root).await;
+		let direct = event(router, base, OWNER, &edit_reply).await;
+		let served = event(router, base, OWNER, &edit_root).await;
 		let latest = &served["unsigned"]["m.relations"]["m.thread"]["latest_event"];
 		let latest_edit = &latest["unsigned"]["m.relations"]["m.replace"];
 		let direct_edit = &direct["unsigned"]["m.relations"]["m.replace"];
 		assert_eq!(latest["event_id"], edit_reply);
 		assert_eq!(latest_edit["event_id"], visible_edit);
 		assert_eq!(direct_edit["event_id"], visible_edit);
-		let leaked = [
-			latest.pointer("/unsigned/m.relations/m.thread"),
-			latest_edit.pointer("/unsigned/m.relations"),
-			direct_edit.pointer("/unsigned/m.relations"),
-		]
-		.map(|bundle| bundle.is_some());
-		assert_eq!(
-			leaked, [false; 3],
-			"stored relations in latest reply, its edit, or direct edit"
-		);
+		assert_eq!(latest["unsigned"]["transaction_id"], "edit-reply");
+		let relations = &latest["unsigned"]["m.relations"];
+		assert!(relations.get("m.thread").is_none());
+		for edit in [latest_edit, direct_edit] {
+			assert_eq!(edit["unsigned"]["transaction_id"], "visible-edit");
+			assert!(edit.pointer("/unsigned/m.relations").is_none());
+		}
 
 		send(router,base,OWNER,"hidden-edit",json!({"msgtype":"m.text","body":"* hidden","m.new_content":{"msgtype":"m.text","body":"hidden"},"m.relates_to":{"rel_type":"m.replace","event_id":edit_reply}})).await;
 		send(router, base, OWNER, "hidden-title-edit", json!({"msgtype":"m.notice","body":"* hidden topic","m.new_content":{"msgtype":"m.notice","body":"hidden topic","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":first_title}})).await;
