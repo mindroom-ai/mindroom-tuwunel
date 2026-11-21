@@ -707,11 +707,13 @@ mod tests {
 		let event_id = broken.as_str().try_into()?;
 		let id = timeline.get_pdu_id(event_id).await?;
 		let broken_pdu = timeline.get_pdu_json_from_id(&id).await?;
+		let healthy = serde_json::to_vec(&broken_pdu)?;
 		let pdus = &services.db["pduid_pdu"];
 		pdus.insert(id.as_bytes(), b"{}");
 		let summary = stream_summary(router, base, &root).await;
 		let latest = &summary["io.mindroom.latest_reply"];
 		assert_eq!(latest["unsigned"]["m.relations"]["m.replace"]["event_id"], terminal);
+		pdus.insert(id.as_bytes(), &healthy);
 
 		let event_id = terminal.as_str().try_into()?;
 		let readable = timeline.get_pdu_id(event_id).await?;
@@ -719,8 +721,10 @@ mod tests {
 		stored["content"]["m.new_content"][STREAM_STATUS] = json!("streaming");
 		pdus.insert(readable.as_bytes(), serde_json::to_vec(&stored)?);
 		send(router, base, OWNER, "edit-window-latest", thread(&root, "m.text", "latest")).await;
+		pdus.insert(id.as_bytes(), b"{}");
 		let summary = stream_summary(router, base, &root).await;
 		assert!(summary.get(STREAMING_REPLY).is_none());
+		pdus.insert(id.as_bytes(), healthy);
 		services
 			.pdu_metadata
 			.delete_typed_relation(&id, &broken_pdu)
