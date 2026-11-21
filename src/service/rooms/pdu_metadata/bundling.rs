@@ -81,7 +81,7 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 		.flatten();
 
 	if let Some(replacement) = replacement {
-		let replacement = replacement.without_private_unless_sender(Some(sender_user));
+		let replacement = replacement.served_unfolded_to(Some(sender_user));
 
 		pdu.set_replacement_bundle(&replacement.into_format())
 			.log_err()
@@ -491,14 +491,14 @@ async fn bundle_thread_latest_edit(&self, sender_user: &UserId, pdu: &mut Pdu) {
 		return;
 	}
 
-	let Some(mut replacement_event) = self
+	let Some(replacement_event) = self
 		.newest_replacement(sender_user, &latest_event)
 		.await
 	else {
 		return;
 	};
 
-	replacement_event.remove_private_unless_sender(Some(sender_user));
+	let replacement_event = replacement_event.served_unfolded_to(Some(sender_user));
 
 	let replacement = latest_event
 		.set_replacement_bundle(&replacement_event.into_format())
@@ -703,11 +703,7 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			{
 				continue;
 			}
-			let mut child_unsigned = child.get_unsigned_as_value();
-			if let Some(object) = child_unsigned.as_object_mut() {
-				object.remove("m.relations");
-				child.unsigned = Some(to_raw_value(&child_unsigned)?.into());
-			}
+			child.remove_aggregations();
 			if config.rooms.relations.bundle_edits {
 				let edit = {
 					let edits = self
@@ -720,8 +716,8 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 					pin_mut!(edits);
 					edits.next().await
 				};
-				if let Some(mut edit) = edit {
-					edit.remove_private_unless_sender(Some(user));
+				if let Some(edit) = edit {
+					let edit = edit.served_unfolded_to(Some(user));
 					child.set_replacement_bundle(&edit.into_format())?;
 				}
 			}

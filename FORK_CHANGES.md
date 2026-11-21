@@ -1911,6 +1911,8 @@ clients read the title only from `io.mindroom.title`.
 
 Reads skip redacted, ignored-user, forbidden-server and erased events and
 enforce the requester's history visibility for each candidate and each edit.
+Newly embedded copies omit stored `m.relations`. Unreadable unsigned data is
+omitted from the copy; fresh, requester-checked bundles may be added afterwards.
 A redacted root keeps previews of its live children.
 
 Cost: each served root reads its native relation rows (every event relating
