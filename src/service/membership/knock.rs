@@ -313,6 +313,7 @@ async fn build_knock_event(
 		serde_json::from_str(make_knock_response.event.get()).map_err(|e| {
 			err!(BadServerResponse("Invalid make_knock event json received from server: {e:?}"))
 		})?;
+	knock_event_stub.remove("unsigned");
 
 	let content = self
 		.services

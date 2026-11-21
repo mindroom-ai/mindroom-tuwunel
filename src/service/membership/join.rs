@@ -1083,6 +1083,7 @@ async fn create_join_event(
 		serde_json::from_str(join_event_stub.get()).map_err(|e| {
 			err!(BadServerResponse("Invalid make_join event json received from server: {e:?}"))
 		})?;
+	event.remove("unsigned");
 
 	let join_authorized_via_users_server = room_version_rules
 		.authorization
