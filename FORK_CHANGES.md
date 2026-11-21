@@ -898,25 +898,48 @@ which `decide_user_id` now reads too), lowercased in ASCII only, so a
 non-ASCII lookalike that lowercases to a name names no account.
 `claimed_account` gives it only when the record names the configured
 appservice, which is registered and has the account in its `users` namespace
-now (exclusive or not); the account is no appservice's own user, not a server
-admin, not locked, not of a forbidden name (matched on the local part) and
-not listed in an `assigned_accounts`; the sign-in holds every claim of
-`assigned_accounts_claims`; the provider does not say the address is
-unverified, and says it is verified when the name is read from the `email`
-claim; and, by the assignment's own checks (`sso_assignment`, split from
-`assign_sso_account`), the account exists, has an empty password, no recorded
-deactivation and no linked identity. The record and the appservices are read
-first, and the appservices released, before the account is held: registering
-an appservice holds them while it takes its own user's lock, so a claim that
-held the account and then waited for them could wait on such a registration
-for ever. The account's password lock is then taken and held until the link
-is stored, and the account gets the sentinel and origin `sso` in the same
-write batch, as an assigned account does. The admin and lock reads are made
-under that lock, which a promotion or an account lock does not take. A first
-claim that is not a valid name claims nothing; no later claim is tried, as
-one is for a new account's name. The server reads a passwordless account outside an exclusive
-namespace as a guest (`users::is_guest`); the claim relies on the record
-instead, and guest handling is unchanged elsewhere.
+now; the name is in no registered appservice's exclusive namespace (read in the
+same appservices read as the record's check), so an import appservice's ghost
+accounts there are never claimed: name selection skips names reserved at
+lookup, for a claim as for a new account's name; the account is no
+appservice's own user, not a server admin, not locked, not of a forbidden name
+(matched on the local part) and not listed in an `assigned_accounts`; the
+sign-in holds every claim of `assigned_accounts_claims`; the provider does not
+say the address is unverified, and says it is verified when the name is read
+from the `email` claim; and, by the assignment's own checks (`sso_assignment`,
+split from `assign_sso_account`), the account exists, has an empty password,
+no recorded deactivation and no linked identity. The record and the
+appservices are read first, and the appservices released, before the account
+is held: registering an appservice holds them while it takes its own user's
+lock, so a claim that held the account and then waited for them could wait on
+such a registration for ever. The account's password lock is then taken and
+held until the link is stored, and the account gets the sentinel and origin
+`sso` in the same write batch, as an assigned account does. The admin and lock
+reads are made under that lock, which a promotion or an account lock does not
+take. A first claim that is not a valid name claims nothing; no later claim is
+tried, as one is for a new account's name. The server reads a passwordless
+account outside an exclusive namespace as a guest (`users::is_guest`); the
+claim relies on the record instead, and guest handling is unchanged elsewhere.
+
+v2.0.0-mindroom.4 and .5 also claimed an account whose name is in an exclusive
+namespace. Accounts meant to be claimed must now be in a namespace that is not
+exclusive. A refused claim gets the account the sign-in would get without the
+option: ordinary naming tries the later names of `userid_claims` and by default
+ends at a generated fallback name, and with `unique_id_fallbacks = false` it
+may refuse the sign-in, linking nothing. Only when ordinary naming succeeds is
+its link stored, for good until an admin deletes it. Known limits: the
+exclusive namespaces are checked at lookup, as ordinary naming checks them, and
+the appservices are not held until the link is stored. An appservice registered
+before a claim's lookup is seen; one registered after it has the same result as
+one registered just after the link, and registering an appservice never
+revisits accounts already claimed in its namespace. So operators register an
+exclusive namespace, or a wider one, before its new ghost accounts exist or
+before setting the option. To widen one live, they pause first sign-ins on
+every provider that can name an account in the newly reserved range, let
+callbacks under way finish, check the existing links in the newly
+reserved range, register, then resume. Unsetting the option is no such pause:
+it does not wait for claims already past their lookup, and first sign-ins
+meanwhile get ordinary naming instead.
 
 Any other first sign-in is mapped as without the option; when an existing
 account of its name is not claimed, a warning names it and the reason, and a
@@ -933,11 +956,10 @@ whether the account is its own user. The config check refuses the option
 without `userid_claims`, so only claims the operator lists there name an
 account (list only claims the organization assigns), and with `trusted`,
 whose matching by name would give out an account a claim was refused. The
-record proves the
-appservice, not the person: only the name is compared, not the address's
-domain, and the appservice can still act as an account in its namespace after
-it is claimed. Unset, the default, sign-in works as before. Upstream has no
-such option. Files: `src/database/maps.rs`,
+record proves the appservice, not the person: only the name is compared, not
+the address's domain, and the appservice can still act as an account in its
+namespace after it is claimed. Unset, the default, sign-in works as before.
+Upstream has no such option. Files: `src/database/maps.rs`,
 `src/core/config/{mod.rs,check.rs}`, `tuwunel-example.toml`,
 `src/service/users/{mod.rs,register.rs,sso.rs}`,
 `src/api/client/register/register.rs`, `src/api/client/session/sso.rs`,
