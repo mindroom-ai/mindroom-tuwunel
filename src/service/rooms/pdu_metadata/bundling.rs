@@ -88,9 +88,7 @@ pub async fn bundle_aggregations(&self, sender_user: &UserId, mut pdu: Pdu) -> P
 			.child_visible(sender_user, &replacement)
 			.await
 	{
-		let replacement = replacement.without_private_unless_sender(Some(sender_user));
-
-		pdu.set_replacement_bundle(&replacement.into_format())
+		bundle_replacement(&mut pdu, replacement, sender_user)
 			.log_err()
 			.ok();
 	}
@@ -310,7 +308,7 @@ async fn bundle_thread_latest_edit(&self, sender_user: &UserId, pdu: &mut Pdu) {
 		return;
 	}
 
-	let Some(mut replacement_event) = self.newest_replacement(&latest_event).await else {
+	let Some(replacement_event) = self.newest_replacement(&latest_event).await else {
 		return;
 	};
 
@@ -330,12 +328,10 @@ async fn bundle_thread_latest_edit(&self, sender_user: &UserId, pdu: &mut Pdu) {
 		return;
 	}
 
-	replacement_event.remove_private_unless_sender(Some(sender_user));
+	strip_stored_relations(&mut latest_event);
 	latest_event.remove_private_unless_sender(Some(sender_user));
-
-	let replacement = latest_event
-		.set_replacement_bundle(&replacement_event.into_format())
-		.log_err();
+	let replacement =
+		bundle_replacement(&mut latest_event, replacement_event, sender_user).log_err();
 
 	if thread_result_or_drop(pdu, replacement).is_none() {
 		return;
@@ -524,13 +520,14 @@ pub async fn ignored_thread_view(
 		| Some(reply) => {
 			// MSC4025: the swapped-in reply must not reopen the erased-sender
 			// seam the bundle pass gates on the stored latest.
-			let reply = self
+			let mut reply = self
 				.services
 				.state_accessor
 				.erased_view(sender_user, &reply)
 				.await
 				.unwrap_or(reply);
 
+			strip_stored_relations(&mut reply);
 			Some(reply.into_format())
 		},
 	};
@@ -633,11 +630,7 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			{
 				continue;
 			}
-			let mut child_unsigned = child.get_unsigned_as_value();
-			if let Some(object) = child_unsigned.as_object_mut() {
-				object.remove("m.relations");
-				child.unsigned = Some(to_raw_value(&child_unsigned)?.into());
-			}
+			strip_stored_relations(&mut child);
 			if config.rooms.relations.bundle_edits {
 				let edit = {
 					let edits = self
@@ -650,9 +643,8 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 					pin_mut!(edits);
 					edits.next().await
 				};
-				if let Some(mut edit) = edit {
-					edit.remove_private_unless_sender(Some(user));
-					child.set_replacement_bundle(&edit.into_format())?;
+				if let Some(edit) = edit {
+					bundle_replacement(&mut child, edit, user)?;
 				}
 			}
 			let event: Raw<AnySyncMessageLikeEvent> = child.into_format();
@@ -664,6 +656,27 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 	}
 	root.unsigned = Some(to_raw_value(&unsigned)?.into());
 	Ok(())
+}
+
+fn bundle_replacement(parent: &mut Pdu, mut edit: Pdu, user: &UserId) -> Result {
+	strip_stored_relations(&mut edit);
+	edit.remove_private_unless_sender(Some(user));
+	parent.set_replacement_bundle(&edit.into_format())
+}
+
+/// Remove stored `m.relations` from the embedded copy, dropping unreadable
+/// unsigned data. Fresh, requester-checked bundles may be added afterwards.
+fn strip_stored_relations(pdu: &mut Pdu) {
+	if pdu.unsigned.is_some() {
+		pdu.unsigned = pdu
+			.get_unsigned::<serde_json::Map<String, Value>>()
+			.and_then(|mut unsigned| {
+				unsigned.remove("m.relations");
+				Ok(to_raw_value(&unsigned)?.into())
+			})
+			.log_err()
+			.ok();
+	}
 }
 
 /// A preview child or edit is shown only when the requester may see it and
