@@ -849,6 +849,7 @@ fn server_admins_only_accepts_local_accounts_other_than_the_server_user() {
 		("@helper:example.com", true),
 		("@helper:elsewhere.example", false),
 		("@_server:example.com", false),
+		("@Helper:example.com", false),
 	] {
 		let config = config_from_toml(&format!(
 			r#"[global]
@@ -866,6 +867,23 @@ server_user_localpart = "_server"
 			let error = result.expect_err("invalid server admin must be refused");
 			assert!(error.to_string().contains("server_admins"), "{error}");
 		}
+	}
+}
+
+#[test]
+fn server_admins_changes_require_restart() {
+	let none = config_from_toml("[global]\nserver_name = \"example.com\"\n").unwrap();
+	let listed = config_from_toml(
+		r#"[global]
+server_name = "example.com"
+server_admins = ["@helper:example.com"]
+"#,
+	).unwrap();
+
+	reload(&listed, &listed).expect("an unchanged list can be reloaded");
+	for (old, new) in [(&none, &listed), (&listed, &none)] {
+		let error = reload(old, new).expect_err("changing the admin list requires restart");
+		assert!(error.to_string().contains("server_admins"), "{error}");
 	}
 }
 

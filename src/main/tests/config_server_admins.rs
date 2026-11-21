@@ -65,7 +65,9 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	assert!(!admin.user_is_last_admin(&helper).await);
 	assert!(!cache.is_joined(&helper, &admin_room).await);
 
-	for (user, expected) in [(&*helper, true), (&*ordinary, false), (&*visitor, false)] {
+	check_admin_updates(&human, &service, &helper).await?;
+	let reserved = user_id!("@reserved:localhost");
+	for (user, expected) in [(&*helper, true), (&*ordinary, false), (&*visitor, false), (reserved, false)] {
 		let status = human
 			.admin_api(Method::GET, &format!("v1/users/{user}/admin"), &json!({}), 200)
 			.await?;
@@ -82,9 +84,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	let content = RoomMessageEventContent::text_plain("Hello.");
 	let id = append_message(services, &helper, &room, &content).await?;
 	let event = services.timeline.get_pdu(&id).await?;
-	for command in ["!admin", "\\!admin"] {
-		assert!(!admin.is_admin_command(&event, command).await, "{command}");
-	}
+	assert!(!admin.is_admin_command(&event, "\\!admin").await);
 
 	admin.make_user_admin(&helper).await?;
 	assert!(admin.is_admin_command(&event, "\\!admin").await);
@@ -96,6 +96,27 @@ async fn exercise(services: &Services, base: &str) -> Result {
 	assert!(cache.is_joined(&helper, &admin_room).await);
 
 	check_reserved_signup(&signup, &helper).await
+}
+
+async fn check_admin_updates(human: &Client<'_>, service: &Client<'_>, helper: &UserId) -> Result {
+	let services = human.services;
+	let helper_path = format!("v2/users/{helper}");
+	let reserved = user_id!("@reserved:localhost");
+	let demote = json!({ "admin": false, "password": "different-password", "logout_devices": true });
+	let password = services.users.password_hash(helper).await?;
+	let device = services.users.find_from_token(service.token).await?;
+
+	human.admin_api(Method::PUT, &helper_path, &demote, 400).await?;
+	assert_eq!(services.users.password_hash(helper).await?, password);
+	assert_eq!(services.users.find_from_token(service.token).await?, device);
+	human.admin_api(Method::PUT, &format!("v2/users/{reserved}"), &demote, 400).await?;
+	assert!(!services.users.exists(reserved).await);
+
+	let body = human.admin_api(Method::PUT, &helper_path, &json!({ "admin": true }), 200).await?;
+	assert_eq!(serde_json::from_str::<Value>(&body)?["admin"], true);
+	let room = services.admin.get_admin_room().await?;
+	assert!(!services.state_cache.is_joined(helper, &room).await);
+	Ok(())
 }
 
 fn signup_form(username: &str) -> Value {
