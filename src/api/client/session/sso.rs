@@ -1496,9 +1496,7 @@ async fn try_user_id(
 		return None;
 	}
 
-	if services.config.has_admin_grant(&user_id) {
-		return None;
-	}
+	services.users.check_signup(&user_id).ok()?;
 
 	let existed = services.users.exists(&user_id).await;
 	if existed {

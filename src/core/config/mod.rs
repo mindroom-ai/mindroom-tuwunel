@@ -456,16 +456,17 @@ pub struct Config {
 	#[serde(default)]
 	pub external_forbidden_rooms: Vec<OwnedRoomOrAliasId>,
 
-	/// MindRoom: Local accounts with full server-admin permissions without
-	/// joining the admin room. This does not grant access to chat admin
-	/// commands, and external accounts never become admins.
+	/// MindRoom: Local accounts with full server-admin permissions without the
+	/// admin room. This grants no chat commands or access for external accounts.
 	///
-	/// List only accounts you provision and control yourself, outside appservice
-	/// namespaces. Listing an account does not remove its existing admin-room
-	/// membership or stop its sync. Remove that membership separately.
+	/// List only accounts you provision yourself (e.g. `["@helper:example.com"]`).
+	/// Keep them outside appservice namespaces. Startup fails if a listed
+	/// appservice sender does not exist. On a fresh server, `users create-user`
+	/// from the console can join the first account to the admin room. Bootstrap
+	/// a human first or use shared-secret registration for the service account.
 	///
-	/// This list is read at startup. To revoke the config grant, remove the ID
-	/// and restart. For example, list `["@helper:example.com"]`.
+	/// This list is startup-only. Remove the ID and restart to revoke the
+	/// grant. Remove any existing admin-room membership separately to stop sync.
 	///
 	/// default: []
 	#[serde(default)]

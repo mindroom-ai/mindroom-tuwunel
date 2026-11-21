@@ -250,7 +250,7 @@ async fn check_reserved_signup(signup: &Client<'_>, helper: &UserId) -> Result {
 		.await?;
 	assert_eq!(refusal.status().as_u16(), 403);
 	assert_eq!(refusal.json::<Value>().await?["errcode"], "M_FORBIDDEN");
-	check_appservice_target_writes(&appservice, unlisted, reserved).await?;
+	check_appservice_target_writes(&appservice, unlisted, reserved, helper).await?;
 	let form = json!({ "username": "reserved", "type": "m.login.application_service" });
 	let response: Value = appservice
 		.post_url(&url, &form)
@@ -272,11 +272,18 @@ async fn check_appservice_target_writes(
 	appservice: &Client<'_>,
 	unlisted: &UserId,
 	reserved: &UserId,
+	outside_namespace: &UserId,
 ) -> Result {
 	const KIND: &str = "org.example.settings";
 	let services = appservice.services;
-	for (user, expected) in [(unlisted, 200), (reserved, 403)] {
-		assert!(!services.users.exists(user).await);
+	assert!(!services.users.exists(unlisted).await);
+	assert!(!services.users.exists(reserved).await);
+	for (user, expected) in [
+		(user_id!("@bridge:localhost"), 200),
+		(unlisted, 200),
+		(reserved, 403),
+		(outside_namespace, 403),
+	] {
 		let account_data = format!("user/{user}/account_data/{KIND}");
 		let profile = format!("profile/{user}/displayname");
 		for (path, body) in [

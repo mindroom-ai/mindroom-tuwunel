@@ -12,7 +12,7 @@ use ruma::{
 use tuwunel_core::{Err, Result, err, utils::BoolExt};
 use tuwunel_service::{Services, presence::Ping, profile::Propagation};
 
-use crate::{ClientIp, Ruma, utils::may_set_profile_field};
+use crate::{ClientIp, Ruma, account_data::require_owner, utils::may_set_profile_field};
 
 /// Resolve a `PropagateTo` request value against the server default.
 ///
@@ -125,19 +125,11 @@ pub(crate) async fn set_profile_field_route(
 	ClientIp(client): ClientIp,
 	body: Ruma<set_profile_field::v3::Request>,
 ) -> Result<set_profile_field::v3::Response> {
-	let sender_user = body.sender_user();
 	let field = body.value.field_name();
 
 	field_check(&services, &body, &field).await?;
 
-	if *sender_user != body.user_id
-		&& !body
-			.appservice_info
-			.as_ref()
-			.is_some_and(|registration| registration.is_user_match(&body.user_id))
-	{
-		return Err!(Request(Forbidden("You cannot update the profile of another user")));
-	}
+	require_owner(&services, &body, &body.user_id).await?;
 
 	let propagation = resolve_propagation(&body.propagate_to);
 
@@ -176,18 +168,9 @@ pub(crate) async fn delete_profile_field_route(
 	ClientIp(client): ClientIp,
 	body: Ruma<delete_profile_field::v3::Request>,
 ) -> Result<delete_profile_field::v3::Response> {
-	let sender_user = body.sender_user();
-
 	field_check(&services, &body, &body.field).await?;
 
-	if *sender_user != body.user_id
-		&& !body
-			.appservice_info
-			.as_ref()
-			.is_some_and(|registration| registration.is_user_match(&body.user_id))
-	{
-		return Err!(Request(Forbidden("You cannot update the profile of another user")));
-	}
+	require_owner(&services, &body, &body.user_id).await?;
 
 	let propagation = resolve_propagation(&body.propagate_to);
 
