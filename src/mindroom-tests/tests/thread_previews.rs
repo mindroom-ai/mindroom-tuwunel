@@ -71,7 +71,7 @@ mod tests {
 		redactions(&router, &base, &case, &outer).await;
 		ignored_users(&router, &base).await;
 		bounded_seeks(&router, &base).await;
-		history_visibility(&router, &base, &case).await;
+		history_visibility(&services, &router, &base, &case).await?;
 		title_rule(&router).await;
 		backfilled_root(&services, &router, &base).await?;
 		large_room(&router, &base).await;
@@ -328,7 +328,12 @@ mod tests {
 		eprintln!("PREVIEW_BOUND rows=50 elapsed_ms={}", start.elapsed().as_millis());
 	}
 
-	async fn history_visibility(router: &Router, base: &str, case: &ThreadCase) {
+	async fn history_visibility(
+		services: &Services,
+		router: &Router,
+		base: &str,
+		case: &ThreadCase,
+	) -> Result {
 		let root = case.root.as_str();
 		let first_title = case.first_title.as_str();
 		// A current member cannot read a title sent while they were absent
@@ -360,10 +365,21 @@ mod tests {
 		let visible_edit = send(router, base, OWNER, "visible-edit", json!({"msgtype":"m.text","body":"* visible revision","m.new_content":{"msgtype":"m.text","body":"visible revision"},"m.relates_to":{"rel_type":"m.replace","event_id":edit_reply}})).await;
 		let visible_title_edit = send(router, base, OWNER, "visible-title-edit", json!({"msgtype":"m.notice","body":"* visible topic","m.new_content":{"msgtype":"m.notice","body":"visible topic","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":first_title}})).await;
 		request(router, "POST", &format!("{base}/leave"), MEMBER, json!({})).await;
-		send(router, base, OWNER, "hidden-title", title(root, "hidden topic")).await;
+		let hidden = send(router, base, OWNER, "hidden-title", title(root, "hidden topic")).await;
 		send(router,base,OWNER,"hidden-edit",json!({"msgtype":"m.text","body":"* hidden","m.new_content":{"msgtype":"m.text","body":"hidden"},"m.relates_to":{"rel_type":"m.replace","event_id":edit_reply}})).await;
 		send(router, base, OWNER, "hidden-title-edit", json!({"msgtype":"m.notice","body":"* hidden topic","m.new_content":{"msgtype":"m.notice","body":"hidden topic","io.mindroom.thread_summary":{}},"m.relates_to":{"rel_type":"m.replace","event_id":first_title}})).await;
 		request(router, "POST", &format!("{base}/join"), MEMBER, json!({})).await;
+		// Model stored bundles with the title sent during the membership gap.
+		let latest_event = event(router, base, OWNER, &hidden).await;
+		let relations = json!({"m.thread": {"latest_event": latest_event}});
+		let timeline = &services.timeline;
+		for edit in [&visible_edit, &visible_title_edit] {
+			let event_id: &EventId = edit.as_str().try_into()?;
+			let id = timeline.get_pdu_id(event_id).await?;
+			let mut stored: Value = timeline.get_from_id(&id).await?;
+			stored["unsigned"]["m.relations"] = relations.clone();
+			services.db["pduid_pdu"].insert(id.as_bytes(), serde_json::to_vec(&stored)?);
+		}
 		send(router, base, OWNER, "edit-title", title(&edit_root, "visible title")).await;
 		let served = event(router, base, MEMBER, &edit_root).await;
 		let preview = &served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.latest_reply"];
@@ -371,8 +387,9 @@ mod tests {
 			preview["event_id"], edit_reply,
 			"a visible parent remains eligible when its edit is hidden"
 		);
+		let reply_edit = &preview["unsigned"]["m.relations"]["m.replace"];
 		assert_eq!(
-			preview["unsigned"]["m.relations"]["m.replace"]["event_id"], visible_edit,
+			reply_edit["event_id"], visible_edit,
 			"hidden latest edit must retain earlier visible edit"
 		);
 		let visible_reply =
@@ -388,15 +405,22 @@ mod tests {
 			summary["io.mindroom.title"]["event_id"], first_title,
 			"hidden latest title must fall back"
 		);
+		let title_edit = &summary["io.mindroom.title"]["unsigned"]["m.relations"]["m.replace"];
 		assert_eq!(
-			summary["io.mindroom.title"]["unsigned"]["m.relations"]["m.replace"]["event_id"],
-			visible_title_edit,
+			title_edit["event_id"], visible_title_edit,
 			"a hidden newest title edit must retain the earlier visible edit"
 		);
+		for edit in [reply_edit, title_edit] {
+			assert!(
+				edit.pointer("/unsigned/m.relations").is_none(),
+				"a visible preview edit must not expose nested relations"
+			);
+		}
 		assert_eq!(
 			summary["io.mindroom.latest_reply"]["event_id"], visible_reply,
 			"a history gap must not hide subsequent replies"
 		);
+		Ok(())
 	}
 
 	async fn title_rule(router: &Router) {

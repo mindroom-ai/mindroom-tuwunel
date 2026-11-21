@@ -633,11 +633,7 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			{
 				continue;
 			}
-			let mut child_unsigned = child.get_unsigned_as_value();
-			if let Some(object) = child_unsigned.as_object_mut() {
-				object.remove("m.relations");
-				child.unsigned = Some(to_raw_value(&child_unsigned)?.into());
-			}
+			strip_preview_relations(&mut child)?;
 			if config.rooms.relations.bundle_edits {
 				let edit = {
 					let edits = self
@@ -651,7 +647,9 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 					edits.next().await
 				};
 				if let Some(mut edit) = edit {
-					edit.remove_private_unless_sender(Some(user));
+					strip_preview_relations(&mut edit)?;
+					// The preview itself already loses sender-private fields at lookup.
+					edit.remove_private();
 					child.set_replacement_bundle(&edit.into_format())?;
 				}
 			}
@@ -663,6 +661,16 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 		}
 	}
 	root.unsigned = Some(to_raw_value(&unsigned)?.into());
+	Ok(())
+}
+
+/// Drop stored relations: nested events have not been checked for this requester.
+fn strip_preview_relations(pdu: &mut Pdu) -> Result {
+	let mut unsigned = pdu.get_unsigned_as_value();
+	if let Some(object) = unsigned.as_object_mut() {
+		object.remove("m.relations");
+		pdu.unsigned = Some(to_raw_value(&unsigned)?.into());
+	}
 	Ok(())
 }
 
