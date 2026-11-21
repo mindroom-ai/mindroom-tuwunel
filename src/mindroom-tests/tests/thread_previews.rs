@@ -721,8 +721,10 @@ mod tests {
 		send(router, base, OWNER, "edit-window-latest", thread(&root, "m.text", "latest")).await;
 		let summary = stream_summary(router, base, &root).await;
 		assert!(summary.get(STREAMING_REPLY).is_none());
-		let relations = &services.pdu_metadata;
-		relations.delete_typed_relation(&id, &broken_pdu).await;
+		services
+			.pdu_metadata
+			.delete_typed_relation(&id, &broken_pdu)
+			.await;
 
 		let wrong = stream_edit(&reply, "streaming");
 		for i in 0..50 {
