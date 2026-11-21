@@ -1,4 +1,6 @@
-#![cfg(all(test, feature = "mas", feature = "synapse_admin"))]
+#![cfg(test)]
+#![cfg(feature = "mas")]
+#![cfg(feature = "synapse_admin")]
 
 use reqwest::Method;
 use serde_json::{Value, json};
