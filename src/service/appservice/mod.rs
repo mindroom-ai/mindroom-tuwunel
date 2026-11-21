@@ -27,6 +27,7 @@ use tuwunel_core::smallstr::SmallString;
 use tuwunel_core::{
 	Err, Result, defer, err, implement,
 	utils::{BoolExt, stream::IterStream},
+	warn,
 };
 use tuwunel_database::Map;
 
