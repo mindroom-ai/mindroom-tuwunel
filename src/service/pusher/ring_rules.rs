@@ -113,7 +113,9 @@ pub fn server_default(user_id: &UserId) -> Ruleset {
 		.get_index_of(PredefinedOverrideRuleId::IsUserMention.as_str())
 	{
 		let (clear_pos, _) = ruleset.override_.insert_full(ring_rule());
-		ruleset.override_.move_index(clear_pos, mention_idx);
+		ruleset
+			.override_
+			.move_index(clear_pos, mention_idx);
 
 		let (enc_pos, _) = ruleset
 			.override_
@@ -134,7 +136,9 @@ pub fn server_default(user_id: &UserId) -> Ruleset {
 /// actions.
 #[must_use]
 pub fn merged(user_id: &UserId, mut ruleset: Ruleset) -> Ruleset {
-	if ruleset.get(RuleKind::Override, RING_RULE_ID).is_none()
+	if ruleset
+		.get(RuleKind::Override, RING_RULE_ID)
+		.is_none()
 		|| ruleset
 			.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
 			.is_none()
@@ -264,7 +268,11 @@ fn extract_ring_claim(event: &JsonValue) -> Option<(OwnedEventId, OwnedUserId, O
 		.and_then(|content| content.get("m.relates_to"))
 		.and_then(JsonValue::as_object)?;
 
-	if relates_to.get("rel_type").and_then(JsonValue::as_str) != Some("m.reference") {
+	if relates_to
+		.get("rel_type")
+		.and_then(JsonValue::as_str)
+		!= Some("m.reference")
+	{
 		return None;
 	}
 

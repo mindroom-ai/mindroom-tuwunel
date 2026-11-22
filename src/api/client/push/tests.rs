@@ -139,12 +139,15 @@ fn room_id(index: usize) -> OwnedRoomId {
 
 fn notify() -> Actions { once(Action::Notify).collect() }
 
-
 #[test]
 fn merged_old_ruleset_allows_disabling_ring_rule_and_blocks_deleting_it() {
 	let user = UserId::parse("@bob:example.com").expect("user id");
 	let stored = Ruleset::server_default(&user);
-	assert!(stored.get(RuleKind::Override, RING_RULE_ID).is_none());
+	assert!(
+		stored
+			.get(RuleKind::Override, RING_RULE_ID)
+			.is_none()
+	);
 
 	let mut loaded = ring_rules::merged(&user, stored);
 	loaded

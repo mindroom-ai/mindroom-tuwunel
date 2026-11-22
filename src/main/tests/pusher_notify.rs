@@ -1,6 +1,8 @@
 #![cfg(test)]
 
-use std::{fs::remove_dir_all, net::TcpListener as StdTcpListener, str::from_utf8, time::Duration};
+use std::{
+	fs::remove_dir_all, net::TcpListener as StdTcpListener, str::from_utf8, time::Duration,
+};
 
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -1503,7 +1505,6 @@ fn expect_absent(value: &Value, name: &str) -> Result {
 		.map_or(Ok(()), |found| Err!("unexpected field {name}: {found}"))
 }
 
-
 const ALICE_RING_TOKEN: &str = "call-ring-push-rules-test-alice-access-token";
 const BOB_RING_TOKEN: &str = "call-ring-push-rules-test-bob-access-token";
 const CHARLIE_RING_TOKEN: &str = "call-ring-push-rules-test-charlie-access-token";
@@ -1531,7 +1532,11 @@ async fn exercise_call_ring_cases(services: &Services, base: &str) -> Result {
 	let users = RingTestUsers {
 		alice: client::Client { services, base, token: ALICE_RING_TOKEN },
 		bob: client::Client { services, base, token: BOB_RING_TOKEN },
-		charlie: client::Client { services, base, token: CHARLIE_RING_TOKEN },
+		charlie: client::Client {
+			services,
+			base,
+			token: CHARLIE_RING_TOKEN,
+		},
 		dana: client::Client { services, base, token: DANA_RING_TOKEN },
 		alice_id,
 		bob_id,
@@ -1540,23 +1545,21 @@ async fn exercise_call_ring_cases(services: &Services, base: &str) -> Result {
 	};
 
 	let room2 = create_room_with(&users.alice, &[(&users.bob, &users.bob_id)]).await?;
-	let room3 = create_room_with(
-		&users.alice,
-		&[(&users.bob, &users.bob_id), (&users.charlie, &users.charlie_id)],
-	)
+	let room3 = create_room_with(&users.alice, &[
+		(&users.bob, &users.bob_id),
+		(&users.charlie, &users.charlie_id),
+	])
 	.await?;
-	let room4 = create_room_with(
-		&users.alice,
-		&[
-			(&users.bob, &users.bob_id),
-			(&users.charlie, &users.charlie_id),
-			(&users.dana, &users.dana_id),
-		],
-	)
+	let room4 = create_room_with(&users.alice, &[
+		(&users.bob, &users.bob_id),
+		(&users.charlie, &users.charlie_id),
+		(&users.dana, &users.dana_id),
+	])
 	.await?;
 	let other_room = create_room_with(&users.alice, &[(&users.bob, &users.bob_id)]).await?;
 
-	let (mut bob_rx, _bob_stub) = register_stub_pusher(services, &users.bob_id, "bob-ring-key").await?;
+	let (mut bob_rx, _bob_stub) =
+		register_stub_pusher(services, &users.bob_id, "bob-ring-key").await?;
 
 	verify_live_clear_and_encrypted_rings(services, &users, &room2, &room3, &mut bob_rx).await?;
 	verify_invalid_ring_references(services, &users, &room2, &other_room).await?;
@@ -1729,17 +1732,13 @@ async fn recv_push_for_event(rx: &mut CaptureRx, want_event_id: &EventId) -> Res
 	.map_err(|_| err!("timed out waiting for push for {want_event_id}"))?
 }
 
-fn drain_pushes(rx: &mut CaptureRx) {
-	while rx.try_recv().is_ok() {}
-}
+fn drain_pushes(rx: &mut CaptureRx) { while rx.try_recv().is_ok() {} }
 
 async fn assert_no_push_arrives(rx: &mut CaptureRx, wait: Duration) -> Result {
 	match timeout(wait, rx.recv()).await {
 		| Err(_) | Ok(None) => Ok(()),
-		| Ok(Some((path, body))) => Err!(
-			"unexpected push delivered to {path}: {}",
-			String::from_utf8_lossy(&body)
-		),
+		| Ok(Some((path, body))) =>
+			Err!("unexpected push delivered to {path}: {}", String::from_utf8_lossy(&body)),
 	}
 }
 
@@ -1753,7 +1752,12 @@ async fn verify_live_clear_and_encrypted_rings(
 	// 1. Clear ring in 2-member room with live call membership delivers sound: ring.
 	let mem_clear = users
 		.alice
-		.put_state(room2, CALL_MEMBER_EVENT_TYPE, "_alice_dev1", &active_call_member_content("DEV1"))
+		.put_state(
+			room2,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_dev1",
+			&active_call_member_content("DEV1"),
+		)
 		.await?;
 	let clear_ring_1 =
 		send_clear_ring(&users.alice, room2, "clear-1", "ring", Some(&mem_clear)).await?;
@@ -1761,7 +1765,10 @@ async fn verify_live_clear_and_encrypted_rings(
 	let push = recv_push_for_event(bob_rx, &clear_ring_1).await?;
 	let notif = notification(&push)?;
 	if !matches!(notif.get("prio").and_then(Value::as_str), None | Some("high")) {
-		return Err!("expected high priority push (omitted or high), got {:?}", notif.get("prio"));
+		return Err!(
+			"expected high priority push (omitted or high), got {:?}",
+			notif.get("prio")
+		);
 	}
 	expect_str(notif, "type", RTC_NOTIFICATION_EVENT_TYPE)?;
 	let device = first_device(notif)?;
@@ -1771,23 +1778,34 @@ async fn verify_live_clear_and_encrypted_rings(
 	// 2. Second clear ring for the same membership is not audible.
 	let clear_ring_2 =
 		send_clear_ring(&users.alice, room2, "clear-2", "ring", Some(&mem_clear)).await?;
-	let second_clear_actions = eval_actions_for_event(services, &users.bob_id, &clear_ring_2).await?;
+	let second_clear_actions =
+		eval_actions_for_event(services, &users.bob_id, &clear_ring_2).await?;
 	if !second_clear_actions.is_empty() {
-		return Err!("second clear ring for same membership should be silent: {second_clear_actions:?}");
+		return Err!(
+			"second clear ring for same membership should be silent: {second_clear_actions:?}"
+		);
 	}
 	assert_no_push_arrives(bob_rx, Duration::from_millis(300)).await?;
 
 	// 3. Encrypted ring in 2-member room with live call membership delivers sound: ring.
 	let mem_enc = users
 		.alice
-		.put_state(room2, CALL_MEMBER_EVENT_TYPE, "_alice_dev2", &active_call_member_content("DEV2"))
+		.put_state(
+			room2,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_dev2",
+			&active_call_member_content("DEV2"),
+		)
 		.await?;
 	let enc_ring_1 = send_encrypted_ring(&users.alice, room2, "enc-1", Some(&mem_enc)).await?;
 
 	let push = recv_push_for_event(bob_rx, &enc_ring_1).await?;
 	let notif = notification(&push)?;
 	if !matches!(notif.get("prio").and_then(Value::as_str), None | Some("high")) {
-		return Err!("expected high priority push (omitted or high), got {:?}", notif.get("prio"));
+		return Err!(
+			"expected high priority push (omitted or high), got {:?}",
+			notif.get("prio")
+		);
 	}
 	expect_str(notif, "type", "m.room.encrypted")?;
 	let device = first_device(notif)?;
@@ -1797,7 +1815,12 @@ async fn verify_live_clear_and_encrypted_rings(
 	// 4. 3-member room: first encrypted ring gives sound: ring; second for same membership is not audible.
 	let mem_3 = users
 		.alice
-		.put_state(room3, CALL_MEMBER_EVENT_TYPE, "_alice_r3", &active_call_member_content("DEV3"))
+		.put_state(
+			room3,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_r3",
+			&active_call_member_content("DEV3"),
+		)
 		.await?;
 	let enc_r3_1 = send_encrypted_ring(&users.alice, room3, "enc-r3-1", Some(&mem_3)).await?;
 	let push = recv_push_for_event(bob_rx, &enc_r3_1).await?;
@@ -1834,13 +1857,16 @@ async fn assert_ring_refused(
 	}
 
 	let enc_id =
-		send_encrypted_ring(alice, room_id, &format!("refuse-enc-{label}"), membership_id).await?;
+		send_encrypted_ring(alice, room_id, &format!("refuse-enc-{label}"), membership_id)
+			.await?;
 	let enc_actions = eval_actions_for_event(services, bob_id, &enc_id).await?;
 	if has_ring_sound_action(&enc_actions) {
 		return Err!("{label}: encrypted ring must not get sound=ring, got {enc_actions:?}");
 	}
 	if !enc_actions.iter().any(Action::should_notify) {
-		return Err!("{label}: encrypted ring should still get today's notify action, got {enc_actions:?}");
+		return Err!(
+			"{label}: encrypted ring should still get today's notify action, got {enc_actions:?}"
+		);
 	}
 
 	Ok(())
@@ -1858,10 +1884,22 @@ async fn verify_invalid_ring_references(
 	// Another user's call membership.
 	let bob_mem = users
 		.bob
-		.put_state(room2, CALL_MEMBER_EVENT_TYPE, "_bob_dev1", &active_call_member_content("BOB1"))
+		.put_state(
+			room2,
+			CALL_MEMBER_EVENT_TYPE,
+			"_bob_dev1",
+			&active_call_member_content("BOB1"),
+		)
 		.await?;
-	assert_ring_refused(services, &users.bob_id, &users.alice, room2, "other-user", Some(&bob_mem))
-		.await?;
+	assert_ring_refused(
+		services,
+		&users.bob_id,
+		&users.alice,
+		room2,
+		"other-user",
+		Some(&bob_mem),
+	)
+	.await?;
 
 	// Left membership (empty content `{}`).
 	let left_empty = users
@@ -1951,7 +1989,12 @@ async fn verify_four_members_and_group_notification(
 ) -> Result {
 	let mem4 = users
 		.alice
-		.put_state(room4, CALL_MEMBER_EVENT_TYPE, "_alice_r4", &active_call_member_content("DEV4"))
+		.put_state(
+			room4,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_r4",
+			&active_call_member_content("DEV4"),
+		)
 		.await?;
 	let clear4 = send_clear_ring(&users.alice, room4, "r4-clear", "ring", Some(&mem4)).await?;
 	let actions4 = eval_actions_for_event(services, &users.bob_id, &clear4).await?;
@@ -1971,7 +2014,9 @@ async fn verify_four_members_and_group_notification(
 	let enc4 = send_encrypted_ring(&users.alice, room4, "r4-enc", Some(&mem4_enc)).await?;
 	let enc_actions4 = eval_actions_for_event(services, &users.bob_id, &enc4).await?;
 	if has_ring_sound_action(&enc_actions4) {
-		return Err!("four-member room encrypted ring must not emit sound=ring: {enc_actions4:?}");
+		return Err!(
+			"four-member room encrypted ring must not emit sound=ring: {enc_actions4:?}"
+		);
 	}
 
 	let mem_group = users
@@ -2096,7 +2141,8 @@ async fn verify_room_mute_and_ignore_precedence(
 		.await;
 	if dana_notifs_after != dana_notifs_before {
 		return Err!(
-			"ignored sender must not record notifications for recipient: before={dana_notifs_before}, 			 after={dana_notifs_after}"
+			"ignored sender must not record notifications for recipient: \
+			 before={dana_notifs_before}, 			 after={dana_notifs_after}"
 		);
 	}
 	Ok(())
@@ -2108,7 +2154,11 @@ fn override_rule_ids(value: &Value) -> Vec<String> {
 		.and_then(Value::as_array)
 		.into_iter()
 		.flatten()
-		.filter_map(|rule| rule.get("rule_id").and_then(Value::as_str).map(ToOwned::to_owned))
+		.filter_map(|rule| {
+			rule.get("rule_id")
+				.and_then(Value::as_str)
+				.map(ToOwned::to_owned)
+		})
 		.collect()
 }
 
@@ -2152,7 +2202,9 @@ async fn verify_old_ruleset_merge_get_and_disable_before_get(
 	let all_rules = users.bob.get("pushrules/").await?;
 	let all_ids = override_rule_ids(&all_rules["global"]);
 	if !all_ids.iter().any(|id| id == RING_RULE_ID)
-		|| !all_ids.iter().any(|id| id == RING_ENCRYPTED_RULE_ID)
+		|| !all_ids
+			.iter()
+			.any(|id| id == RING_ENCRYPTED_RULE_ID)
 	{
 		return Err!("GET /pushrules/ missing ring rules: {all_ids:?}");
 	}
@@ -2160,7 +2212,9 @@ async fn verify_old_ruleset_merge_get_and_disable_before_get(
 	let global_rules = users.bob.get("pushrules/global/").await?;
 	let global_ids = override_rule_ids(&global_rules);
 	if !global_ids.iter().any(|id| id == RING_RULE_ID)
-		|| !global_ids.iter().any(|id| id == RING_ENCRYPTED_RULE_ID)
+		|| !global_ids
+			.iter()
+			.any(|id| id == RING_ENCRYPTED_RULE_ID)
 	{
 		return Err!("GET /pushrules/global/ missing ring rules: {global_ids:?}");
 	}

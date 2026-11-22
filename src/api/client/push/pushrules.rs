@@ -70,8 +70,7 @@ pub(crate) async fn get_pushrules_all_route(
 				.remove(Content, PredefinedContentRuleId::ContainsUserName)
 				.ok();
 
-			global_ruleset
-				.update_with_server_default(ring_rules::server_default(sender_user));
+			global_ruleset.update_with_server_default(ring_rules::server_default(sender_user));
 
 			let ty = GlobalAccountDataEventType::PushRules;
 			let event = PushRulesEvent {

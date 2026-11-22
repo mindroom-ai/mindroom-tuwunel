@@ -367,7 +367,6 @@ async fn terminal_encrypted_edit_uses_encrypted_message_push_rule() {
 	);
 }
 
-
 fn clear_ring_event(
 	sender: &str,
 	event_id: &str,
@@ -550,7 +549,12 @@ async fn ring_rules_match_small_rooms_and_ignore_four_members_and_group_notifica
 		assert!(has_ring_sound(enc_actions));
 		assert!(!has_highlight(enc_actions));
 
-		assert!(ruleset.get_actions(&group_notif, &ctx).await.is_empty());
+		assert!(
+			ruleset
+				.get_actions(&group_notif, &ctx)
+				.await
+				.is_empty()
+		);
 	}
 
 	let four_members_ctx = PushConditionRoomCtx::new(
@@ -602,7 +606,12 @@ async fn room_mute_override_wins_before_and_after_ring_rule_merge() {
 		encrypted_ring_event("@alice:example.com", "$ring_enc", Some("ring"), Some("$mem"));
 
 	assert!(merged.get_actions(&clear, &ctx).await.is_empty());
-	assert!(merged.get_actions(&encrypted, &ctx).await.is_empty());
+	assert!(
+		merged
+			.get_actions(&encrypted, &ctx)
+			.await
+			.is_empty()
+	);
 }
 
 #[test]
@@ -634,10 +643,8 @@ fn merged_adds_missing_ring_rules_and_preserves_user_overrides_and_state() {
 	merged
 		.set_enabled(RuleKind::Override, RING_RULE_ID, false)
 		.expect("disable clear ring");
-	let custom_actions = vec![
-		Action::Notify,
-		Action::SetTweak(Tweak::Sound(SoundTweakValue::Default)),
-	];
+	let custom_actions =
+		vec![Action::Notify, Action::SetTweak(Tweak::Sound(SoundTweakValue::Default))];
 	merged
 		.set_actions(RuleKind::Override, RING_ENCRYPTED_RULE_ID, custom_actions.into())
 		.expect("customize encrypted ring actions");
