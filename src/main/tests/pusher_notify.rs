@@ -1758,7 +1758,9 @@ async fn verify_live_clear_and_encrypted_rings(
 
 	let push = recv_push_for_event(bob_rx, &clear_ring_1).await?;
 	let notif = notification(&push)?;
-	expect_str(notif, "prio", "high")?;
+	if !matches!(notif.get("prio").and_then(Value::as_str), None | Some("high")) {
+		return Err!("expected high priority push (omitted or high), got {:?}", notif.get("prio"));
+	}
 	expect_str(notif, "type", RTC_NOTIFICATION_EVENT_TYPE)?;
 	let device = first_device(notif)?;
 	expect_str(&device["tweaks"], "sound", RING_SOUND_TWEAK)?;
@@ -1782,7 +1784,9 @@ async fn verify_live_clear_and_encrypted_rings(
 
 	let push = recv_push_for_event(bob_rx, &enc_ring_1).await?;
 	let notif = notification(&push)?;
-	expect_str(notif, "prio", "high")?;
+	if !matches!(notif.get("prio").and_then(Value::as_str), None | Some("high")) {
+		return Err!("expected high priority push (omitted or high), got {:?}", notif.get("prio"));
+	}
 	expect_str(notif, "type", "m.room.encrypted")?;
 	let device = first_device(notif)?;
 	expect_str(&device["tweaks"], "sound", RING_SOUND_TWEAK)?;
