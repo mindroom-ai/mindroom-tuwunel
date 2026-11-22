@@ -926,7 +926,7 @@ fn accepted_rings_allows_same_ring_rejects_second_and_expires_after_two_minutes(
 #[test]
 fn call_membership_liveness_checks_shape_leave_and_expiry() {
 	let origin_ts: u64 = 1_795_300_000_000;
-	let now_ms: u64 = origin_ts.saturating_add(10_000);
+	let now_ms = origin_ts.saturating_add(10_000);
 
 	// Valid MSC4143 session shape with explicit expires.
 	let valid_session = json!({
