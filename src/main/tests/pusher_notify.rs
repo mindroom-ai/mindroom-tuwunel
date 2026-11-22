@@ -2065,6 +2065,12 @@ async fn verify_room_mute_and_ignore_precedence(
 		)
 		.await?;
 
+	let dana_notifs_before = services
+		.pusher
+		.get_notifications(&users.dana_id, None)
+		.count()
+		.await;
+
 	let mem_ign = users
 		.alice
 		.put_state(
@@ -2087,13 +2093,15 @@ async fn verify_room_mute_and_ignore_precedence(
 	send_encrypted_ring(&users.alice, &ignore_room, "ign-enc", Some(&mem_ign_enc)).await?;
 	assert_no_push_arrives(&mut dana_rx, Duration::from_millis(300)).await?;
 
-	let dana_notifs: Vec<_> = services
+	let dana_notifs_after = services
 		.pusher
 		.get_notifications(&users.dana_id, None)
-		.collect()
+		.count()
 		.await;
-	if !dana_notifs.is_empty() {
-		return Err!("ignored sender must not record notifications for recipient");
+	if dana_notifs_after != dana_notifs_before {
+		return Err!(
+			"ignored sender must not record notifications for recipient: before={dana_notifs_before}, 			 after={dana_notifs_after}"
+		);
 	}
 	let _ = room2;
 
