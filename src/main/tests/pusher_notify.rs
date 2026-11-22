@@ -50,7 +50,6 @@ use tuwunel_service::{
 	sending::{Destination, SendingEvent},
 };
 
-#[expect(dead_code)] // Only part of the client harness is used by call_ring_push_rules.
 mod client;
 
 #[expect(dead_code)] // Only put_event is used from the event add-on.
@@ -60,7 +59,6 @@ mod event;
 #[path = "client/get.rs"]
 mod get;
 
-#[expect(dead_code)] // Only admit is used from the membership add-on.
 #[path = "client/membership.rs"]
 mod membership;
 
@@ -1563,7 +1561,7 @@ async fn exercise_call_ring_cases(services: &Services, base: &str) -> Result {
 	verify_live_clear_and_encrypted_rings(services, &users, &room2, &room3, &mut bob_rx).await?;
 	verify_invalid_ring_references(services, &users, &room2, &other_room).await?;
 	verify_four_members_and_group_notification(services, &users, &room2, &room4).await?;
-	verify_room_mute_and_ignore_precedence(services, &users, &room2, &mut bob_rx).await?;
+	verify_room_mute_and_ignore_precedence(services, &users, &mut bob_rx).await?;
 	verify_old_ruleset_merge_get_and_disable_before_get(services, &users, &room2).await
 }
 
@@ -1731,14 +1729,13 @@ async fn recv_push_for_event(rx: &mut CaptureRx, want_event_id: &EventId) -> Res
 	.map_err(|_| err!("timed out waiting for push for {want_event_id}"))?
 }
 
-async fn drain_pushes(rx: &mut CaptureRx) {
+fn drain_pushes(rx: &mut CaptureRx) {
 	while rx.try_recv().is_ok() {}
 }
 
 async fn assert_no_push_arrives(rx: &mut CaptureRx, wait: Duration) -> Result {
 	match timeout(wait, rx.recv()).await {
-		| Err(_) => Ok(()),
-		| Ok(None) => Ok(()),
+		| Err(_) | Ok(None) => Ok(()),
 		| Ok(Some((path, body))) => Err!(
 			"unexpected push delivered to {path}: {}",
 			String::from_utf8_lossy(&body)
@@ -1815,7 +1812,7 @@ async fn verify_live_clear_and_encrypted_rings(
 			 {second_enc_actions:?}"
 		);
 	}
-	drain_pushes(bob_rx).await;
+	drain_pushes(bob_rx);
 
 	Ok(())
 }
@@ -2000,7 +1997,6 @@ async fn verify_four_members_and_group_notification(
 async fn verify_room_mute_and_ignore_precedence(
 	services: &Services,
 	users: &RingTestUsers<'_>,
-	room2: &RoomId,
 	bob_rx: &mut CaptureRx,
 ) -> Result {
 	// Mute room2 for Bob with a user override rule.
@@ -2015,7 +2011,7 @@ async fn verify_room_mute_and_ignore_precedence(
 			}),
 		)
 		.await?;
-	drain_pushes(bob_rx).await;
+	drain_pushes(bob_rx);
 
 	let mem_mute = users
 		.alice
@@ -2103,8 +2099,6 @@ async fn verify_room_mute_and_ignore_precedence(
 			"ignored sender must not record notifications for recipient: before={dana_notifs_before}, 			 after={dana_notifs_after}"
 		);
 	}
-	let _ = room2;
-
 	Ok(())
 }
 
