@@ -1484,6 +1484,35 @@ suspended sender, passes unchanged. File:
 `src/main/tests/delayed_events.rs` drives the unstable path, so its
 expectations for such a conflict change from 409 to 404 in two lines.
 
+### Incoming-call ring push rules
+
+Files:
+- `src/service/pusher/ring_rules.rs`, `src/service/pusher/mod.rs`
+- `src/api/client/push/{mod.rs,pushrules.rs,pushrules_global.rs}`, `src/api/federation/invite.rs`
+- `src/service/pusher/tests.rs`, `src/api/client/push/tests.rs`, `src/main/tests/pusher_notify.rs`
+
+Behavior:
+- Two server-default override push rules sit right before `.m.rule.is_user_mention`
+  (or last in `override` without it): `.io.mindroom.rule.rtc.ring` (`type ==
+  "org.matrix.msc4075.rtc.notification"`, `content.notification_type == "ring"`) and
+  `.io.mindroom.rule.rtc.ring_encrypted` (`type == "m.room.encrypted"`,
+  `content.io\.mindroom\.rtc\.notification.notification_type == "ring"`). Both use exact
+  `event_property_is` matches, need `<=3` joined members, and have the actions
+  `["notify", {"set_tweak": "sound", "value": "ring"}]`.
+- `pusher::Service::get_actions` lets a ring rule win only if (a) it is the first rule that
+  matches for this recipient, enabled, with `notify` and `"ring"` as its only sound tweak;
+  (b) the room's joined count is known and at most 3; (c) no enabled room-kind or override
+  mute for this room wins. Otherwise the ring rules are skipped and the unchanged event is
+  evaluated exactly as without them. A user turns rings off by disabling the rules or muting
+  the room. The rules do not check that a call exists: a member who can send the event can
+  ring the others in the room.
+- The rules are merged on read, not migrated: a stored ruleset that lacks a ring rule gets it
+  for evaluation (`pusher::Service::ruleset`), on both `GET /pushrules` routes and in
+  `load_push_rules` (the single-rule routes), with nothing else in the ruleset changed. No
+  `GET` stores a missing ring rule; the next rule write stores the merged ruleset. The
+  legacy repair of the two full `GET` routes keeps an already stored ring rule with its
+  `enabled` and `actions` (`ring_rules::update_with_server_default`).
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`

@@ -11,12 +11,10 @@ use ruma::{
 		federation::membership::{RawStrippedState, create_invite},
 	},
 	events::{
-		AnyStrippedStateEvent, GlobalAccountDataEventType, StateEventType,
+		AnyStrippedStateEvent, StateEventType,
 		invite_permission_config::InvitePermission,
-		push_rules::PushRulesEvent,
 		room::member::{MembershipState, RoomMemberEventContent},
 	},
-	push,
 	serde::{JsonObject, Raw},
 };
 use serde::Deserialize;
@@ -436,14 +434,7 @@ async fn notify_pushers(services: &Services, invited_user: &UserId, pdu: &PduEve
 				return;
 			};
 
-			let ruleset = services
-				.account_data
-				.get_global(invited_user, GlobalAccountDataEventType::PushRules)
-				.await
-				.map_or_else(
-					|_| push::Ruleset::server_default(invited_user),
-					|ev: PushRulesEvent| ev.content.global,
-				);
+			let ruleset = services.pusher.ruleset(invited_user).await;
 
 			services
 				.pusher
