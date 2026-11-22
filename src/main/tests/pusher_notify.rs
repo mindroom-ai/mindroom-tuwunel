@@ -2054,7 +2054,8 @@ async fn verify_invalid_ring_references(
 
 	// Failed validation does not mutate the event: a fallback user rule reading
 	// `content.notification_type` still sees the original event untouched.
-	let unmutated_ring = send_clear_ring(&users.alice, room2, "unmutated-clear", "ring", None).await?;
+	let unmutated_ring =
+		send_clear_ring(&users.alice, room2, "unmutated-clear", "ring", None).await?;
 	let mut fallback_ruleset = services.pusher.ruleset(&users.bob_id).await;
 	fallback_ruleset
 		.insert(
@@ -2084,9 +2085,12 @@ async fn verify_invalid_ring_references(
 			related_events: None,
 		})
 		.await;
-	if !fallback_actions.iter().any(Action::should_notify) || has_ring_sound_action(fallback_actions) {
+	if !fallback_actions.iter().any(Action::should_notify)
+		|| has_ring_sound_action(fallback_actions)
+	{
 		return Err!(
-			"fallback user rule must see unmutated original event without ring tweak: 			 {fallback_actions:?}"
+			"fallback user rule must see unmutated original event without ring tweak: 			 \
+			 {fallback_actions:?}"
 		);
 	}
 
@@ -2113,7 +2117,8 @@ async fn verify_invalid_ring_references(
 			}),
 		)
 		.await?;
-	let upper_actions = eval_actions_for_event(services, &users.bob_id, &upper_type_event).await?;
+	let upper_actions =
+		eval_actions_for_event(services, &users.bob_id, &upper_type_event).await?;
 	if has_ring_sound_action(&upper_actions) {
 		return Err!("case-variant event type must not get sound=ring: {upper_actions:?}");
 	}
@@ -2129,16 +2134,19 @@ async fn verify_invalid_ring_references(
 			&active_call_member_content("DEV_LEAVE"),
 		)
 		.await?;
-	let ring_before_leave =
-		send_clear_ring(&users.alice, &leave_room, "before-leave", "ring", Some(&left_sender_mem))
-			.await?;
+	let ring_before_leave = send_clear_ring(
+		&users.alice,
+		&leave_room,
+		"before-leave",
+		"ring",
+		Some(&left_sender_mem),
+	)
+	.await?;
 	users.alice.act(&leave_room, "leave").await?;
 	let after_leave_actions =
 		eval_actions_for_event(services, &users.bob_id, &ring_before_leave).await?;
 	if !after_leave_actions.is_empty() {
-		return Err!(
-			"ring from sender who left the room must not ring: {after_leave_actions:?}"
-		);
+		return Err!("ring from sender who left the room must not ring: {after_leave_actions:?}");
 	}
 
 	// Live membership in another room.
@@ -2524,13 +2532,15 @@ async fn verify_old_ruleset_merge_get_and_disable_before_get(
 			&json!({ "msgtype": "m.text", "body": "hello bob" }),
 		)
 		.await?;
-	let legacy_msg_actions = eval_actions_for_event(services, &users.bob_id, &display_msg).await?;
+	let legacy_msg_actions =
+		eval_actions_for_event(services, &users.bob_id, &display_msg).await?;
 	let has_highlight = legacy_msg_actions.iter().any(|action| {
 		matches!(action, Action::SetTweak(Tweak::Highlight(HighlightTweakValue::Yes)))
 	});
 	if !has_highlight {
 		return Err!(
-			"genuinely legacy ruleset ordinary message evaluation must remain unchanged: 			 {legacy_msg_actions:?}"
+			"genuinely legacy ruleset ordinary message evaluation must remain unchanged: 			 \
+			 {legacy_msg_actions:?}"
 		);
 	}
 
@@ -2547,7 +2557,8 @@ async fn verify_old_ruleset_merge_get_and_disable_before_get(
 	let ring_leg_eval =
 		send_clear_ring(&users.alice, room2, "legacy-eval-ring", "ring", Some(&mem_leg_eval))
 			.await?;
-	let ring_leg_actions = eval_actions_for_event(services, &users.bob_id, &ring_leg_eval).await?;
+	let ring_leg_actions =
+		eval_actions_for_event(services, &users.bob_id, &ring_leg_eval).await?;
 	if !has_ring_sound_action(&ring_leg_actions) {
 		return Err!("ring rule must evaluate on genuinely legacy ruleset: {ring_leg_actions:?}");
 	}
@@ -2557,7 +2568,11 @@ async fn verify_old_ruleset_merge_get_and_disable_before_get(
 		.bob
 		.get(&format!("pushrules/global/override/{RING_RULE_ID}/enabled"))
 		.await?;
-	if leg_enabled.get("enabled").and_then(Value::as_bool) != Some(true) {
+	if leg_enabled
+		.get("enabled")
+		.and_then(Value::as_bool)
+		!= Some(true)
+	{
 		return Err!("single-rule GET on legacy ruleset should return true: {leg_enabled}");
 	}
 	let stored_before_full_get: PushRulesEvent = services
@@ -2584,7 +2599,9 @@ async fn verify_old_ruleset_merge_get_and_disable_before_get(
 	let leg_all = users.bob.get("pushrules/").await?;
 	let leg_all_ids = override_rule_ids(&leg_all["global"]);
 	if !leg_all_ids.iter().any(|id| id == RING_RULE_ID)
-		|| !leg_all_ids.iter().any(|id| id == RING_ENCRYPTED_RULE_ID)
+		|| !leg_all_ids
+			.iter()
+			.any(|id| id == RING_ENCRYPTED_RULE_ID)
 	{
 		return Err!("GET /pushrules/ on legacy ruleset missing ring rules: {leg_all_ids:?}");
 	}

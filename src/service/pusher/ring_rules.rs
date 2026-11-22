@@ -132,16 +132,13 @@ pub fn server_default(user_id: &UserId) -> Ruleset { merged(Ruleset::server_defa
 /// every other stored rule, enabled flag, action, and relative order untouched.
 #[must_use]
 pub fn merged(mut ruleset: Ruleset) -> Ruleset {
-	insert_override_rule_before(
-		&mut ruleset,
-		ring_rule(),
-		&[RING_ENCRYPTED_RULE_ID, PredefinedOverrideRuleId::IsUserMention.as_str()],
-	);
-	insert_override_rule_before(
-		&mut ruleset,
-		ring_encrypted_rule(),
-		&[PredefinedOverrideRuleId::IsUserMention.as_str()],
-	);
+	insert_override_rule_before(&mut ruleset, ring_rule(), &[
+		RING_ENCRYPTED_RULE_ID,
+		PredefinedOverrideRuleId::IsUserMention.as_str(),
+	]);
+	insert_override_rule_before(&mut ruleset, ring_encrypted_rule(), &[
+		PredefinedOverrideRuleId::IsUserMention.as_str(),
+	]);
 	ruleset
 }
 

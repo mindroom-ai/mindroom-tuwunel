@@ -595,8 +595,12 @@ async fn ring_rules_require_exact_case_sensitive_type_and_notification_type() {
 		"case variant of m.room.encrypted must not match encrypted ring rule"
 	);
 
-	let upper_enc_notif =
-		encrypted_ring_event("@alice:example.com", "$upper_enc_notif", Some("RING"), Some("$mem"));
+	let upper_enc_notif = encrypted_ring_event(
+		"@alice:example.com",
+		"$upper_enc_notif",
+		Some("RING"),
+		Some("$mem"),
+	);
 	assert!(
 		!has_ring_sound(ruleset.get_actions(&upper_enc_notif, &ctx).await),
 		"case variant of encrypted hint notification_type must not match ring rule"
@@ -751,18 +755,16 @@ async fn merged_preserves_genuinely_legacy_ruleset_and_appends_when_mention_abse
 		.override_
 		.insert(ConditionalPushRule::contains_display_name());
 	legacy
-		.set_enabled(RuleKind::Override, PredefinedOverrideRuleId::SuppressNotices.as_str(), false)
-		.expect("disable suppress_notices");
-	let custom_message_actions = vec![
-		Action::Notify,
-		Action::SetTweak(Tweak::Sound(SoundTweakValue::Default)),
-	];
-	legacy
-		.set_actions(
-			RuleKind::Underride,
-			".m.rule.message",
-			custom_message_actions.into(),
+		.set_enabled(
+			RuleKind::Override,
+			PredefinedOverrideRuleId::SuppressNotices.as_str(),
+			false,
 		)
+		.expect("disable suppress_notices");
+	let custom_message_actions =
+		vec![Action::Notify, Action::SetTweak(Tweak::Sound(SoundTweakValue::Default))];
+	legacy
+		.set_actions(RuleKind::Underride, ".m.rule.message", custom_message_actions.into())
 		.expect("customize message rule");
 
 	let before_ids: Vec<String> = legacy
@@ -788,7 +790,11 @@ async fn merged_preserves_genuinely_legacy_ruleset_and_appends_when_mention_abse
 	// Deprecated rule and custom enabled/action states are preserved untouched.
 	#[expect(deprecated)]
 	let contains_dn = PredefinedOverrideRuleId::ContainsDisplayName.as_str();
-	assert!(merged.get(RuleKind::Override, contains_dn).is_some());
+	assert!(
+		merged
+			.get(RuleKind::Override, contains_dn)
+			.is_some()
+	);
 	assert!(
 		!merged
 			.get(RuleKind::Override, PredefinedOverrideRuleId::SuppressNotices.as_str())
@@ -994,7 +1000,11 @@ fn call_membership_liveness_checks_shape_leave_and_expiry() {
 	assert!(!is_live_call_membership(&legacy_expired, origin_ts, now_ms));
 
 	// Leave with only `leave_reason`, empty object, empty memberships, malformed shapes.
-	assert!(!is_live_call_membership(&json!({ "leave_reason": "user_left" }), origin_ts, now_ms));
+	assert!(!is_live_call_membership(
+		&json!({ "leave_reason": "user_left" }),
+		origin_ts,
+		now_ms
+	));
 	assert!(!is_live_call_membership(&json!({}), origin_ts, now_ms));
 	assert!(!is_live_call_membership(&json!({ "memberships": [] }), origin_ts, now_ms));
 	assert!(!is_live_call_membership(
