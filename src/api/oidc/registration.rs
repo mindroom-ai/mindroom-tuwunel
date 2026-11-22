@@ -409,13 +409,18 @@ mod tests {
 
 	#[test]
 	fn allowlist_covers_hosts_and_private_use_schemes() {
-		let allowed = ["element.io".to_owned(), "io.element.android".to_owned()];
+		let allowed = ["element.io".to_owned(), "io.element.android:".to_owned()];
 
 		assert!(redirect_allowlisted(&allowed, "https://element.io/oauth/ios/x"));
-		// A private-use scheme has no host, so the scheme stands in for one.
+		// A private-use scheme entry carries a trailing colon and matches only
+		// hostless URIs with that scheme, never HTTPS hosts (and vice versa).
 		assert!(redirect_allowlisted(&allowed, "io.element.android:/callback"));
 		assert!(redirect_allowlisted(&["Element.IO".to_owned()], "https://element.io/cb"));
 
+		assert!(!redirect_allowlisted(&allowed, "element.io:/callback"));
+		assert!(!redirect_allowlisted(&allowed, "http://element.io/callback"));
+		assert!(!redirect_allowlisted(&allowed, "https://io.element.android/callback"));
+		assert!(!redirect_allowlisted(&allowed, "io.element.android://callback"));
 		assert!(!redirect_allowlisted(&allowed, "https://attacker.example/callback"));
 		assert!(!redirect_allowlisted(&allowed, "com.attacker.app:/callback"));
 		assert!(!redirect_allowlisted(&allowed, "https://app.element.io/cb"));
