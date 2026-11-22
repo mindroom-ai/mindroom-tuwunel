@@ -2604,11 +2604,16 @@ async fn verify_genuinely_legacy_ruleset(
 		.await?;
 
 	// Ordinary message containing Bob's display name still triggers highlight via legacy rule.
+	let bob_displayname = services
+		.profile
+		.displayname(&users.bob_id)
+		.await
+		.unwrap_or_else(|_| users.bob_id.localpart().to_owned());
 	let display_msg = users
 		.alice
 		.put_event(
 			&format!("rooms/{room2}/send/m.room.message/legacy-display-name"),
-			&json!({ "msgtype": "m.text", "body": "hello bob" }),
+			&json!({ "msgtype": "m.text", "body": format!("hello {bob_displayname}") }),
 		)
 		.await?;
 	let legacy_msg_actions =
