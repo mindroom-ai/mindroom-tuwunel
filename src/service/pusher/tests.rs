@@ -7,9 +7,9 @@ use ruma::{
 	events::{AnySyncTimelineEvent, TimelineEventType},
 	owned_room_id, owned_user_id,
 	push::{
-		Action, ConditionalPushRule, EventMatchConditionData, NewConditionalPushRule,
-		NewPushRule, NewSimplePushRule, PredefinedOverrideRuleId, PushCondition,
-		PushConditionRoomCtx, RuleKind, Ruleset, SoundTweakValue, Tweak,
+		Action, ConditionalPushRuleInit, EventMatchConditionData, HighlightTweakValue,
+		NewConditionalPushRule, NewPushRule, NewSimplePushRule, PredefinedOverrideRuleId,
+		PushCondition, PushConditionRoomCtx, RuleKind, Ruleset, SoundTweakValue, Tweak,
 	},
 	serde::Raw,
 	uint,
@@ -751,9 +751,23 @@ async fn merged_preserves_genuinely_legacy_ruleset_and_appends_when_mention_abse
 		.override_
 		.shift_remove(PredefinedOverrideRuleId::IsUserMention.as_str());
 	#[expect(deprecated)]
-	legacy
-		.override_
-		.insert(ConditionalPushRule::contains_display_name());
+	legacy.override_.insert(
+		ConditionalPushRuleInit {
+			actions: vec![
+				Action::Notify,
+				Action::SetTweak(Tweak::Sound(SoundTweakValue::Default)),
+				Action::SetTweak(Tweak::Highlight(HighlightTweakValue::Yes)),
+			]
+			.into(),
+			default: true,
+			enabled: true,
+			rule_id: PredefinedOverrideRuleId::ContainsDisplayName
+				.as_str()
+				.into(),
+			conditions: vec![PushCondition::ContainsDisplayName].into(),
+		}
+		.into(),
+	);
 	legacy
 		.set_enabled(
 			RuleKind::Override,

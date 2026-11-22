@@ -127,9 +127,11 @@ impl AcceptedRings {
 #[must_use]
 pub fn server_default(user_id: &UserId) -> Ruleset { merged(Ruleset::server_default(user_id)) }
 
-/// Insert any missing MindRoom call-ring override rules right before
-/// `.m.rule.is_user_mention` (or at the end of `override` if absent), leaving
-/// every other stored rule, enabled flag, action, and relative order untouched.
+/// Insert missing MindRoom call-ring override rules into a stored ruleset.
+///
+/// Missing ring rules are inserted right before `.m.rule.is_user_mention` (or
+/// at the end of `override` if absent), leaving every other stored rule,
+/// enabled flag, action, and relative order untouched.
 #[must_use]
 pub fn merged(mut ruleset: Ruleset) -> Ruleset {
 	insert_override_rule_before(&mut ruleset, ring_rule(), &[

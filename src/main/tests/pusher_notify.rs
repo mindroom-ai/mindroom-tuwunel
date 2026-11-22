@@ -34,9 +34,10 @@ use tuwunel_core::{
 		},
 		presence::PresenceState,
 		push::{
-			Action, ConditionalPushRule, EventPropertyIsConditionData, HighlightTweakValue,
+			Action, ConditionalPushRuleInit, EventPropertyIsConditionData, HighlightTweakValue,
 			HttpPusherData, NewConditionalPushRule, NewPushRule, PredefinedOverrideRuleId,
-			PushCondition, PushFormat, RuleKind, Ruleset, ScalarJsonValue, Tweak,
+			PushCondition, PushFormat, RuleKind, Ruleset, ScalarJsonValue, SoundTweakValue,
+			Tweak,
 		},
 	},
 	utils::stream::ReadyExt,
@@ -2506,9 +2507,23 @@ async fn verify_old_ruleset_merge_get_and_disable_before_get(
 		.override_
 		.shift_remove(PredefinedOverrideRuleId::IsUserMention.as_str());
 	#[expect(deprecated)]
-	legacy_ruleset
-		.override_
-		.insert(ConditionalPushRule::contains_display_name());
+	legacy_ruleset.override_.insert(
+		ConditionalPushRuleInit {
+			actions: vec![
+				Action::Notify,
+				Action::SetTweak(Tweak::Sound(SoundTweakValue::Default)),
+				Action::SetTweak(Tweak::Highlight(HighlightTweakValue::Yes)),
+			]
+			.into(),
+			default: true,
+			enabled: true,
+			rule_id: PredefinedOverrideRuleId::ContainsDisplayName
+				.as_str()
+				.into(),
+			conditions: vec![PushCondition::ContainsDisplayName].into(),
+		}
+		.into(),
+	);
 	let legacy_event = PushRulesEvent {
 		content: PushRulesEventContent { global: legacy_ruleset },
 	};
