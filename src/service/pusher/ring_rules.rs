@@ -54,7 +54,7 @@ const RING_NOTIFICATION_TYPE: &str = "ring";
 const ENCRYPTED_EVENT_TYPE: &str = "m.room.encrypted";
 const ENCRYPTED_RING_PROPERTY_KEY: &str =
 	r"content.io\.mindroom\.rtc\.notification.notification_type";
-const RING_DEDUP_TTL: Duration = Duration::from_secs(120);
+const RING_DEDUP_TTL: Duration = Duration::from_mins(2);
 
 type AcceptedRingMap = HashMap<OwnedEventId, (OwnedEventId, Instant)>;
 
