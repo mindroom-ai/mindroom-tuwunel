@@ -24,8 +24,8 @@ use super::{
 	mindroom_terminal_push_event,
 	ring_rules::{
 		self, AcceptedRings, DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS, MAX_RING_ROOM_MEMBERS,
-		RING_ENCRYPTED_RULE_ID, RING_HINT_KEY, RING_RULE_ID, RING_SOUND_TWEAK,
-		RTC_NOTIFICATION_EVENT_TYPE, is_live_call_membership, is_room_muted,
+		RING_ENCRYPTED_RULE_ID, RING_RULE_ID, RING_SOUND_TWEAK, RTC_NOTIFICATION_EVENT_TYPE,
+		is_live_call_membership, ring_permitted,
 	},
 };
 
@@ -446,7 +446,7 @@ fn encrypted_ring_event_with_type(
 	let obj = content.as_object_mut().expect("content object");
 	if let Some(notification_type) = hint_notification_type {
 		obj.insert(
-			RING_HINT_KEY.into(),
+			"io.mindroom.rtc.notification".into(),
 			json!({
 				"lifetime": 30_000,
 				"m.call.intent": "audio",
@@ -701,46 +701,103 @@ async fn room_mute_override_wins_before_and_after_ring_rule_merge() {
 }
 
 #[test]
-fn room_kind_mute_detection_checks_enabled_and_notify_action() {
+fn ring_permitted_needs_ring_actions_a_known_small_count_and_no_room_mute() {
 	let user = owned_user_id!("@bob:example.com");
+	let room = owned_room_id!("!room:example.com");
 	let muted_room = owned_room_id!("!muted:example.com");
-	let notify_room = owned_room_id!("!notify:example.com");
-	let disabled_room = owned_room_id!("!disabled:example.com");
-	let other_room = owned_room_id!("!other:example.com");
+	let disabled_mute_room = owned_room_id!("!disabled:example.com");
 
 	let mut ruleset = ring_rules::server_default(&user);
+	for room_id in [&muted_room, &disabled_mute_room] {
+		ruleset
+			.insert(
+				NewPushRule::Room(NewSimplePushRule::new(room_id.clone(), Vec::new().into())),
+				None,
+				None,
+			)
+			.expect("insert room mute");
+	}
 	ruleset
-		.insert(
-			NewPushRule::Room(NewSimplePushRule::new(muted_room.clone(), Vec::new().into())),
-			None,
-			None,
-		)
-		.expect("insert room mute");
-	ruleset
-		.insert(
-			NewPushRule::Room(NewSimplePushRule::new(
-				notify_room.clone(),
-				vec![Action::Notify].into(),
-			)),
-			None,
-			None,
-		)
-		.expect("insert room notify");
-	ruleset
-		.insert(
-			NewPushRule::Room(NewSimplePushRule::new(disabled_room.clone(), Vec::new().into())),
-			None,
-			None,
-		)
-		.expect("insert disabled room mute");
-	ruleset
-		.set_enabled(RuleKind::Room, disabled_room.as_str(), false)
+		.set_enabled(RuleKind::Room, disabled_mute_room.as_str(), false)
 		.expect("disable room mute");
 
-	assert!(is_room_muted(&ruleset, &muted_room));
-	assert!(!is_room_muted(&ruleset, &notify_room));
-	assert!(!is_room_muted(&ruleset, &disabled_room));
-	assert!(!is_room_muted(&ruleset, &other_room));
+	let ring = ruleset
+		.get(RuleKind::Override, RING_RULE_ID)
+		.expect("ring rule")
+		.actions();
+	let max = u64::from(MAX_RING_ROOM_MEMBERS);
+
+	assert!(ring_permitted(ring, &ruleset, &room, Some(2)));
+	assert!(ring_permitted(ring, &ruleset, &room, Some(max)));
+	assert!(ring_permitted(ring, &ruleset, &disabled_mute_room, Some(2)));
+
+	assert!(!ring_permitted(ring, &ruleset, &room, None), "unknown joined count");
+	assert!(!ring_permitted(ring, &ruleset, &room, Some(max.saturating_add(1))));
+	assert!(!ring_permitted(ring, &ruleset, &muted_room, Some(2)), "room-kind mute");
+
+	let default_sound = Action::SetTweak(Tweak::Sound(SoundTweakValue::Default));
+	let ring_sound = Action::SetTweak(Tweak::Sound(RING_SOUND_TWEAK.into()));
+	for actions in [vec![], vec![Action::Notify], vec![Action::Notify, default_sound], vec![
+		ring_sound,
+	]] {
+		assert!(!ring_permitted(&actions, &ruleset, &room, Some(2)), "{actions:?}");
+	}
+}
+
+#[test]
+fn legacy_repair_keeps_stored_ring_rules_and_adds_no_missing_one() {
+	let user = owned_user_id!("@bob:example.com");
+
+	// Stored: the plain ring rule disabled, the encrypted one with custom actions.
+	let mut stored = ring_rules::server_default(&user);
+	stored
+		.set_enabled(RuleKind::Override, RING_RULE_ID, false)
+		.expect("disable ring rule");
+	stored
+		.set_actions(RuleKind::Override, RING_ENCRYPTED_RULE_ID, vec![Action::Notify].into())
+		.expect("customize encrypted ring rule");
+
+	ring_rules::update_with_server_default(&mut stored, &user);
+	let repaired = ring_rules::merged(stored);
+	assert!(
+		!repaired
+			.get(RuleKind::Override, RING_RULE_ID)
+			.expect("ring rule kept")
+			.enabled()
+	);
+	assert!(matches!(
+		repaired
+			.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
+			.expect("encrypted ring rule kept")
+			.actions(),
+		[Action::Notify]
+	));
+	let ids: Vec<_> = repaired
+		.override_
+		.iter()
+		.map(|rule| rule.rule_id.as_str())
+		.collect();
+	let ring_at = ids
+		.iter()
+		.position(|id| *id == RING_RULE_ID)
+		.expect("ring rule position");
+	assert_eq!(ids[ring_at..ring_at.saturating_add(3)], [
+		RING_RULE_ID,
+		RING_ENCRYPTED_RULE_ID,
+		PredefinedOverrideRuleId::IsUserMention.as_str()
+	]);
+
+	// Stored without ring rules: the repair persists none.
+	let mut old = Ruleset::server_default(&user);
+	ring_rules::update_with_server_default(&mut old, &user);
+	assert!(
+		old.get(RuleKind::Override, RING_RULE_ID)
+			.is_none()
+	);
+	assert!(
+		old.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
+			.is_none()
+	);
 }
 
 #[tokio::test]
@@ -893,158 +950,76 @@ fn merged_adds_missing_ring_rules_and_preserves_user_overrides_and_state() {
 
 #[test]
 fn accepted_rings_allows_same_ring_rejects_second_and_expires_after_two_minutes() {
-	let tracker = AcceptedRings::default();
+	let claims = AcceptedRings::default();
 	let membership = EventId::parse("$membership_a").expect("event id");
 	let other_membership = EventId::parse("$membership_b").expect("event id");
 	let ring1 = EventId::parse("$ring_1").expect("event id");
 	let ring2 = EventId::parse("$ring_2").expect("event id");
 
 	let t0 = Instant::now();
-	assert!(tracker.accept_at(&membership, &ring1, t0));
+	let later = t0
+		.checked_add(Duration::from_secs(10))
+		.expect("instant");
+	let expired = t0
+		.checked_add(Duration::from_secs(121))
+		.expect("instant");
+	assert!(claims.claim(&membership, &ring1, t0));
 	assert!(
-		tracker.accept_at(&membership, &ring1, t0.checked_add(Duration::from_secs(10)).unwrap()),
-		"the same ring event passes again at dispatch"
+		claims.claim(&membership, &ring1, later),
+		"the same ring passes again at dispatch"
 	);
-	assert!(
-		!tracker.accept_at(&membership, &ring2, t0.checked_add(Duration::from_secs(10)).unwrap()),
-		"a second ring event for the same membership is rejected"
-	);
-	assert!(
-		tracker.accept_at(
-			&other_membership,
-			&ring2,
-			t0.checked_add(Duration::from_secs(10)).unwrap(),
-		),
-		"another call membership is tracked independently"
-	);
-	assert!(
-		tracker.accept_at(&membership, &ring2, t0.checked_add(Duration::from_secs(121)).unwrap()),
-		"entries expire after two minutes"
-	);
+	assert!(!claims.claim(&membership, &ring2, later), "a second ring is rejected");
+	assert!(claims.claim(&other_membership, &ring2, later), "memberships are independent");
+	assert!(claims.claim(&membership, &ring2, expired), "claims expire after two minutes");
 }
 
 #[test]
 fn call_membership_liveness_checks_shape_leave_and_expiry() {
 	let origin_ts: u64 = 1_795_300_000_000;
 	let now_ms = origin_ts.saturating_add(10_000);
-
-	// Valid MSC4143 session shape with explicit expires.
-	let valid_session = json!({
-		"application": "m.call",
-		"call_id": "",
-		"device_id": "DEV1",
-		"expires": 60_000,
-		"focus_active": { "type": "livekit", "focus_selection": "oldest_membership" },
-		"foci_preferred": [{ "type": "livekit", "livekit_service_url": "https://rtc.example.com" }],
-		"scope": "m.room",
-	});
-	assert!(is_live_call_membership(&valid_session, origin_ts, now_ms));
-
-	// Valid MSC4143 session shape with omitted expires uses default 4h lifetime.
-	let default_expiry = json!({
-		"application": "m.call",
-		"call_id": "",
-		"device_id": "DEV1",
-		"focus_active": { "type": "livekit" },
-	});
-	assert!(is_live_call_membership(&default_expiry, origin_ts, now_ms));
-	assert!(
-		!is_live_call_membership(
-			&default_expiry,
-			origin_ts,
-			origin_ts.saturating_add(DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS),
-		),
-		"default expiry expires at origin_ts + DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS"
-	);
-
-	// Expired via created_ts + expires (even though origin_server_ts is fresh).
-	let expired_created = json!({
-		"application": "m.call",
-		"call_id": "",
-		"created_ts": origin_ts.saturating_sub(120_000),
-		"device_id": "DEV1",
-		"expires": 60_000,
-		"focus_active": { "type": "livekit" },
-	});
-	assert!(!is_live_call_membership(&expired_created, origin_ts, now_ms));
-
-	// Expired via origin_server_ts + expires.
-	let expired_origin = json!({
-		"application": "m.call",
-		"call_id": "",
-		"device_id": "DEV1",
-		"expires": 5_000,
-		"focus_active": { "type": "livekit" },
-	});
-	assert!(!is_live_call_membership(&expired_origin, origin_ts, now_ms));
-
-	// Valid legacy `memberships` list (one expired + one live).
-	let legacy_live = json!({
-		"memberships": [
-			{
-				"application": "m.call",
-				"call_id": "",
-				"device_id": "OLD",
-				"expires": 1_000,
-				"focus_active": { "type": "livekit" },
-			},
-			{
-				"application": "m.call",
-				"call_id": "",
-				"device_id": "LIVE",
-				"expires": 60_000,
-				"focus_active": { "type": "livekit" },
-			},
-		]
-	});
-	assert!(is_live_call_membership(&legacy_live, origin_ts, now_ms));
-
-	// Legacy `memberships` list with only expired entries is invalid.
-	let legacy_expired = json!({
-		"memberships": [
-			{
-				"application": "m.call",
-				"call_id": "",
-				"device_id": "OLD",
-				"expires": 1_000,
-				"focus_active": { "type": "livekit" },
-			},
-		]
-	});
-	assert!(!is_live_call_membership(&legacy_expired, origin_ts, now_ms));
-
-	// Leave with only `leave_reason`, empty object, empty memberships, malformed shapes.
-	assert!(!is_live_call_membership(
-		&json!({ "leave_reason": "user_left" }),
-		origin_ts,
-		now_ms
-	));
-	assert!(!is_live_call_membership(&json!({}), origin_ts, now_ms));
-	assert!(!is_live_call_membership(&json!({ "memberships": [] }), origin_ts, now_ms));
-	assert!(!is_live_call_membership(
-		&json!({ "application": "m.call", "call_id": "", "device_id": "DEV1" }),
-		origin_ts,
-		now_ms,
-	));
-	assert!(!is_live_call_membership(
-		&json!({
+	let live =
+		|content: JsonValue, now_ms: u64| is_live_call_membership(&content, origin_ts, now_ms);
+	let member = |extra: JsonValue| {
+		let mut content = json!({
 			"application": "m.call",
 			"call_id": "",
 			"device_id": "DEV1",
-			"expires": 0,
-			"focus_active": { "type": "livekit" },
-		}),
-		origin_ts,
-		now_ms,
-	));
-	assert!(!is_live_call_membership(
-		&json!({
-			"application": 42,
-			"call_id": "",
-			"device_id": "DEV1",
-			"focus_active": { "type": "livekit" },
-		}),
-		origin_ts,
-		now_ms,
-	));
+			"focus_active": { "type": "livekit", "focus_selection": "oldest_membership" },
+			"foci_preferred": [],
+			"scope": "m.room",
+		});
+		content
+			.as_object_mut()
+			.expect("content object")
+			.extend(extra.as_object().expect("extra object").clone());
+		content
+	};
+
+	// The per-device MSC4143 form, with and without an explicit lifetime.
+	assert!(live(member(json!({ "expires": 60_000 })), now_ms));
+	assert!(live(member(json!({})), now_ms));
+	assert!(
+		!live(member(json!({})), origin_ts.saturating_add(DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS)),
+		"the default lifetime counts from origin_server_ts"
+	);
+
+	// Expired, counted from `created_ts` when present and `origin_server_ts` otherwise.
+	let created_ts = origin_ts.saturating_sub(120_000);
+	assert!(!live(member(json!({ "created_ts": created_ts, "expires": 60_000 })), now_ms));
+	assert!(!live(member(json!({ "expires": 5_000 })), now_ms));
+	assert!(!live(member(json!({ "expires": 0 })), now_ms));
+
+	// Left, another application, or not the per-device form.
+	assert!(!live(json!({}), now_ms));
+	assert!(!live(json!({ "leave_reason": "user_left" }), now_ms));
+	assert!(!live(member(json!({ "leave_reason": "user_left" })), now_ms));
+	assert!(!live(member(json!({ "application": "m.other" })), now_ms));
+	assert!(!live(member(json!({ "application": 42 })), now_ms));
+	assert!(!live(member(json!({ "device_id": "" })), now_ms));
+	assert!(!live(member(json!({ "expires": "soon" })), now_ms));
+	assert!(!live(json!({ "application": "m.call", "call_id": "" }), now_ms));
+	assert!(
+		!live(json!({ "memberships": [member(json!({ "expires": 60_000 }))] }), now_ms),
+		"the legacy memberships array is not supported"
+	);
 }

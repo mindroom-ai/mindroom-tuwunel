@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use futures::FutureExt;
-use ruma::{UserId, events::GlobalAccountDataEventType};
+use ruma::{UserId, events::GlobalAccountDataEventType, push};
 use tuwunel_core::{
 	Err, Result, error, implement, info, is_equal_to,
 	utils::{BoolExt, string::truncate_chars},
@@ -133,7 +133,7 @@ pub async fn full_register(
 				.into(),
 			&serde_json::to_value(ruma::events::push_rules::PushRulesEvent {
 				content: ruma::events::push_rules::PushRulesEventContent {
-					global: crate::pusher::ring_rules::server_default(user_id),
+					global: push::Ruleset::server_default(user_id),
 				},
 			})?,
 		)

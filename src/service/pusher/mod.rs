@@ -609,33 +609,17 @@ pub async fn get_actions<'a>(
 		return &[];
 	}
 
-	let mut ring_valid: Option<bool> = None;
-
+	// `Ruleset::get_actions`, except that a ring rule wins only if the ring is
+	// allowed (see `ring_rules`).
 	for rule in ruleset {
-		if !rule.applies(&flattened, &ctx).await {
-			continue;
+		if rule.applies(&flattened, &ctx).await
+			&& (!ring_rules::is_ring_rule(rule)
+				|| self
+					.ring_allowed(rule, ruleset, room_id, pdu)
+					.await)
+		{
+			return rule.actions();
 		}
-
-		if ring_rules::is_ring_rule(rule) {
-			if ring_rules::is_room_muted(ruleset, room_id) {
-				continue;
-			}
-
-			let valid = match ring_valid {
-				| Some(valid) => valid,
-				| None => {
-					let valid = self.ring_push_is_valid(room_id, pdu).await;
-					ring_valid = Some(valid);
-					valid
-				},
-			};
-
-			if !valid {
-				continue;
-			}
-		}
-
-		return rule.actions();
 	}
 
 	&[]

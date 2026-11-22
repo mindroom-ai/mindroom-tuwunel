@@ -50,8 +50,8 @@ use tuwunel_service::{
 	pusher::{
 		Evaluate,
 		ring_rules::{
-			CALL_MEMBER_EVENT_TYPE, RING_ENCRYPTED_RULE_ID, RING_HINT_KEY, RING_RULE_ID,
-			RING_SOUND_TWEAK, RTC_NOTIFICATION_EVENT_TYPE,
+			CALL_MEMBER_EVENT_TYPE, RING_ENCRYPTED_RULE_ID, RING_RULE_ID, RING_SOUND_TWEAK,
+			RTC_NOTIFICATION_EVENT_TYPE,
 		},
 	},
 	sending::{Destination, SendingEvent},
@@ -1514,8 +1514,10 @@ const ALICE_RING_TOKEN: &str = "call-ring-push-rules-test-alice-access-token";
 const BOB_RING_TOKEN: &str = "call-ring-push-rules-test-bob-access-token";
 const CHARLIE_RING_TOKEN: &str = "call-ring-push-rules-test-charlie-access-token";
 const DANA_RING_TOKEN: &str = "call-ring-push-rules-test-dana-access-token";
+const RING_HINT_KEY: &str = "io.mindroom.rtc.notification";
 
 struct RingTestUsers<'a> {
+	services: &'a Services,
 	alice: client::Client<'a>,
 	bob: client::Client<'a>,
 	charlie: client::Client<'a>,
@@ -1529,27 +1531,20 @@ struct RingTestUsers<'a> {
 async fn exercise_call_ring_cases(services: &Services, base: &str) -> Result {
 	client::wait_until_ready(services, base).await?;
 
-	let alice_id = client::register(services, "alice", ALICE_RING_TOKEN).await?;
-	let bob_id = client::register(services, "bob", BOB_RING_TOKEN).await?;
-	let charlie_id = client::register(services, "charlie", CHARLIE_RING_TOKEN).await?;
-	let dana_id = client::register(services, "dana", DANA_RING_TOKEN).await?;
-
+	let client = |token| client::Client { services, base, token };
 	let users = RingTestUsers {
-		alice: client::Client { services, base, token: ALICE_RING_TOKEN },
-		bob: client::Client { services, base, token: BOB_RING_TOKEN },
-		charlie: client::Client {
-			services,
-			base,
-			token: CHARLIE_RING_TOKEN,
-		},
-		dana: client::Client { services, base, token: DANA_RING_TOKEN },
-		alice_id,
-		bob_id,
-		charlie_id,
-		dana_id,
+		services,
+		alice: client(ALICE_RING_TOKEN),
+		bob: client(BOB_RING_TOKEN),
+		charlie: client(CHARLIE_RING_TOKEN),
+		dana: client(DANA_RING_TOKEN),
+		alice_id: client::register(services, "alice", ALICE_RING_TOKEN).await?,
+		bob_id: client::register(services, "bob", BOB_RING_TOKEN).await?,
+		charlie_id: client::register(services, "charlie", CHARLIE_RING_TOKEN).await?,
+		dana_id: client::register(services, "dana", DANA_RING_TOKEN).await?,
 	};
 
-	let room2 = create_room_with(&users.alice, &[(&users.bob, &users.bob_id)]).await?;
+	let room2 = users.room_with_bob().await?;
 	let room3 = create_room_with(&users.alice, &[
 		(&users.bob, &users.bob_id),
 		(&users.charlie, &users.charlie_id),
@@ -1561,20 +1556,21 @@ async fn exercise_call_ring_cases(services: &Services, base: &str) -> Result {
 		(&users.dana, &users.dana_id),
 	])
 	.await?;
-	let other_room = create_room_with(&users.alice, &[(&users.bob, &users.bob_id)]).await?;
 
 	let (mut bob_rx, _bob_stub) =
 		register_stub_pusher(services, &users.bob_id, "bob-ring-key").await?;
 
-	verify_live_clear_and_encrypted_rings(services, &users, &room2, &room3, &mut bob_rx).await?;
-	verify_invalid_ring_references(services, &users, &room2, &other_room).await?;
-	verify_membership_liveness(services, &users, &room2).await?;
-	verify_unmutated_fallback_and_case_variant(services, &users, &room2).await?;
-	verify_four_members_and_group_notification(services, &users, &room2, &room4).await?;
-	verify_override_and_room_kind_mutes(services, &users, &mut bob_rx).await?;
-	verify_ignore_precedence(services, &users).await?;
-	verify_old_ruleset_merge_get_and_disable_before_get(services, &users, &room2).await?;
-	verify_genuinely_legacy_ruleset(services, &users, &room2).await
+	verify_live_clear_and_encrypted_rings(&users, &room2, &room3, &mut bob_rx).await?;
+	verify_invalid_ring_references(&users, &room2).await?;
+	verify_membership_liveness(&users, &room2).await?;
+	verify_unmutated_fallback_and_case_variant(&users, &room2).await?;
+	verify_room_size_and_group_notification(&users, &room2, &room4).await?;
+	verify_changed_actions_leave_membership_unclaimed(&users, &room2).await?;
+	verify_override_and_room_kind_mutes(&users, &mut bob_rx).await?;
+	verify_ignore_precedence(&users).await?;
+	verify_old_ruleset_merge_get_and_disable_before_get(&users, &room2).await?;
+	verify_legacy_repair_keeps_disabled_ring_rule(&users, &room2).await?;
+	verify_genuinely_legacy_ruleset(&users, &room2).await
 }
 
 async fn create_room_with(
@@ -1615,6 +1611,7 @@ async fn register_stub_pusher(
 	Ok((rx, stub))
 }
 
+/// The per-device MSC4143 call membership content matrix-js-sdk writes.
 fn active_call_member_content(device_id: &str) -> Value {
 	json!({
 		"application": "m.call",
@@ -1626,6 +1623,22 @@ fn active_call_member_content(device_id: &str) -> Value {
 	})
 }
 
+fn ring_content(notification_type: &str) -> Value {
+	json!({
+		"lifetime": 30_000,
+		"m.call.intent": "audio",
+		"notification_type": notification_type,
+		"sender_ts": 1_795_300_000_000_i64,
+	})
+}
+
+fn with_reference(mut content: Value, membership_id: Option<&EventId>) -> Value {
+	if let Some(membership_id) = membership_id {
+		content["m.relates_to"] = json!({ "rel_type": "m.reference", "event_id": membership_id });
+	}
+	content
+}
+
 async fn send_clear_ring(
 	sender: &client::Client<'_>,
 	room_id: &RoomId,
@@ -1633,21 +1646,7 @@ async fn send_clear_ring(
 	notification_type: &str,
 	membership_id: Option<&EventId>,
 ) -> Result<OwnedEventId> {
-	let mut content = json!({
-		"lifetime": 30_000,
-		"m.call.intent": "audio",
-		"notification_type": notification_type,
-		"sender_ts": 1_795_300_000_000_i64,
-	});
-	if let Some(membership_id) = membership_id {
-		content
-			.as_object_mut()
-			.expect("content object")
-			.insert(
-				"m.relates_to".into(),
-				json!({ "rel_type": "m.reference", "event_id": membership_id }),
-			);
-	}
+	let content = with_reference(ring_content(notification_type), membership_id);
 	let path = format!("rooms/{room_id}/send/{RTC_NOTIFICATION_EVENT_TYPE}/{txn_id}");
 	sender.put_event(&path, &content).await
 }
@@ -1658,28 +1657,17 @@ async fn send_encrypted_ring(
 	txn_id: &str,
 	membership_id: Option<&EventId>,
 ) -> Result<OwnedEventId> {
-	let mut content = json!({
-		"algorithm": "m.megolm.v1.aes-sha2",
-		"ciphertext": "encrypted ring payload",
-		"device_id": "DEV1",
-		"sender_key": "sender-key",
-		"session_id": "session-1",
-		RING_HINT_KEY: {
-			"lifetime": 30_000,
-			"m.call.intent": "audio",
-			"notification_type": "ring",
-			"sender_ts": 1_795_300_000_000_i64,
-		},
-	});
-	if let Some(membership_id) = membership_id {
-		content
-			.as_object_mut()
-			.expect("content object")
-			.insert(
-				"m.relates_to".into(),
-				json!({ "rel_type": "m.reference", "event_id": membership_id }),
-			);
-	}
+	let content = with_reference(
+		json!({
+			"algorithm": "m.megolm.v1.aes-sha2",
+			"ciphertext": "encrypted ring payload",
+			"device_id": "DEV1",
+			"sender_key": "sender-key",
+			"session_id": "session-1",
+			RING_HINT_KEY: ring_content("ring"),
+		}),
+		membership_id,
+	);
 	let path = format!("rooms/{room_id}/send/m.room.encrypted/{txn_id}");
 	sender.put_event(&path, &content).await
 }
@@ -1717,386 +1705,263 @@ fn has_ring_sound_action(actions: &[Action]) -> bool {
 	})
 }
 
-fn has_any_sound_action(actions: &[Action]) -> bool {
-	actions
-		.iter()
-		.any(|action| matches!(action, Action::SetTweak(Tweak::Sound(_))))
+/// Wait for the push for `event_id` and check that it is a ring.
+async fn expect_ring_push(rx: &mut CaptureRx, event_id: &EventId, event_type: &str) -> Result {
+	let body: Value = loop {
+		let (_path, body) = recv(rx).await?;
+		if captured_event_id(&body).is_ok_and(|pushed| *pushed == *event_id) {
+			break serde_json::from_slice(&body)?;
+		}
+	};
+
+	let notif = notification(&body)?;
+	if !matches!(notif.get("prio").and_then(Value::as_str), None | Some("high")) {
+		return Err!("expected a high priority push, got {:?}", notif.get("prio"));
+	}
+	expect_str(notif, "type", event_type)?;
+	let tweaks = &first_device(notif)?["tweaks"];
+	expect_str(tweaks, "sound", RING_SOUND_TWEAK)?;
+	expect_absent(tweaks, "highlight")
 }
 
-async fn recv_push_for_event(rx: &mut CaptureRx, want_event_id: &EventId) -> Result<Value> {
-	let deadline = Duration::from_secs(5);
-	timeout(deadline, async {
-		loop {
-			let Some((_path, body)) = rx.recv().await else {
-				return Err!("stub gateway closed before delivering {want_event_id}");
-			};
-			let parsed: Value = serde_json::from_slice(&body)?;
-			let notif = notification(&parsed)?;
-			if notif.get("event_id").and_then(Value::as_str) == Some(want_event_id.as_str()) {
-				return Ok(parsed);
+/// Fail if a push for one of `event_ids` arrives within a short window.
+/// Pushes for other events can still be in flight and are skipped.
+async fn expect_no_push_for(rx: &mut CaptureRx, event_ids: &[&EventId]) -> Result {
+	let unexpected = async {
+		while let Some((_path, body)) = rx.recv().await {
+			if let Ok(pushed) = captured_event_id(&body)
+				&& event_ids.contains(&&*pushed)
+			{
+				return Err!("unexpected push for {pushed}");
 			}
 		}
-	})
-	.await
-	.map_err(|_| err!("timed out waiting for push for {want_event_id}"))?
+		Ok(())
+	};
+
+	timeout(Duration::from_millis(300), unexpected)
+		.await
+		.unwrap_or(Ok(()))
 }
 
-fn drain_pushes(rx: &mut CaptureRx) { while rx.try_recv().is_ok() {} }
+impl RingTestUsers<'_> {
+	async fn room_with_bob(&self) -> Result<OwnedRoomId> {
+		create_room_with(&self.alice, &[(&self.bob, &self.bob_id)]).await
+	}
 
-async fn assert_no_push_arrives(rx: &mut CaptureRx, wait: Duration) -> Result {
-	match timeout(wait, rx.recv()).await {
-		| Err(_) | Ok(None) => Ok(()),
-		| Ok(Some((path, body))) =>
-			Err!("unexpected push delivered to {path}: {}", String::from_utf8_lossy(&body)),
+	/// Alice joins the call in `room_id`; returns her call membership event.
+	async fn join_call(&self, room_id: &RoomId, label: &str) -> Result<OwnedEventId> {
+		self.alice
+			.put_state(
+				room_id,
+				CALL_MEMBER_EVENT_TYPE,
+				&format!("_alice_{label}"),
+				&active_call_member_content(label),
+			)
+			.await
+	}
+
+	/// Alice joins the call in `room_id` and sends a clear ring for it.
+	async fn clear_ring(&self, room_id: &RoomId, label: &str) -> Result<OwnedEventId> {
+		let membership = self.join_call(room_id, label).await?;
+		send_clear_ring(&self.alice, room_id, label, "ring", Some(&membership)).await
+	}
+
+	/// Alice joins the call in `room_id` and sends an encrypted ring for it.
+	async fn encrypted_ring(&self, room_id: &RoomId, label: &str) -> Result<OwnedEventId> {
+		let membership = self
+			.join_call(room_id, &format!("{label}-enc"))
+			.await?;
+		send_encrypted_ring(&self.alice, room_id, &format!("{label}-enc"), Some(&membership))
+			.await
+	}
+
+	async fn bob_actions(&self, event_id: &EventId) -> Result<Vec<Action>> {
+		eval_actions_for_event(self.services, &self.bob_id, event_id).await
+	}
+
+	/// Whether `event_id` evaluates to a ring for Bob.
+	async fn expect_rings(&self, event_id: &EventId, want: bool, case: &str) -> Result {
+		let actions = self.bob_actions(event_id).await?;
+		if has_ring_sound_action(&actions) != want
+			|| (want && !actions.iter().any(Action::should_notify))
+		{
+			return Err!("{case}: expected ring={want}, got {actions:?}");
+		}
+		Ok(())
+	}
+
+	/// A clear and an encrypted ring get from Bob's rules what they get
+	/// without the ring rules: no actions for the clear ring, a notify
+	/// without the ring sound for the encrypted one.
+	async fn expect_as_main(&self, clear: &EventId, encrypted: &EventId, case: &str) -> Result {
+		let clear_actions = self.bob_actions(clear).await?;
+		if !clear_actions.is_empty() {
+			return Err!("{case}: clear ring should get no actions, got {clear_actions:?}");
+		}
+
+		let enc_actions = self.bob_actions(encrypted).await?;
+		if has_ring_sound_action(&enc_actions) || !enc_actions.iter().any(Action::should_notify) {
+			return Err!("{case}: encrypted ring should only notify, got {enc_actions:?}");
+		}
+		Ok(())
+	}
+
+	/// Rings from Alice in `room_id` that reference `membership_id` do not
+	/// ring for Bob.
+	async fn expect_refused(
+		&self,
+		room_id: &RoomId,
+		label: &str,
+		membership_id: Option<&EventId>,
+	) -> Result {
+		let txn_id = format!("refused-clear-{label}");
+		let clear = send_clear_ring(&self.alice, room_id, &txn_id, "ring", membership_id).await?;
+		let txn_id = format!("refused-enc-{label}");
+		let encrypted = send_encrypted_ring(&self.alice, room_id, &txn_id, membership_id).await?;
+		self.expect_as_main(&clear, &encrypted, label)
+			.await
+	}
+
+	async fn stored_ruleset(&self, user: &UserId) -> Result<Ruleset> {
+		let event: PushRulesEvent = self
+			.services
+			.account_data
+			.get_global(user, GlobalAccountDataEventType::PushRules)
+			.await?;
+		Ok(event.content.global)
+	}
+
+	async fn store_ruleset(&self, user: &UserId, global: Ruleset) -> Result {
+		let ty = GlobalAccountDataEventType::PushRules;
+		let event = PushRulesEvent {
+			content: PushRulesEventContent { global },
+		};
+		self.services
+			.account_data
+			.update(None, user, ty.to_string().into(), &serde_json::to_value(event)?)
+			.await
 	}
 }
 
 async fn verify_live_clear_and_encrypted_rings(
-	services: &Services,
 	users: &RingTestUsers<'_>,
 	room2: &RoomId,
 	room3: &RoomId,
 	bob_rx: &mut CaptureRx,
 ) -> Result {
-	// 1. Clear ring in 2-member room with live call membership delivers sound: ring.
-	let mem_clear = users
-		.alice
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_dev1",
-			&active_call_member_content("DEV1"),
-		)
+	// A clear ring for a live call membership rings.
+	let membership = users.join_call(room2, "clear").await?;
+	let ring = send_clear_ring(&users.alice, room2, "clear-1", "ring", Some(&membership)).await?;
+	expect_ring_push(bob_rx, &ring, RTC_NOTIFICATION_EVENT_TYPE).await?;
+
+	// A second ring for the same membership does not, and the first still
+	// passes, as it must at dispatch.
+	let second =
+		send_clear_ring(&users.alice, room2, "clear-2", "ring", Some(&membership)).await?;
+	let second_actions = users.bob_actions(&second).await?;
+	if !second_actions.is_empty() {
+		return Err!("second ring for a membership should be silent: {second_actions:?}");
+	}
+	expect_no_push_for(bob_rx, &[&second]).await?;
+	users
+		.expect_rings(&ring, true, "first ring again")
 		.await?;
-	let clear_ring_1 =
-		send_clear_ring(&users.alice, room2, "clear-1", "ring", Some(&mem_clear)).await?;
 
-	let push = recv_push_for_event(bob_rx, &clear_ring_1).await?;
-	let notif = notification(&push)?;
-	if !matches!(notif.get("prio").and_then(Value::as_str), None | Some("high")) {
-		return Err!(
-			"expected high priority push (omitted or high), got {:?}",
-			notif.get("prio")
-		);
+	// So does an encrypted ring carrying the hint.
+	let ring = users.encrypted_ring(room2, "two").await?;
+	expect_ring_push(bob_rx, &ring, "m.room.encrypted").await?;
+
+	// Three members: the one ring rings for both others.
+	let membership = users.join_call(room3, "three").await?;
+	let ring = send_encrypted_ring(&users.alice, room3, "three-1", Some(&membership)).await?;
+	expect_ring_push(bob_rx, &ring, "m.room.encrypted").await?;
+	let charlie_actions =
+		eval_actions_for_event(users.services, &users.charlie_id, &ring).await?;
+	if !has_ring_sound_action(&charlie_actions) {
+		return Err!("the ring should also ring for the third member: {charlie_actions:?}");
 	}
-	expect_str(notif, "type", RTC_NOTIFICATION_EVENT_TYPE)?;
-	let device = first_device(notif)?;
-	expect_str(&device["tweaks"], "sound", RING_SOUND_TWEAK)?;
-	expect_absent(&device["tweaks"], "highlight")?;
 
-	// 2. Second clear ring for the same membership is not audible.
-	let clear_ring_2 =
-		send_clear_ring(&users.alice, room2, "clear-2", "ring", Some(&mem_clear)).await?;
-	let second_clear_actions =
-		eval_actions_for_event(services, &users.bob_id, &clear_ring_2).await?;
-	if !second_clear_actions.is_empty() {
-		return Err!(
-			"second clear ring for same membership should be silent: {second_clear_actions:?}"
-		);
-	}
-	assert_no_push_arrives(bob_rx, Duration::from_millis(300)).await?;
-
-	// 3. Encrypted ring in 2-member room with live call membership delivers sound: ring.
-	let mem_enc = users
-		.alice
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_dev2",
-			&active_call_member_content("DEV2"),
-		)
-		.await?;
-	let enc_ring_1 = send_encrypted_ring(&users.alice, room2, "enc-1", Some(&mem_enc)).await?;
-
-	let push = recv_push_for_event(bob_rx, &enc_ring_1).await?;
-	let notif = notification(&push)?;
-	if !matches!(notif.get("prio").and_then(Value::as_str), None | Some("high")) {
-		return Err!(
-			"expected high priority push (omitted or high), got {:?}",
-			notif.get("prio")
-		);
-	}
-	expect_str(notif, "type", "m.room.encrypted")?;
-	let device = first_device(notif)?;
-	expect_str(&device["tweaks"], "sound", RING_SOUND_TWEAK)?;
-	expect_absent(&device["tweaks"], "highlight")?;
-
-	// 4. 3-member room: first encrypted ring gives sound: ring; second for same membership is not audible.
-	let mem_3 = users
-		.alice
-		.put_state(
-			room3,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_r3",
-			&active_call_member_content("DEV3"),
-		)
-		.await?;
-	let enc_r3_1 = send_encrypted_ring(&users.alice, room3, "enc-r3-1", Some(&mem_3)).await?;
-	let push = recv_push_for_event(bob_rx, &enc_r3_1).await?;
-	let device = first_device(notification(&push)?)?;
-	expect_str(&device["tweaks"], "sound", RING_SOUND_TWEAK)?;
-
-	let enc_r3_2 = send_encrypted_ring(&users.alice, room3, "enc-r3-2", Some(&mem_3)).await?;
-	let second_enc_actions = eval_actions_for_event(services, &users.bob_id, &enc_r3_2).await?;
-	if has_any_sound_action(&second_enc_actions) {
-		return Err!(
-			"second encrypted ring for same membership in 3-member room must not be audible: \
-			 {second_enc_actions:?}"
-		);
-	}
-	drain_pushes(bob_rx);
-
-	Ok(())
+	let second = send_encrypted_ring(&users.alice, room3, "three-2", Some(&membership)).await?;
+	users
+		.expect_rings(&second, false, "second encrypted ring for a membership")
+		.await
 }
 
-async fn assert_ring_refused(
-	services: &Services,
-	bob_id: &UserId,
-	alice: &client::Client<'_>,
-	room_id: &RoomId,
-	label: &str,
-	membership_id: Option<&EventId>,
-) -> Result {
-	let clear_id =
-		send_clear_ring(alice, room_id, &format!("refuse-clear-{label}"), "ring", membership_id)
-			.await?;
-	let clear_actions = eval_actions_for_event(services, bob_id, &clear_id).await?;
-	if !clear_actions.is_empty() {
-		return Err!("{label}: clear ring should get empty actions, got {clear_actions:?}");
-	}
-
-	let enc_id =
-		send_encrypted_ring(alice, room_id, &format!("refuse-enc-{label}"), membership_id)
-			.await?;
-	let enc_actions = eval_actions_for_event(services, bob_id, &enc_id).await?;
-	if has_ring_sound_action(&enc_actions) {
-		return Err!("{label}: encrypted ring must not get sound=ring, got {enc_actions:?}");
-	}
-	if !enc_actions.iter().any(Action::should_notify) {
-		return Err!(
-			"{label}: encrypted ring should still get today's notify action, got {enc_actions:?}"
-		);
-	}
-
-	Ok(())
-}
-
-async fn verify_invalid_ring_references(
-	services: &Services,
-	users: &RingTestUsers<'_>,
-	room2: &RoomId,
-	other_room: &RoomId,
-) -> Result {
-	// No reference.
-	assert_ring_refused(services, &users.bob_id, &users.alice, room2, "no-ref", None).await?;
+async fn verify_invalid_ring_references(users: &RingTestUsers<'_>, room2: &RoomId) -> Result {
+	users
+		.expect_refused(room2, "no-ref", None)
+		.await?;
 
 	// Another user's call membership.
-	let bob_mem = users
+	let bob_membership = users
 		.bob
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_bob_dev1",
-			&active_call_member_content("BOB1"),
-		)
+		.put_state(room2, CALL_MEMBER_EVENT_TYPE, "_bob", &active_call_member_content("BOB"))
 		.await?;
-	assert_ring_refused(
-		services,
-		&users.bob_id,
-		&users.alice,
-		room2,
-		"other-user",
-		Some(&bob_mem),
-	)
-	.await?;
+	users
+		.expect_refused(room2, "other-user", Some(&bob_membership))
+		.await?;
 
-	// Left membership (empty content `{}`).
-	let left_empty = users
-		.alice
-		.put_state(room2, CALL_MEMBER_EVENT_TYPE, "_alice_left_empty", &json!({}))
-		.await?;
-	assert_ring_refused(
-		services,
-		&users.bob_id,
-		&users.alice,
-		room2,
-		"left-empty",
-		Some(&left_empty),
-	)
-	.await?;
-
-	// Left membership (legacy empty `memberships: []`).
-	let left_legacy = users
-		.alice
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_left_legacy",
-			&json!({ "memberships": [] }),
-		)
-		.await?;
-	assert_ring_refused(
-		services,
-		&users.bob_id,
-		&users.alice,
-		room2,
-		"left-legacy",
-		Some(&left_legacy),
-	)
-	.await?;
-
-	// Replaced membership (joined, then replaced by leave on the same state key).
-	let replaced_mem = users
-		.alice
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_replaced",
-			&active_call_member_content("DEV_R"),
-		)
-		.await?;
+	// A membership that a leave on the same state key replaced.
+	let replaced = users.join_call(room2, "replaced").await?;
 	users
 		.alice
 		.put_state(room2, CALL_MEMBER_EVENT_TYPE, "_alice_replaced", &json!({}))
 		.await?;
-	assert_ring_refused(
-		services,
-		&users.bob_id,
-		&users.alice,
-		room2,
-		"replaced",
-		Some(&replaced_mem),
-	)
-	.await?;
-
-	// Live membership in another room.
-	let other_room_mem = users
-		.alice
-		.put_state(
-			other_room,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_other_room",
-			&active_call_member_content("DEV_O"),
-		)
+	users
+		.expect_refused(room2, "replaced", Some(&replaced))
 		.await?;
-	assert_ring_refused(
-		services,
-		&users.bob_id,
-		&users.alice,
-		room2,
-		"other-room",
-		Some(&other_room_mem),
-	)
-	.await
+
+	// A live membership in another room.
+	let other_room = users.room_with_bob().await?;
+	let elsewhere = users.join_call(&other_room, "elsewhere").await?;
+	users
+		.expect_refused(room2, "other-room", Some(&elsewhere))
+		.await
 }
 
-async fn verify_membership_liveness(
-	services: &Services,
-	users: &RingTestUsers<'_>,
-	room2: &RoomId,
-) -> Result {
-	// Leave event with only `leave_reason`.
-	let left_reason = users
-		.alice
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_leave_reason",
-			&json!({ "leave_reason": "user_left" }),
-		)
-		.await?;
-	assert_ring_refused(
-		services,
-		&users.bob_id,
-		&users.alice,
-		room2,
-		"leave-reason",
-		Some(&left_reason),
-	)
-	.await?;
+async fn verify_membership_liveness(users: &RingTestUsers<'_>, room2: &RoomId) -> Result {
+	let mut expired = active_call_member_content("EXPIRED");
+	expired["created_ts"] = json!(1_000);
+	expired["expires"] = json!(1_000);
 
-	// Malformed call.member content (missing required focus_active / device_id).
-	let malformed_mem = users
-		.alice
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_malformed",
-			&json!({ "application": "m.call" }),
-		)
-		.await?;
-	assert_ring_refused(
-		services,
-		&users.bob_id,
-		&users.alice,
-		room2,
-		"malformed",
-		Some(&malformed_mem),
-	)
-	.await?;
+	let mut other_application = active_call_member_content("OTHER");
+	other_application["application"] = json!("m.other");
 
-	// Expired call.member (created_ts + expires in the past).
-	let expired_mem = users
-		.alice
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_expired",
-			&json!({
-				"application": "m.call",
-				"call_id": "",
-				"created_ts": 1_000,
-				"device_id": "DEV_EXP",
-				"expires": 1_000,
-				"focus_active": { "type": "livekit", "focus_selection": "oldest_membership" },
-				"scope": "m.room",
-			}),
-		)
-		.await?;
-	assert_ring_refused(
-		services,
-		&users.bob_id,
-		&users.alice,
-		room2,
-		"expired",
-		Some(&expired_mem),
-	)
-	.await?;
+	let cases = [
+		("left", json!({})),
+		("leave-reason", json!({ "leave_reason": "user_left" })),
+		("malformed", json!({ "application": "m.call" })),
+		("expired", expired),
+		("other-application", other_application),
+		// The legacy array form is not supported.
+		(
+			"memberships-array",
+			json!({ "memberships": [active_call_member_content("ARRAY")] }),
+		),
+	];
 
-	// Live legacy `memberships` list shape is accepted.
-	let legacy_live_mem = users
-		.alice
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_legacy_live",
-			&json!({
-				"memberships": [active_call_member_content("DEV_LEG")],
-			}),
-		)
-		.await?;
-	let legacy_ring =
-		send_clear_ring(&users.alice, room2, "legacy-live-clear", "ring", Some(&legacy_live_mem))
+	for (label, content) in cases {
+		let membership = users
+			.alice
+			.put_state(room2, CALL_MEMBER_EVENT_TYPE, &format!("_alice_{label}"), &content)
 			.await?;
-	let legacy_actions = eval_actions_for_event(services, &users.bob_id, &legacy_ring).await?;
-	if !has_ring_sound_action(&legacy_actions) {
-		return Err!("live legacy memberships list should ring, got {legacy_actions:?}");
+		users
+			.expect_refused(room2, label, Some(&membership))
+			.await?;
 	}
 
 	Ok(())
 }
 
 async fn verify_unmutated_fallback_and_case_variant(
-	services: &Services,
 	users: &RingTestUsers<'_>,
 	room2: &RoomId,
 ) -> Result {
-	// Failed validation does not mutate the event: a fallback user rule reading
-	// `content.notification_type` still sees the original event untouched.
-	let unmutated_ring =
-		send_clear_ring(&users.alice, room2, "unmutated-clear", "ring", None).await?;
-	let mut fallback_ruleset = services.pusher.ruleset(&users.bob_id).await;
-	fallback_ruleset
+	// A refused ring is evaluated unchanged: a user rule reading
+	// `content.notification_type` still matches it.
+	let refused = send_clear_ring(&users.alice, room2, "unmutated", "ring", None).await?;
+	let mut ruleset = users.services.pusher.ruleset(&users.bob_id).await;
+	ruleset
 		.insert(
 			NewPushRule::Underride(NewConditionalPushRule::new(
 				"custom_sees_original_ring_field".into(),
@@ -2111,266 +1976,172 @@ async fn verify_unmutated_fallback_and_case_variant(
 			None,
 		)
 		.map_err(|e| err!("insert custom fallback rule: {e}"))?;
-	let unmutated_pdu = services.timeline.get_pdu(&unmutated_ring).await?;
-	let unmutated_raw = unmutated_pdu.to_format();
-	let fallback_actions = services
+	let pdu = users
+		.services
+		.timeline
+		.get_pdu(&refused)
+		.await?
+		.to_format();
+	let actions = users
+		.services
 		.pusher
 		.get_actions(Evaluate {
 			user: &users.bob_id,
-			ruleset: &fallback_ruleset,
+			ruleset: &ruleset,
 			power_levels: None,
-			pdu: &unmutated_raw,
+			pdu: &pdu,
 			room_id: room2,
 			related_events: None,
 		})
 		.await;
-	if !fallback_actions.iter().any(Action::should_notify)
-		|| has_ring_sound_action(fallback_actions)
-	{
-		return Err!(
-			"fallback user rule must see unmutated original event without ring tweak: 			 \
-			 {fallback_actions:?}"
-		);
+	if !matches!(actions, [Action::Notify]) {
+		return Err!("a later user rule must see the original event: {actions:?}");
 	}
 
-	// Case-variant event type does not match the exact ring rules even with a live membership.
-	let live_case_mem = users
-		.alice
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_case",
-			&active_call_member_content("DEV_CASE"),
-		)
-		.await?;
-	let upper_type_event = users
+	// A case variant of the event type does not match the ring rules.
+	let membership = users.join_call(room2, "case").await?;
+	let upper_type = users
 		.alice
 		.put_event(
 			&format!("rooms/{room2}/send/ORG.MATRIX.MSC4075.RTC.NOTIFICATION/case-variant"),
-			&json!({
-				"lifetime": 30_000,
-				"m.call.intent": "audio",
-				"m.relates_to": { "rel_type": "m.reference", "event_id": live_case_mem },
-				"notification_type": "ring",
-				"sender_ts": 1_795_300_000_000_i64,
-			}),
+			&with_reference(ring_content("ring"), Some(&membership)),
 		)
 		.await?;
-	let upper_actions =
-		eval_actions_for_event(services, &users.bob_id, &upper_type_event).await?;
-	if has_ring_sound_action(&upper_actions) {
-		return Err!("case-variant event type must not get sound=ring: {upper_actions:?}");
-	}
+	users
+		.expect_rings(&upper_type, false, "case-variant event type")
+		.await?;
 
-	// Sender no longer joined to the room: ring referencing their old state is rejected.
-	let leave_room = create_room_with(&users.alice, &[(&users.bob, &users.bob_id)]).await?;
-	let left_sender_mem = users
-		.alice
-		.put_state(
-			&leave_room,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_left_room",
-			&active_call_member_content("DEV_LEAVE"),
-		)
+	// A sender who left the room: the ring for their old membership is refused.
+	let leave_room = users.room_with_bob().await?;
+	let ring = users
+		.clear_ring(&leave_room, "before-leave")
 		.await?;
-	let ring_before_leave = send_clear_ring(
-		&users.alice,
-		&leave_room,
-		"before-leave",
-		"ring",
-		Some(&left_sender_mem),
-	)
-	.await?;
 	users.alice.act(&leave_room, "leave").await?;
-	let after_leave_actions =
-		eval_actions_for_event(services, &users.bob_id, &ring_before_leave).await?;
-	if !after_leave_actions.is_empty() {
-		return Err!("ring from sender who left the room must not ring: {after_leave_actions:?}");
-	}
-
-	Ok(())
+	users
+		.expect_rings(&ring, false, "ring from a sender who left the room")
+		.await
 }
 
-async fn verify_four_members_and_group_notification(
-	services: &Services,
+async fn verify_room_size_and_group_notification(
 	users: &RingTestUsers<'_>,
 	room2: &RoomId,
 	room4: &RoomId,
 ) -> Result {
-	let mem4 = users
-		.alice
-		.put_state(
-			room4,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_r4",
-			&active_call_member_content("DEV4"),
-		)
+	// Four members is too many.
+	let clear = users.clear_ring(room4, "four").await?;
+	let encrypted = users.encrypted_ring(room4, "four").await?;
+	users
+		.expect_as_main(&clear, &encrypted, "four-member room")
 		.await?;
-	let clear4 = send_clear_ring(&users.alice, room4, "r4-clear", "ring", Some(&mem4)).await?;
-	let actions4 = eval_actions_for_event(services, &users.bob_id, &clear4).await?;
-	if !actions4.is_empty() {
-		return Err!("four-member room clear ring must not ring: {actions4:?}");
-	}
 
-	let mem4_enc = users
-		.alice
-		.put_state(
-			room4,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_r4_enc",
-			&active_call_member_content("DEV4E"),
-		)
+	// An unknown joined count: the lookup fails, which the rule's own `<=3`
+	// condition reads as zero members.
+	let uncounted = users.room_with_bob().await?;
+	let clear = users.clear_ring(&uncounted, "uncounted").await?;
+	let encrypted = users
+		.encrypted_ring(&uncounted, "uncounted")
 		.await?;
-	let enc4 = send_encrypted_ring(&users.alice, room4, "r4-enc", Some(&mem4_enc)).await?;
-	let enc_actions4 = eval_actions_for_event(services, &users.bob_id, &enc4).await?;
-	if has_ring_sound_action(&enc_actions4) {
-		return Err!(
-			"four-member room encrypted ring must not emit sound=ring: {enc_actions4:?}"
-		);
-	}
+	users
+		.services
+		.db
+		.get("roomid_joinedcount")?
+		.remove(uncounted.as_bytes());
+	users
+		.expect_as_main(&clear, &encrypted, "unknown joined count")
+		.await?;
 
-	let mem_group = users
-		.alice
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_group_notif",
-			&active_call_member_content("DEVG"),
-		)
-		.await?;
-	let group_notif =
-		send_clear_ring(&users.alice, room2, "group-notif", "notification", Some(&mem_group))
-			.await?;
-	let group_actions = eval_actions_for_event(services, &users.bob_id, &group_notif).await?;
-	if !group_actions.is_empty() {
-		return Err!("group notification should be unchanged (empty actions): {group_actions:?}");
+	// A group `notification` is not a ring.
+	let membership = users.join_call(room2, "group").await?;
+	let group =
+		send_clear_ring(&users.alice, room2, "group", "notification", Some(&membership)).await?;
+	let actions = users.bob_actions(&group).await?;
+	if !actions.is_empty() {
+		return Err!("a group notification should get no actions: {actions:?}");
 	}
 
 	Ok(())
+}
+
+/// A ring rule whose actions no longer ring is skipped, and does not claim
+/// the membership's one ring.
+async fn verify_changed_actions_leave_membership_unclaimed(
+	users: &RingTestUsers<'_>,
+	room2: &RoomId,
+) -> Result {
+	let actions_path = |rule_id| format!("pushrules/global/override/{rule_id}/actions");
+	for rule_id in [RING_RULE_ID, RING_ENCRYPTED_RULE_ID] {
+		users
+			.bob
+			.put(&actions_path(rule_id), &json!({ "actions": [] }))
+			.await?;
+	}
+
+	let membership = users.join_call(room2, "changed").await?;
+	let clear =
+		send_clear_ring(&users.alice, room2, "changed-1", "ring", Some(&membership)).await?;
+	let encrypted = users.encrypted_ring(room2, "changed").await?;
+	users
+		.expect_as_main(&clear, &encrypted, "ring rules without actions")
+		.await?;
+
+	for rule_id in [RING_RULE_ID, RING_ENCRYPTED_RULE_ID] {
+		let actions = json!({ "actions": ["notify", { "set_tweak": "sound", "value": "ring" }] });
+		users
+			.bob
+			.put(&actions_path(rule_id), &actions)
+			.await?;
+	}
+
+	let second =
+		send_clear_ring(&users.alice, room2, "changed-2", "ring", Some(&membership)).await?;
+	users
+		.expect_rings(&second, true, "first audible ring after a silent one")
+		.await
 }
 
 async fn verify_override_and_room_kind_mutes(
-	services: &Services,
 	users: &RingTestUsers<'_>,
 	bob_rx: &mut CaptureRx,
 ) -> Result {
-	// Mute room2 for Bob with a user override rule.
-	let mute_room = create_room_with(&users.alice, &[(&users.bob, &users.bob_id)]).await?;
-	users
-		.bob
-		.put(
-			&format!("pushrules/global/override/{mute_room}"),
-			&json!({
-				"conditions": [{ "kind": "event_match", "key": "room_id", "pattern": mute_room }],
-				"actions": [],
-			}),
-		)
-		.await?;
-	drain_pushes(bob_rx);
+	// An override rule that mutes the room, and a room-kind rule without
+	// actions, as matrix-js-sdk writes for a muted room.
+	for kind in ["override", "room"] {
+		let room = users.room_with_bob().await?;
+		let mut rule = json!({ "actions": [] });
+		if kind == "override" {
+			rule["conditions"] =
+				json!([{ "kind": "event_match", "key": "room_id", "pattern": room }]);
+		}
+		let rule_path = format!("pushrules/global/{kind}/{room}");
+		users.bob.put(&rule_path, &rule).await?;
 
-	let mem_mute = users
-		.alice
-		.put_state(
-			&mute_room,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_mute",
-			&active_call_member_content("DEVM"),
-		)
-		.await?;
-	let muted_clear =
-		send_clear_ring(&users.alice, &mute_room, "muted-clear", "ring", Some(&mem_mute)).await?;
-	if !eval_actions_for_event(services, &users.bob_id, &muted_clear)
-		.await?
-		.is_empty()
-	{
-		return Err!("muted room must suppress clear ring");
-	}
-	let mem_mute_enc = users
-		.alice
-		.put_state(
-			&mute_room,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_mute_enc",
-			&active_call_member_content("DEVME"),
-		)
-		.await?;
-	let muted_enc =
-		send_encrypted_ring(&users.alice, &mute_room, "muted-enc", Some(&mem_mute_enc)).await?;
-	if !eval_actions_for_event(services, &users.bob_id, &muted_enc)
-		.await?
-		.is_empty()
-	{
-		return Err!("muted room must suppress encrypted ring");
-	}
-	assert_no_push_arrives(bob_rx, Duration::from_millis(300)).await?;
+		let label = format!("muted-{kind}");
+		let clear = users.clear_ring(&room, &label).await?;
+		let encrypted = users.encrypted_ring(&room, &label).await?;
+		for ring in [&clear, &encrypted] {
+			let actions = users.bob_actions(ring).await?;
+			if !actions.is_empty() {
+				return Err!("{kind} mute must silence rings, got {actions:?}");
+			}
+		}
+		expect_no_push_for(bob_rx, &[&clear, &encrypted]).await?;
 
-	// Room-kind mute (`RuleKind::Room` with non-notifying actions, as matrix-js-sdk writes):
-	// both clear and encrypted rings must stay silent, and disabling the room mute restores ringing.
-	let room_kind_mute = create_room_with(&users.alice, &[(&users.bob, &users.bob_id)]).await?;
-	users
-		.bob
-		.put(&format!("pushrules/global/room/{room_kind_mute}"), &json!({ "actions": [] }))
-		.await?;
-	drain_pushes(bob_rx);
-
-	let mem_rm_clear = users
-		.alice
-		.put_state(
-			&room_kind_mute,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_rm_clear",
-			&active_call_member_content("DEV_RMC"),
-		)
-		.await?;
-	let rm_clear =
-		send_clear_ring(&users.alice, &room_kind_mute, "rm-clear", "ring", Some(&mem_rm_clear))
+		// The muted rings claimed nothing: without the mute, the same ring rings.
+		users
+			.bob
+			.put(&format!("{rule_path}/enabled"), &json!({ "enabled": false }))
 			.await?;
-	if !eval_actions_for_event(services, &users.bob_id, &rm_clear)
-		.await?
-		.is_empty()
-	{
-		return Err!("room-kind mute must suppress clear ring");
+		users
+			.expect_rings(&clear, true, &format!("{kind} mute disabled"))
+			.await?;
 	}
-	let mem_rm_enc = users
-		.alice
-		.put_state(
-			&room_kind_mute,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_rm_enc",
-			&active_call_member_content("DEV_RME"),
-		)
-		.await?;
-	let rm_enc =
-		send_encrypted_ring(&users.alice, &room_kind_mute, "rm-enc", Some(&mem_rm_enc)).await?;
-	if !eval_actions_for_event(services, &users.bob_id, &rm_enc)
-		.await?
-		.is_empty()
-	{
-		return Err!("room-kind mute must suppress encrypted ring");
-	}
-	assert_no_push_arrives(bob_rx, Duration::from_millis(300)).await?;
-
-	// Disabling the room-kind mute restores ringing for the same membership (slot was not claimed).
-	users
-		.bob
-		.put(
-			&format!("pushrules/global/room/{room_kind_mute}/enabled"),
-			&json!({ "enabled": false }),
-		)
-		.await?;
-	let unmuted_actions = eval_actions_for_event(services, &users.bob_id, &rm_clear).await?;
-	if !has_ring_sound_action(&unmuted_actions) {
-		return Err!(
-			"disabling room-kind mute should allow ring (and muted check must not claim dedup): 			 {unmuted_actions:?}"
-		);
-	}
-	drain_pushes(bob_rx);
 
 	Ok(())
 }
 
-async fn verify_ignore_precedence(services: &Services, users: &RingTestUsers<'_>) -> Result {
-	// Ignore Alice for Dana, then send rings in a 2-member room with Alice and Dana.
+async fn verify_ignore_precedence(users: &RingTestUsers<'_>) -> Result {
+	// Dana ignores Alice, who then rings her in a two-member room.
+	let services = users.services;
 	let ignore_room = create_room_with(&users.alice, &[(&users.dana, &users.dana_id)]).await?;
 	let (mut dana_rx, _dana_stub) =
 		register_stub_pusher(services, &users.dana_id, "dana-ignore-key").await?;
@@ -2382,117 +2153,63 @@ async fn verify_ignore_precedence(services: &Services, users: &RingTestUsers<'_>
 		)
 		.await?;
 
-	let dana_notifs_before = services
-		.pusher
-		.get_notifications(&users.dana_id, None)
-		.count()
-		.await;
+	let notifications = || {
+		services
+			.pusher
+			.get_notifications(&users.dana_id, None)
+			.count()
+	};
+	let before = notifications().await;
 
-	let mem_ign = users
-		.alice
-		.put_state(
-			&ignore_room,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_ign",
-			&active_call_member_content("DEVI"),
-		)
+	let clear = users.clear_ring(&ignore_room, "ignored").await?;
+	let encrypted = users
+		.encrypted_ring(&ignore_room, "ignored")
 		.await?;
-	send_clear_ring(&users.alice, &ignore_room, "ign-clear", "ring", Some(&mem_ign)).await?;
-	let mem_ign_enc = users
-		.alice
-		.put_state(
-			&ignore_room,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_ign_enc",
-			&active_call_member_content("DEVIE"),
-		)
-		.await?;
-	send_encrypted_ring(&users.alice, &ignore_room, "ign-enc", Some(&mem_ign_enc)).await?;
-	assert_no_push_arrives(&mut dana_rx, Duration::from_millis(300)).await?;
+	expect_no_push_for(&mut dana_rx, &[&clear, &encrypted]).await?;
 
-	let dana_notifs_after = services
-		.pusher
-		.get_notifications(&users.dana_id, None)
-		.count()
-		.await;
-	if dana_notifs_after != dana_notifs_before {
-		return Err!(
-			"ignored sender must not record notifications for recipient: \
-			 before={dana_notifs_before}, 			 after={dana_notifs_after}"
-		);
+	let after = notifications().await;
+	if after != before {
+		return Err!("an ignored sender must not notify: before={before}, after={after}");
 	}
 	Ok(())
 }
 
-fn override_rule_ids(value: &Value) -> Vec<String> {
-	value
-		.get("override")
-		.and_then(Value::as_array)
-		.into_iter()
-		.flatten()
-		.filter_map(|rule| {
-			rule.get("rule_id")
-				.and_then(Value::as_str)
-				.map(ToOwned::to_owned)
-		})
-		.collect()
+/// The `enabled` state of the two ring rules in `ruleset`, `None` if absent.
+fn ring_rules_enabled(ruleset: &Ruleset) -> [Option<bool>; 2] {
+	[RING_RULE_ID, RING_ENCRYPTED_RULE_ID].map(|rule_id| {
+		ruleset
+			.get(RuleKind::Override, rule_id)
+			.map(tuwunel_core::ruma::push::AnyPushRuleRef::enabled)
+	})
 }
 
-async fn store_old_ruleset(services: &Services, user: &UserId) -> Result {
-	let ty = GlobalAccountDataEventType::PushRules;
-	let event = PushRulesEvent {
-		content: PushRulesEventContent { global: Ruleset::server_default(user) },
-	};
-	services
-		.account_data
-		.update(None, user, ty.to_string().into(), &serde_json::to_value(event)?)
-		.await
+/// The same for the `global` ruleset of a `GET /pushrules` response.
+fn ring_rules_enabled_in_response(global: &Value) -> Result<[Option<bool>; 2]> {
+	let ruleset: Ruleset = serde_json::from_value(global.clone())?;
+	Ok(ring_rules_enabled(&ruleset))
 }
 
 async fn verify_old_ruleset_merge_get_and_disable_before_get(
-	services: &Services,
 	users: &RingTestUsers<'_>,
 	room2: &RoomId,
 ) -> Result {
-	// Store an old ruleset (without MindRoom's ring rules) for Bob.
-	store_old_ruleset(services, &users.bob_id).await?;
-
-	// Evaluation merges on read immediately.
-	let mem_old = users
-		.alice
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_old_rules",
-			&active_call_member_content("DEVO"),
-		)
+	// A ruleset stored before the ring rules existed gets them on read: for
+	// evaluation, on both full GET routes and on the single-rule routes.
+	users
+		.store_ruleset(&users.bob_id, Ruleset::server_default(&users.bob_id))
 		.await?;
-	let clear_old =
-		send_clear_ring(&users.alice, room2, "old-rules-clear", "ring", Some(&mem_old)).await?;
-	let actions = eval_actions_for_event(services, &users.bob_id, &clear_old).await?;
-	if !has_ring_sound_action(&actions) {
-		return Err!("stored old ruleset must merge ring rules for evaluation: {actions:?}");
-	}
 
-	// Both GET pushrules endpoints return the merged ring rules.
-	let all_rules = users.bob.get("pushrules/").await?;
-	let all_ids = override_rule_ids(&all_rules["global"]);
-	if !all_ids.iter().any(|id| id == RING_RULE_ID)
-		|| !all_ids
-			.iter()
-			.any(|id| id == RING_ENCRYPTED_RULE_ID)
-	{
-		return Err!("GET /pushrules/ missing ring rules: {all_ids:?}");
-	}
+	let ring = users.clear_ring(room2, "old-rules").await?;
+	users
+		.expect_rings(&ring, true, "stored ruleset without ring rules")
+		.await?;
 
-	let global_rules = users.bob.get("pushrules/global/").await?;
-	let global_ids = override_rule_ids(&global_rules);
-	if !global_ids.iter().any(|id| id == RING_RULE_ID)
-		|| !global_ids
-			.iter()
-			.any(|id| id == RING_ENCRYPTED_RULE_ID)
-	{
-		return Err!("GET /pushrules/global/ missing ring rules: {global_ids:?}");
+	let all = users.bob.get("pushrules/").await?;
+	let global = users.bob.get("pushrules/global/").await?;
+	for response in [&all["global"], &global] {
+		if ring_rules_enabled_in_response(response)? != [Some(true), Some(true)] {
+			return Err!("full GET is missing the ring rules: {response}");
+		}
 	}
 
 	let enabled = users
@@ -2500,30 +2217,19 @@ async fn verify_old_ruleset_merge_get_and_disable_before_get(
 		.get(&format!("pushrules/global/override/{RING_RULE_ID}/enabled"))
 		.await?;
 	if enabled.get("enabled").and_then(Value::as_bool) != Some(true) {
-		return Err!("single-rule GET enabled should return true: {enabled}");
+		return Err!("single-rule GET should find the ring rule enabled: {enabled}");
 	}
 
-	// None of the GET calls wrote the merged ruleset to storage.
-	let stored_after_get: PushRulesEvent = services
-		.account_data
-		.get_global(&users.bob_id, GlobalAccountDataEventType::PushRules)
+	// No GET wrote them.
+	let stored = users.stored_ruleset(&users.bob_id).await?;
+	if ring_rules_enabled(&stored) != [None, None] {
+		return Err!("GET must not store the ring rules");
+	}
+
+	// A ring rule can be disabled before any GET; that write stores both.
+	users
+		.store_ruleset(&users.charlie_id, Ruleset::server_default(&users.charlie_id))
 		.await?;
-	if stored_after_get
-		.content
-		.global
-		.get(RuleKind::Override, RING_RULE_ID)
-		.is_some()
-		|| stored_after_get
-			.content
-			.global
-			.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
-			.is_some()
-	{
-		return Err!("GET pushrules must not write ring rules to stored account data");
-	}
-
-	// A user with an old stored ruleset can disable a ring rule before any GET.
-	store_old_ruleset(services, &users.charlie_id).await?;
 	users
 		.charlie
 		.put(
@@ -2531,47 +2237,24 @@ async fn verify_old_ruleset_merge_get_and_disable_before_get(
 			&json!({ "enabled": false }),
 		)
 		.await?;
-
-	// That write persisted the merged ruleset with the clear ring rule disabled.
-	let stored_charlie: PushRulesEvent = services
-		.account_data
-		.get_global(&users.charlie_id, GlobalAccountDataEventType::PushRules)
-		.await?;
-	let clear_rule = stored_charlie
-		.content
-		.global
-		.get(RuleKind::Override, RING_RULE_ID)
-		.ok_or_else(|| err!("clear ring rule not persisted on disable write"))?;
-	if clear_rule.enabled() {
-		return Err!("clear ring rule should be persisted as disabled");
-	}
-	let enc_rule = stored_charlie
-		.content
-		.global
-		.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
-		.ok_or_else(|| err!("encrypted ring rule not persisted on disable write"))?;
-	if !enc_rule.enabled() {
-		return Err!("encrypted ring rule should remain enabled");
+	let stored = users.stored_ruleset(&users.charlie_id).await?;
+	if ring_rules_enabled(&stored) != [Some(false), Some(true)] {
+		return Err!("disabling a ring rule should store it disabled and the other enabled");
 	}
 
 	Ok(())
 }
 
-async fn verify_genuinely_legacy_ruleset(
-	services: &Services,
-	users: &RingTestUsers<'_>,
-	room2: &RoomId,
-) -> Result {
-	// Genuinely legacy stored ruleset containing `.m.rule.contains_display_name` (and missing
-	// `.m.rule.is_user_mention`): ordinary message evaluation is unchanged, ring rules are
-	// present for evaluation and GET, single-rule GET does not write, and full GET legacy-repair
-	// persists without ring rules (matching main).
-	let mut legacy_ruleset = Ruleset::server_default(&users.bob_id);
-	legacy_ruleset
+/// A stored ruleset that the full GET routes repair: it still has the
+/// deprecated `.m.rule.contains_display_name` and lacks
+/// `.m.rule.is_user_mention`.
+fn legacy_stored_ruleset(user: &UserId) -> Ruleset {
+	let mut ruleset = Ruleset::server_default(user);
+	ruleset
 		.override_
 		.shift_remove(PredefinedOverrideRuleId::IsUserMention.as_str());
 	#[expect(deprecated)]
-	legacy_ruleset.override_.insert(
+	ruleset.override_.insert(
 		ConditionalPushRuleInit {
 			actions: vec![
 				Action::Notify,
@@ -2588,123 +2271,122 @@ async fn verify_genuinely_legacy_ruleset(
 		}
 		.into(),
 	);
-	let legacy_event = PushRulesEvent {
-		content: PushRulesEventContent { global: legacy_ruleset },
-	};
-	services
-		.account_data
-		.update(
-			None,
-			&users.bob_id,
-			GlobalAccountDataEventType::PushRules
-				.to_string()
-				.into(),
-			&serde_json::to_value(legacy_event)?,
-		)
+	ruleset
+}
+
+#[expect(deprecated)]
+fn has_legacy_rule(ruleset: &Ruleset) -> bool {
+	ruleset
+		.get(RuleKind::Override, PredefinedOverrideRuleId::ContainsDisplayName.as_str())
+		.is_some()
+}
+
+/// A ring rule disabled before the first full GET stays disabled through the
+/// legacy repair of either full GET route: in storage, in the response and
+/// for evaluation.
+async fn verify_legacy_repair_keeps_disabled_ring_rule(
+	users: &RingTestUsers<'_>,
+	room2: &RoomId,
+) -> Result {
+	for (index, route) in ["pushrules/", "pushrules/global/"]
+		.into_iter()
+		.enumerate()
+	{
+		users
+			.store_ruleset(&users.bob_id, legacy_stored_ruleset(&users.bob_id))
+			.await?;
+		users
+			.bob
+			.put(
+				&format!("pushrules/global/override/{RING_RULE_ID}/enabled"),
+				&json!({ "enabled": false }),
+			)
+			.await?;
+		if !has_legacy_rule(&users.stored_ruleset(&users.bob_id).await?) {
+			return Err!("{route}: the stored ruleset should still need the repair");
+		}
+
+		let response = users.bob.get(route).await?;
+		let global = response.get("global").unwrap_or(&response);
+		if ring_rules_enabled_in_response(global)? != [Some(false), Some(true)] {
+			return Err!("{route}: response should keep the ring rule disabled: {global}");
+		}
+
+		let stored = users.stored_ruleset(&users.bob_id).await?;
+		if has_legacy_rule(&stored) {
+			return Err!("{route}: the repair should have run");
+		}
+		if ring_rules_enabled(&stored) != [Some(false), Some(true)] {
+			return Err!("{route}: storage should keep the ring rule disabled");
+		}
+
+		let label = format!("repaired-{index}");
+		let clear = users.clear_ring(room2, &label).await?;
+		users
+			.expect_rings(&clear, false, "disabled ring rule after the repair")
+			.await?;
+		let encrypted = users.encrypted_ring(room2, &label).await?;
+		users
+			.expect_rings(&encrypted, true, "enabled encrypted ring rule after the repair")
+			.await?;
+	}
+
+	Ok(())
+}
+
+/// A legacy stored ruleset without ring rules: messages evaluate as before,
+/// rings ring, a single-rule GET writes nothing, and the repair of a full
+/// GET stores no ring rule.
+async fn verify_genuinely_legacy_ruleset(users: &RingTestUsers<'_>, room2: &RoomId) -> Result {
+	let services = users.services;
+	users
+		.store_ruleset(&users.bob_id, legacy_stored_ruleset(&users.bob_id))
 		.await?;
 
-	// Ordinary message containing Bob's display name still triggers highlight via legacy rule.
+	// A message with Bob's display name still highlights through the legacy rule.
 	let bob_displayname = services
 		.profile
 		.displayname(&users.bob_id)
 		.await
 		.unwrap_or_else(|_| users.bob_id.localpart().to_owned());
-	let display_msg = users
+	let message = users
 		.alice
 		.put_event(
 			&format!("rooms/{room2}/send/m.room.message/legacy-display-name"),
 			&json!({ "msgtype": "m.text", "body": format!("hello {bob_displayname}") }),
 		)
 		.await?;
-	let legacy_msg_actions =
-		eval_actions_for_event(services, &users.bob_id, &display_msg).await?;
-	let has_highlight = legacy_msg_actions.iter().any(|action| {
+	let actions = users.bob_actions(&message).await?;
+	if !actions.iter().any(|action| {
 		matches!(action, Action::SetTweak(Tweak::Highlight(HighlightTweakValue::Yes)))
-	});
-	if !has_highlight {
-		return Err!(
-			"genuinely legacy ruleset ordinary message evaluation must remain unchanged: 			 \
-			 {legacy_msg_actions:?}"
-		);
+	}) {
+		return Err!("legacy message evaluation must not change: {actions:?}");
 	}
 
-	// Ring rule still evaluates on the legacy ruleset.
-	let mem_leg_eval = users
-		.alice
-		.put_state(
-			room2,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_leg_eval",
-			&active_call_member_content("DEV_LEGEV"),
-		)
+	let ring = users.clear_ring(room2, "legacy").await?;
+	users
+		.expect_rings(&ring, true, "legacy stored ruleset")
 		.await?;
-	let ring_leg_eval =
-		send_clear_ring(&users.alice, room2, "legacy-eval-ring", "ring", Some(&mem_leg_eval))
-			.await?;
-	let ring_leg_actions =
-		eval_actions_for_event(services, &users.bob_id, &ring_leg_eval).await?;
-	if !has_ring_sound_action(&ring_leg_actions) {
-		return Err!("ring rule must evaluate on genuinely legacy ruleset: {ring_leg_actions:?}");
-	}
 
-	// Single-rule GET sees the ring rule without writing or stripping the legacy rule.
-	let leg_enabled = users
+	let enabled = users
 		.bob
 		.get(&format!("pushrules/global/override/{RING_RULE_ID}/enabled"))
 		.await?;
-	if leg_enabled
-		.get("enabled")
-		.and_then(Value::as_bool)
-		!= Some(true)
-	{
-		return Err!("single-rule GET on legacy ruleset should return true: {leg_enabled}");
+	if enabled.get("enabled").and_then(Value::as_bool) != Some(true) {
+		return Err!("single-rule GET should find the ring rule enabled: {enabled}");
 	}
-	let stored_before_full_get: PushRulesEvent = services
-		.account_data
-		.get_global(&users.bob_id, GlobalAccountDataEventType::PushRules)
-		.await?;
-	#[expect(deprecated)]
-	let contains_dn_id = PredefinedOverrideRuleId::ContainsDisplayName.as_str();
-	if stored_before_full_get
-		.content
-		.global
-		.get(RuleKind::Override, contains_dn_id)
-		.is_none()
-		|| stored_before_full_get
-			.content
-			.global
-			.get(RuleKind::Override, RING_RULE_ID)
-			.is_some()
-	{
-		return Err!("single-rule GET must not mutate legacy stored ruleset");
+	let stored = users.stored_ruleset(&users.bob_id).await?;
+	if !has_legacy_rule(&stored) || ring_rules_enabled(&stored) != [None, None] {
+		return Err!("single-rule GET must not change the stored legacy ruleset");
 	}
 
-	// Full GET returns ring rules, while existing legacy-repair persists without ring rules.
-	let leg_all = users.bob.get("pushrules/").await?;
-	let leg_all_ids = override_rule_ids(&leg_all["global"]);
-	if !leg_all_ids.iter().any(|id| id == RING_RULE_ID)
-		|| !leg_all_ids
-			.iter()
-			.any(|id| id == RING_ENCRYPTED_RULE_ID)
-	{
-		return Err!("GET /pushrules/ on legacy ruleset missing ring rules: {leg_all_ids:?}");
+	let all = users.bob.get("pushrules/").await?;
+	if ring_rules_enabled_in_response(&all["global"])? != [Some(true), Some(true)] {
+		return Err!("full GET of a legacy ruleset is missing the ring rules: {all}");
 	}
-	let stored_after_legacy_get: PushRulesEvent = services
-		.account_data
-		.get_global(&users.bob_id, GlobalAccountDataEventType::PushRules)
-		.await?;
-	if stored_after_legacy_get
-		.content
-		.global
-		.get(RuleKind::Override, RING_RULE_ID)
-		.is_some()
-		|| stored_after_legacy_get
-			.content
-			.global
-			.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
-			.is_some()
-	{
-		return Err!("GET legacy repair must not persist ring defaults");
+	let stored = users.stored_ruleset(&users.bob_id).await?;
+	if has_legacy_rule(&stored) || ring_rules_enabled(&stored) != [None, None] {
+		return Err!("the legacy repair should run and store no ring rule");
 	}
 
 	Ok(())

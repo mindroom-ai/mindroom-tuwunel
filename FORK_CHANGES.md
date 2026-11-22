@@ -1710,39 +1710,35 @@ expectations for such a conflict change from 409 to 404 in two lines.
 ### Incoming-call ring push rules
 
 Files:
-- `src/service/pusher/ring_rules.rs`
-- `src/service/pusher/mod.rs`
-- `src/service/users/register.rs`, `src/service/emergency/mod.rs`, `src/api/federation/invite.rs`
-- `src/api/client/push/{mod.rs,pushrules.rs,pushrules_global.rs}`
+- `src/service/pusher/ring_rules.rs`, `src/service/pusher/mod.rs`
+- `src/api/client/push/{mod.rs,pushrules.rs,pushrules_global.rs}`, `src/api/federation/invite.rs`
 - `src/service/pusher/tests.rs`, `src/api/client/push/tests.rs`, `src/main/tests/pusher_notify.rs`
 
 Behavior:
-- Adds two server-default override push rules immediately before `.m.rule.is_user_mention`
-  (or at the end of `override` if absent): `.io.mindroom.rule.rtc.ring` (exact
-  `event_property_is` match on `type == "org.matrix.msc4075.rtc.notification"` and
-  `content.notification_type == "ring"`) and `.io.mindroom.rule.rtc.ring_encrypted`
-  (exact `event_property_is` match on `type == "m.room.encrypted"` and
-  `content.io\.mindroom\.rtc\.notification.notification_type == "ring"`), both
-  matching rooms with `<=3` joined members and emitting
+- Two server-default override push rules sit right before `.m.rule.is_user_mention`
+  (or last in `override` without it): `.io.mindroom.rule.rtc.ring` (`type ==
+  "org.matrix.msc4075.rtc.notification"`, `content.notification_type == "ring"`) and
+  `.io.mindroom.rule.rtc.ring_encrypted` (`type == "m.room.encrypted"`,
+  `content.io\.mindroom\.rtc\.notification.notification_type == "ring"`). Both use exact
+  `event_property_is` matches, need `<=3` joined members, and have the actions
   `["notify", {"set_tweak": "sound", "value": "ring"}]`.
-- During push-rule evaluation in `pusher::Service::get_actions`, the user's ruleset is
-  evaluated against the original unmutated event. Only when one of the two ring rules
-  wins does the server check room-kind mutes (`RuleKind::Room` non-notifying rules) and
-  validate that the ring's cleartext `m.relates_to` (`m.reference`) targets an unredacted
-  current `org.matrix.msc3401.call.member` state event in the same room, sent by the
-  ring's sender while still joined, carrying a live unexpired MSC4143 session or legacy
-  `memberships` entry, and not already claimed by another ring event (in-memory 2-minute
-  TTL map, claimed only when validation passes so the same ring passes again for other
-  recipients and at dispatch). If muted or invalid, those two ring rules are skipped and
-  evaluation continues against the original event.
-- Existing stored rulesets missing either ring rule have only the missing ring rule(s)
-  inserted on read (without `update_with_server_default`, leaving every other stored rule,
-  action, enabled state, and order untouched) across evaluation
-  (`pusher::Service::ruleset`), both `GET /pushrules` routes, and `load_push_rules`
-  (single-rule routes). Existing `GET` legacy-repair write paths stay unchanged from
-  `main`, `GET` never writes ring rules to storage, and rule writes persist the merged
-  ruleset. User override mutes, room-kind mutes, and ignored-sender filtering keep their
-  precedence.
+- The sound tweak is not authorization, so `pusher::Service::get_actions` enforces one
+  invariant. A push gets `sound: "ring"` only if (a) one of the two ring rules is the winning
+  rule for this recipient, enabled, with `notify` and `sound: "ring"` actions; (b) the room's
+  joined count is known and at most 3; (c) no enabled room-kind or override mute for this room
+  wins; (d) the ring `m.reference`s the sender's current, live MSC4143
+  `org.matrix.msc3401.call.member` state in that room (per-device form, `application ==
+  "m.call"`, not left, not expired) and the sender is joined; (e) no other ring event already
+  claimed that membership (in memory, for two minutes; the same ring passes again for other
+  recipients and at dispatch). Otherwise the ring rules are skipped and the unchanged event is
+  evaluated exactly as without them. The legacy `memberships` array form of `call.member` is
+  not supported. A user turns rings off by disabling the rules or muting the room.
+- The rules are merged on read, not migrated: a stored ruleset that lacks a ring rule gets it
+  for evaluation (`pusher::Service::ruleset`), on both `GET /pushrules` routes and in
+  `load_push_rules` (the single-rule routes), with nothing else in the ruleset changed. No
+  `GET` stores a missing ring rule; the next rule write stores the merged ruleset. The
+  legacy repair of the two full `GET` routes keeps an already stored ring rule with its
+  `enabled` and `actions` (`ring_rules::update_with_server_default`).
 
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
