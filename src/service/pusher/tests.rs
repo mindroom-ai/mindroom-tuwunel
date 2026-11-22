@@ -581,12 +581,13 @@ async fn room_mute_override_wins_before_and_after_ring_rule_merge() {
 	stored
 		.insert(
 			NewPushRule::Override(NewConditionalPushRule::new(
-				room_id.to_string(),
+				room_id.as_str().into(),
 				vec![PushCondition::EventMatch(EventMatchConditionData::new(
 					"room_id".into(),
 					room_id.to_string(),
-				))],
-				vec![],
+				))]
+				.into(),
+				Vec::new().into(),
 			)),
 			None,
 			None,
