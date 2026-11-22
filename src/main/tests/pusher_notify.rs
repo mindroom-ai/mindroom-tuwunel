@@ -1568,7 +1568,8 @@ async fn exercise_call_ring_cases(services: &Services, base: &str) -> Result {
 
 	verify_live_clear_and_encrypted_rings(services, &users, &room2, &room3, &mut bob_rx).await?;
 	verify_invalid_ring_references(services, &users, &room2, &other_room).await?;
-	verify_membership_liveness_and_fallback(services, &users, &room2).await?;
+	verify_membership_liveness(services, &users, &room2).await?;
+	verify_unmutated_fallback_and_case_variant(services, &users, &room2).await?;
 	verify_four_members_and_group_notification(services, &users, &room2, &room4).await?;
 	verify_override_and_room_kind_mutes(services, &users, &mut bob_rx).await?;
 	verify_ignore_precedence(services, &users).await?;
@@ -1989,7 +1990,7 @@ async fn verify_invalid_ring_references(
 	.await
 }
 
-async fn verify_membership_liveness_and_fallback(
+async fn verify_membership_liveness(
 	services: &Services,
 	users: &RingTestUsers<'_>,
 	room2: &RoomId,
@@ -2082,6 +2083,14 @@ async fn verify_membership_liveness_and_fallback(
 		return Err!("live legacy memberships list should ring, got {legacy_actions:?}");
 	}
 
+	Ok(())
+}
+
+async fn verify_unmutated_fallback_and_case_variant(
+	services: &Services,
+	users: &RingTestUsers<'_>,
+	room2: &RoomId,
+) -> Result {
 	// Failed validation does not mutate the event: a fallback user rule reading
 	// `content.notification_type` still sees the original event untouched.
 	let unmutated_ring =
