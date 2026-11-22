@@ -1998,3 +1998,24 @@ This also reaches other readers of that index: a duplicate reaction to a
 backfilled event is rejected, and `related_by_*` filters see live relations
 to backfilled events. `/relations` still answers an empty page for a
 backfilled target (`src/api/client/relations.rs`).
+
+### Strict host-vs-scheme matching in `redirect_allowlisted`
+
+`tuwunel_core::utils::url::redirect_allowlisted` (used by OIDC dynamic client
+registration, OIDC client-approval waiver, and legacy SSO's Continue sign-in
+bypass) no longer conflates hostnames and private-use URI schemes or ignores
+the URI transport scheme:
+
+- Bare entries in `authentication.oidc.registration_allowed_redirect_hosts`
+  (legacy `oidc_registration_allowed_redirect_hosts`), such as `element.io`,
+  `localhost`, `127.0.0.1`, or `::1` / `[::1]`, match only `https` URIs with
+  that exact host or loopback `http` URIs (with no userinfo). They never match
+  hostless custom schemes (such as `element.io:/callback`), non-loopback
+  plaintext `http`, or arbitrary custom schemes carrying that host.
+- Colon-suffixed entries (such as `io.element.android:`) match only hostless
+  RFC 8252 §7.1 private-use URIs with no authority whose scheme contains a dot
+  (`io.element.android:/callback`). They never match `https` hosts of the same
+  name or URIs with an authority (`io.element.android://callback`).
+- Deployments that previously listed a bare private-use scheme must replace it
+  with the colon-suffixed form (do not keep both, or the bare entry still
+  trusts that `https` host).
