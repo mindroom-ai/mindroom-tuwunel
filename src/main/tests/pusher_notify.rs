@@ -33,7 +33,11 @@ use tuwunel_core::{
 			receipt::ReceiptThread,
 		},
 		presence::PresenceState,
-		push::{Action, HttpPusherData, PushFormat, RuleKind, Ruleset, Tweak},
+		push::{
+			Action, ConditionalPushRule, EventPropertyIsConditionData, HighlightTweakValue,
+			HttpPusherData, NewConditionalPushRule, NewPushRule, PredefinedOverrideRuleId,
+			PushCondition, PushFormat, RuleKind, Ruleset, ScalarJsonValue, Tweak,
+		},
 	},
 	utils::stream::ReadyExt,
 };
@@ -1960,6 +1964,183 @@ async fn verify_invalid_ring_references(
 	)
 	.await?;
 
+	// Leave event with only `leave_reason`.
+	let left_reason = users
+		.alice
+		.put_state(
+			room2,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_leave_reason",
+			&json!({ "leave_reason": "user_left" }),
+		)
+		.await?;
+	assert_ring_refused(
+		services,
+		&users.bob_id,
+		&users.alice,
+		room2,
+		"leave-reason",
+		Some(&left_reason),
+	)
+	.await?;
+
+	// Malformed call.member content (missing required focus_active / device_id).
+	let malformed_mem = users
+		.alice
+		.put_state(
+			room2,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_malformed",
+			&json!({ "application": "m.call" }),
+		)
+		.await?;
+	assert_ring_refused(
+		services,
+		&users.bob_id,
+		&users.alice,
+		room2,
+		"malformed",
+		Some(&malformed_mem),
+	)
+	.await?;
+
+	// Expired call.member (created_ts + expires in the past).
+	let expired_mem = users
+		.alice
+		.put_state(
+			room2,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_expired",
+			&json!({
+				"application": "m.call",
+				"call_id": "",
+				"created_ts": 1_000,
+				"device_id": "DEV_EXP",
+				"expires": 1_000,
+				"focus_active": { "type": "livekit", "focus_selection": "oldest_membership" },
+				"scope": "m.room",
+			}),
+		)
+		.await?;
+	assert_ring_refused(
+		services,
+		&users.bob_id,
+		&users.alice,
+		room2,
+		"expired",
+		Some(&expired_mem),
+	)
+	.await?;
+
+	// Live legacy `memberships` list shape is accepted.
+	let legacy_live_mem = users
+		.alice
+		.put_state(
+			room2,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_legacy_live",
+			&json!({
+				"memberships": [active_call_member_content("DEV_LEG")],
+			}),
+		)
+		.await?;
+	let legacy_ring =
+		send_clear_ring(&users.alice, room2, "legacy-live-clear", "ring", Some(&legacy_live_mem))
+			.await?;
+	let legacy_actions = eval_actions_for_event(services, &users.bob_id, &legacy_ring).await?;
+	if !has_ring_sound_action(&legacy_actions) {
+		return Err!("live legacy memberships list should ring, got {legacy_actions:?}");
+	}
+
+	// Failed validation does not mutate the event: a fallback user rule reading
+	// `content.notification_type` still sees the original event untouched.
+	let unmutated_ring = send_clear_ring(&users.alice, room2, "unmutated-clear", "ring", None).await?;
+	let mut fallback_ruleset = services.pusher.ruleset(&users.bob_id).await;
+	fallback_ruleset
+		.insert(
+			NewPushRule::Underride(NewConditionalPushRule::new(
+				"custom_sees_original_ring_field".into(),
+				vec![PushCondition::EventPropertyIs(EventPropertyIsConditionData::new(
+					"content.notification_type".into(),
+					ScalarJsonValue::String("ring".into()),
+				))]
+				.into(),
+				vec![Action::Notify].into(),
+			)),
+			None,
+			None,
+		)
+		.map_err(|e| err!("insert custom fallback rule: {e}"))?;
+	let unmutated_pdu = services.timeline.get_pdu(&unmutated_ring).await?;
+	let unmutated_raw = unmutated_pdu.to_format();
+	let fallback_actions = services
+		.pusher
+		.get_actions(Evaluate {
+			user: &users.bob_id,
+			ruleset: &fallback_ruleset,
+			power_levels: None,
+			pdu: &unmutated_raw,
+			room_id: room2,
+			related_events: None,
+		})
+		.await;
+	if !fallback_actions.iter().any(Action::should_notify) || has_ring_sound_action(fallback_actions) {
+		return Err!(
+			"fallback user rule must see unmutated original event without ring tweak: 			 {fallback_actions:?}"
+		);
+	}
+
+	// Case-variant event type does not match the exact ring rules even with a live membership.
+	let live_case_mem = users
+		.alice
+		.put_state(
+			room2,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_case",
+			&active_call_member_content("DEV_CASE"),
+		)
+		.await?;
+	let upper_type_event = users
+		.alice
+		.put_event(
+			&format!("rooms/{room2}/send/ORG.MATRIX.MSC4075.RTC.NOTIFICATION/case-variant"),
+			&json!({
+				"lifetime": 30_000,
+				"m.call.intent": "audio",
+				"m.relates_to": { "rel_type": "m.reference", "event_id": live_case_mem },
+				"notification_type": "ring",
+				"sender_ts": 1_795_300_000_000_i64,
+			}),
+		)
+		.await?;
+	let upper_actions = eval_actions_for_event(services, &users.bob_id, &upper_type_event).await?;
+	if has_ring_sound_action(&upper_actions) {
+		return Err!("case-variant event type must not get sound=ring: {upper_actions:?}");
+	}
+
+	// Sender no longer joined to the room: ring referencing their old state is rejected.
+	let leave_room = create_room_with(&users.alice, &[(&users.bob, &users.bob_id)]).await?;
+	let left_sender_mem = users
+		.alice
+		.put_state(
+			&leave_room,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_left_room",
+			&active_call_member_content("DEV_LEAVE"),
+		)
+		.await?;
+	let ring_before_leave =
+		send_clear_ring(&users.alice, &leave_room, "before-leave", "ring", Some(&left_sender_mem))
+			.await?;
+	users.alice.act(&leave_room, "leave").await?;
+	let after_leave_actions =
+		eval_actions_for_event(services, &users.bob_id, &ring_before_leave).await?;
+	if !after_leave_actions.is_empty() {
+		return Err!(
+			"ring from sender who left the room must not ring: {after_leave_actions:?}"
+		);
+	}
+
 	// Live membership in another room.
 	let other_room_mem = users
 		.alice
@@ -2093,6 +2274,68 @@ async fn verify_room_mute_and_ignore_precedence(
 		return Err!("muted room must suppress encrypted ring");
 	}
 	assert_no_push_arrives(bob_rx, Duration::from_millis(300)).await?;
+
+	// Room-kind mute (`RuleKind::Room` with non-notifying actions, as matrix-js-sdk writes):
+	// both clear and encrypted rings must stay silent, and disabling the room mute restores ringing.
+	let room_kind_mute = create_room_with(&users.alice, &[(&users.bob, &users.bob_id)]).await?;
+	users
+		.bob
+		.put(&format!("pushrules/global/room/{room_kind_mute}"), &json!({ "actions": [] }))
+		.await?;
+	drain_pushes(bob_rx);
+
+	let mem_rm_clear = users
+		.alice
+		.put_state(
+			&room_kind_mute,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_rm_clear",
+			&active_call_member_content("DEV_RMC"),
+		)
+		.await?;
+	let rm_clear =
+		send_clear_ring(&users.alice, &room_kind_mute, "rm-clear", "ring", Some(&mem_rm_clear))
+			.await?;
+	if !eval_actions_for_event(services, &users.bob_id, &rm_clear)
+		.await?
+		.is_empty()
+	{
+		return Err!("room-kind mute must suppress clear ring");
+	}
+	let mem_rm_enc = users
+		.alice
+		.put_state(
+			&room_kind_mute,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_rm_enc",
+			&active_call_member_content("DEV_RME"),
+		)
+		.await?;
+	let rm_enc =
+		send_encrypted_ring(&users.alice, &room_kind_mute, "rm-enc", Some(&mem_rm_enc)).await?;
+	if !eval_actions_for_event(services, &users.bob_id, &rm_enc)
+		.await?
+		.is_empty()
+	{
+		return Err!("room-kind mute must suppress encrypted ring");
+	}
+	assert_no_push_arrives(bob_rx, Duration::from_millis(300)).await?;
+
+	// Disabling the room-kind mute restores ringing for the same membership (slot was not claimed).
+	users
+		.bob
+		.put(
+			&format!("pushrules/global/room/{room_kind_mute}/enabled"),
+			&json!({ "enabled": false }),
+		)
+		.await?;
+	let unmuted_actions = eval_actions_for_event(services, &users.bob_id, &rm_clear).await?;
+	if !has_ring_sound_action(&unmuted_actions) {
+		return Err!(
+			"disabling room-kind mute should allow ring (and muted check must not claim dedup): 			 {unmuted_actions:?}"
+		);
+	}
+	drain_pushes(bob_rx);
 
 	// Ignore Alice for Dana, then send rings in a 2-member room with Alice and Dana.
 	let ignore_room = create_room_with(&users.alice, &[(&users.dana, &users.dana_id)]).await?;
@@ -2244,6 +2487,123 @@ async fn verify_old_ruleset_merge_get_and_disable_before_get(
 			.is_some()
 	{
 		return Err!("GET pushrules must not write ring rules to stored account data");
+	}
+
+	// Genuinely legacy stored ruleset containing `.m.rule.contains_display_name` (and missing
+	// `.m.rule.is_user_mention`): ordinary message evaluation is unchanged, ring rules are
+	// present for evaluation and GET, single-rule GET does not write, and full GET legacy-repair
+	// persists without ring rules (matching main).
+	let mut legacy_ruleset = Ruleset::server_default(&users.bob_id);
+	legacy_ruleset
+		.override_
+		.shift_remove(PredefinedOverrideRuleId::IsUserMention.as_str());
+	#[expect(deprecated)]
+	legacy_ruleset
+		.override_
+		.insert(ConditionalPushRule::contains_display_name());
+	let legacy_event = PushRulesEvent {
+		content: PushRulesEventContent { global: legacy_ruleset },
+	};
+	services
+		.account_data
+		.update(
+			None,
+			&users.bob_id,
+			GlobalAccountDataEventType::PushRules
+				.to_string()
+				.into(),
+			&serde_json::to_value(legacy_event)?,
+		)
+		.await?;
+
+	// Ordinary message containing Bob's display name still triggers highlight via legacy rule.
+	let display_msg = users
+		.alice
+		.put_event(
+			&format!("rooms/{room2}/send/m.room.message/legacy-display-name"),
+			&json!({ "msgtype": "m.text", "body": "hello bob" }),
+		)
+		.await?;
+	let legacy_msg_actions = eval_actions_for_event(services, &users.bob_id, &display_msg).await?;
+	let has_highlight = legacy_msg_actions.iter().any(|action| {
+		matches!(action, Action::SetTweak(Tweak::Highlight(HighlightTweakValue::Yes)))
+	});
+	if !has_highlight {
+		return Err!(
+			"genuinely legacy ruleset ordinary message evaluation must remain unchanged: 			 {legacy_msg_actions:?}"
+		);
+	}
+
+	// Ring rule still evaluates on the legacy ruleset.
+	let mem_leg_eval = users
+		.alice
+		.put_state(
+			room2,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_leg_eval",
+			&active_call_member_content("DEV_LEGEV"),
+		)
+		.await?;
+	let ring_leg_eval =
+		send_clear_ring(&users.alice, room2, "legacy-eval-ring", "ring", Some(&mem_leg_eval))
+			.await?;
+	let ring_leg_actions = eval_actions_for_event(services, &users.bob_id, &ring_leg_eval).await?;
+	if !has_ring_sound_action(&ring_leg_actions) {
+		return Err!("ring rule must evaluate on genuinely legacy ruleset: {ring_leg_actions:?}");
+	}
+
+	// Single-rule GET sees the ring rule without writing or stripping the legacy rule.
+	let leg_enabled = users
+		.bob
+		.get(&format!("pushrules/global/override/{RING_RULE_ID}/enabled"))
+		.await?;
+	if leg_enabled.get("enabled").and_then(Value::as_bool) != Some(true) {
+		return Err!("single-rule GET on legacy ruleset should return true: {leg_enabled}");
+	}
+	let stored_before_full_get: PushRulesEvent = services
+		.account_data
+		.get_global(&users.bob_id, GlobalAccountDataEventType::PushRules)
+		.await?;
+	#[expect(deprecated)]
+	let contains_dn_id = PredefinedOverrideRuleId::ContainsDisplayName.as_str();
+	if stored_before_full_get
+		.content
+		.global
+		.get(RuleKind::Override, contains_dn_id)
+		.is_none()
+		|| stored_before_full_get
+			.content
+			.global
+			.get(RuleKind::Override, RING_RULE_ID)
+			.is_some()
+	{
+		return Err!("single-rule GET must not mutate legacy stored ruleset");
+	}
+
+	// Full GET returns ring rules, while existing legacy-repair persists without ring rules.
+	let leg_all = users.bob.get("pushrules/").await?;
+	let leg_all_ids = override_rule_ids(&leg_all["global"]);
+	if !leg_all_ids.iter().any(|id| id == RING_RULE_ID)
+		|| !leg_all_ids.iter().any(|id| id == RING_ENCRYPTED_RULE_ID)
+	{
+		return Err!("GET /pushrules/ on legacy ruleset missing ring rules: {leg_all_ids:?}");
+	}
+	let stored_after_legacy_get: PushRulesEvent = services
+		.account_data
+		.get_global(&users.bob_id, GlobalAccountDataEventType::PushRules)
+		.await?;
+	if stored_after_legacy_get
+		.content
+		.global
+		.get(RuleKind::Override, RING_RULE_ID)
+		.is_some()
+		|| stored_after_legacy_get
+			.content
+			.global
+			.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
+			.is_some()
+	{
+		return Err!("GET legacy repair must not persist ring defaults");
 	}
 
 	// A user with an old stored ruleset can disable a ring rule before any GET.

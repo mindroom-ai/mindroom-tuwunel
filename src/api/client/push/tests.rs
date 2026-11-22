@@ -149,7 +149,7 @@ fn merged_old_ruleset_allows_disabling_ring_rule_and_blocks_deleting_it() {
 			.is_none()
 	);
 
-	let mut loaded = ring_rules::merged(&user, stored);
+	let mut loaded = ring_rules::merged(stored);
 	loaded
 		.set_enabled(RuleKind::Override, RING_RULE_ID, false)
 		.expect("ring rule can be disabled immediately after merge-on-read");

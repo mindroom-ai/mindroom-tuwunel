@@ -1717,24 +1717,32 @@ Files:
 - `src/service/pusher/tests.rs`, `src/api/client/push/tests.rs`, `src/main/tests/pusher_notify.rs`
 
 Behavior:
-- Adds two server-default override push rules immediately before `.m.rule.is_user_mention`:
-  `.io.mindroom.rule.rtc.ring` (clear `org.matrix.msc4075.rtc.notification` with
+- Adds two server-default override push rules immediately before `.m.rule.is_user_mention`
+  (or at the end of `override` if absent): `.io.mindroom.rule.rtc.ring` (exact
+  `event_property_is` match on `type == "org.matrix.msc4075.rtc.notification"` and
   `content.notification_type == "ring"`) and `.io.mindroom.rule.rtc.ring_encrypted`
-  (`m.room.encrypted` carrying the cleartext `io.mindroom.rtc.notification` hint with
-  `notification_type == "ring"`), both matching rooms with `<=3` joined members and
-  emitting `["notify", {"set_tweak": "sound", "value": "ring"}]`.
-- Before push-rule evaluation in `pusher::Service::get_actions`, validates every ring
-  candidate: its cleartext `m.relates_to` must be an `m.reference` to an
-  `org.matrix.msc3401.call.member` state event in the same room, sent by the ring's
-  sender, with active non-empty content, still current state for its state key, and not
-  already claimed by another ring event (in-memory membership-to-ring map with a 2-minute
-  TTL so the same ring passes again at dispatch). Failing candidates have their ring
-  marker stripped and evaluate with today's rules.
-- Existing stored rulesets missing either ring rule are merged on read via
-  `update_with_server_default` across evaluation (`pusher::Service::ruleset`), both
-  `GET /pushrules` routes, and `load_push_rules` (single-rule routes). `GET` routes do
-  not write to account data; the merged ruleset is persisted only on a rule write, and
-  user override mutes and ignored-sender filtering keep their precedence.
+  (exact `event_property_is` match on `type == "m.room.encrypted"` and
+  `content.io\.mindroom\.rtc\.notification.notification_type == "ring"`), both
+  matching rooms with `<=3` joined members and emitting
+  `["notify", {"set_tweak": "sound", "value": "ring"}]`.
+- During push-rule evaluation in `pusher::Service::get_actions`, the user's ruleset is
+  evaluated against the original unmutated event. Only when one of the two ring rules
+  wins does the server check room-kind mutes (`RuleKind::Room` non-notifying rules) and
+  validate that the ring's cleartext `m.relates_to` (`m.reference`) targets an unredacted
+  current `org.matrix.msc3401.call.member` state event in the same room, sent by the
+  ring's sender while still joined, carrying a live unexpired MSC4143 session or legacy
+  `memberships` entry, and not already claimed by another ring event (in-memory 2-minute
+  TTL map, claimed only when validation passes so the same ring passes again for other
+  recipients and at dispatch). If muted or invalid, those two ring rules are skipped and
+  evaluation continues against the original event.
+- Existing stored rulesets missing either ring rule have only the missing ring rule(s)
+  inserted on read (without `update_with_server_default`, leaving every other stored rule,
+  action, enabled state, and order untouched) across evaluation
+  (`pusher::Service::ruleset`), both `GET /pushrules` routes, and `load_push_rules`
+  (single-rule routes). Existing `GET` legacy-repair write paths stay unchanged from
+  `main`, `GET` never writes ring rules to storage, and rule writes persist the merged
+  ruleset. User override mutes, room-kind mutes, and ignored-sender filtering keep their
+  precedence.
 
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:

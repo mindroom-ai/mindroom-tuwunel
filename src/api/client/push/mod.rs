@@ -42,7 +42,7 @@ async fn load_push_rules(services: &Services, sender_user: &UserId) -> Result<Pu
 		.await
 		.map_err(|_| err!(Request(NotFound("PushRules event not found."))))?;
 
-	event.content.global = ring_rules::merged(sender_user, event.content.global);
+	event.content.global = ring_rules::merged(event.content.global);
 
 	Ok(event)
 }

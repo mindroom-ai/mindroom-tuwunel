@@ -6,7 +6,7 @@ use ruma::{
 		GlobalAccountDataEventType,
 		push_rules::{PushRulesEvent, PushRulesEventContent},
 	},
-	push::{PredefinedContentRuleId, PredefinedOverrideRuleId},
+	push::{PredefinedContentRuleId, PredefinedOverrideRuleId, Ruleset},
 };
 use tuwunel_core::{Result, err};
 use tuwunel_service::{Services, pusher::ring_rules};
@@ -70,7 +70,7 @@ pub(crate) async fn get_pushrules_all_route(
 				.remove(Content, PredefinedContentRuleId::ContainsUserName)
 				.ok();
 
-			global_ruleset.update_with_server_default(ring_rules::server_default(sender_user));
+			global_ruleset.update_with_server_default(Ruleset::server_default(sender_user));
 
 			let ty = GlobalAccountDataEventType::PushRules;
 			let event = PushRulesEvent {
@@ -84,7 +84,7 @@ pub(crate) async fn get_pushrules_all_route(
 		}
 	};
 
-	let global_ruleset = ring_rules::merged(sender_user, global_ruleset);
+	let global_ruleset = ring_rules::merged(global_ruleset);
 
 	Ok(get_pushrules_all::v3::Response { global: global_ruleset })
 }
@@ -96,9 +96,10 @@ async fn recreate_push_rules_and_return(
 	sender_user: &ruma::UserId,
 ) -> Result<get_pushrules_all::v3::Response> {
 	let ty = GlobalAccountDataEventType::PushRules;
-	let global = ring_rules::server_default(sender_user);
 	let event = PushRulesEvent {
-		content: PushRulesEventContent { global: global.clone() },
+		content: PushRulesEventContent {
+			global: Ruleset::server_default(sender_user),
+		},
 	};
 
 	services
@@ -106,5 +107,7 @@ async fn recreate_push_rules_and_return(
 		.update(None, sender_user, ty.to_string().into(), &serde_json::to_value(event)?)
 		.await?;
 
-	Ok(get_pushrules_all::v3::Response { global })
+	Ok(get_pushrules_all::v3::Response {
+		global: ring_rules::server_default(sender_user),
+	})
 }

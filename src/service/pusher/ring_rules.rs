@@ -1,12 +1,14 @@
 //! Default push rules and validation for MatrixRTC incoming-call rings.
 //!
 //! Two MindRoom server-default override rules turn clear and hint-carrying
-//! encrypted ring events in small rooms into `sound: "ring"` pushes. Before
-//! push evaluation, [`Service::validate_ring_push`] checks that a ring points
-//! via `m.reference` at the sender's live `org.matrix.msc3401.call.member`
-//! state event in the same room and allows at most one audible ring per call
-//! membership; failing candidates have their ring marker stripped so they
-//! evaluate as they did before these rules existed.
+//! encrypted ring events in small rooms into `sound: "ring"` pushes. During
+//! push-rule evaluation in [`Service::get_actions`], when one of these two
+//! rules matches, the server checks room-kind mute and validates that the
+//! event references the sender's live, unexpired
+//! `org.matrix.msc3401.call.member` state event in the same room while the
+//! sender is still joined, allowing at most one audible ring per call
+//! membership. If validation fails or the room is muted, those two rules are
+//! skipped and evaluation continues against the original unmutated event.
 
 use std::{
 	collections::HashMap,
@@ -18,15 +20,16 @@ use ruma::{
 	EventId, OwnedEventId, OwnedUserId, RoomId, UInt, UserId,
 	events::{AnySyncTimelineEvent, StateEventType},
 	push::{
-		Action, ConditionalPushRule, ConditionalPushRuleInit, EventMatchConditionData,
+		Action, AnyPushRuleRef, ConditionalPushRule, ConditionalPushRuleInit,
 		EventPropertyIsConditionData, PredefinedOverrideRuleId, PushCondition,
 		RoomMemberCountConditionData, RoomMemberCountIs, RuleKind, Ruleset, ScalarJsonValue,
 		SoundTweakValue, Tweak,
 	},
 	serde::Raw,
 };
-use serde_json::{Value as JsonValue, value::to_raw_value};
-use tuwunel_core::implement;
+use serde::Deserialize;
+use serde_json::{Map as JsonMap, Value as JsonValue};
+use tuwunel_core::{implement, utils::time::now_millis};
 use tuwunel_matrix::Event;
 
 /// Maximum joined room member count eligible to trigger an incoming-call ring.
@@ -50,6 +53,10 @@ pub const RING_ENCRYPTED_RULE_ID: &str = ".io.mindroom.rule.rtc.ring_encrypted";
 /// Push sound tweak value emitted for validated incoming-call rings.
 pub const RING_SOUND_TWEAK: &str = "ring";
 
+/// Default call membership lifetime when `expires` is omitted (4 hours, matching
+/// matrix-js-sdk `DEFAULT_EXPIRE_DURATION`).
+pub const DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS: u64 = 4 * 60 * 60 * 1_000;
+
 const RING_NOTIFICATION_TYPE: &str = "ring";
 const ENCRYPTED_EVENT_TYPE: &str = "m.room.encrypted";
 const ENCRYPTED_RING_PROPERTY_KEY: &str =
@@ -58,10 +65,23 @@ const RING_DEDUP_TTL: Duration = Duration::from_mins(2);
 
 type AcceptedRingMap = HashMap<OwnedEventId, (OwnedEventId, Instant)>;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RingKind {
-	Clear,
-	Encrypted,
+#[derive(Deserialize)]
+struct RingClaimEvent {
+	event_id: OwnedEventId,
+	sender: OwnedUserId,
+	content: RingClaimContent,
+}
+
+#[derive(Deserialize)]
+struct RingClaimContent {
+	#[serde(rename = "m.relates_to")]
+	relates_to: Option<RingRelatesTo>,
+}
+
+#[derive(Deserialize)]
+struct RingRelatesTo {
+	rel_type: Option<String>,
+	event_id: Option<OwnedEventId>,
 }
 
 /// In-memory map of accepted call membership event IDs to their single ring
@@ -105,48 +125,60 @@ impl AcceptedRings {
 /// Ruma's server-default push ruleset with MindRoom's two call-ring override
 /// rules inserted immediately before `.m.rule.is_user_mention`.
 #[must_use]
-pub fn server_default(user_id: &UserId) -> Ruleset {
-	let mut ruleset = Ruleset::server_default(user_id);
+pub fn server_default(user_id: &UserId) -> Ruleset { merged(Ruleset::server_default(user_id)) }
 
-	if let Some(mention_idx) = ruleset
-		.override_
-		.get_index_of(PredefinedOverrideRuleId::IsUserMention.as_str())
-	{
-		let (clear_pos, _) = ruleset.override_.insert_full(ring_rule());
-		ruleset
-			.override_
-			.move_index(clear_pos, mention_idx);
-
-		let (enc_pos, _) = ruleset
-			.override_
-			.insert_full(ring_encrypted_rule());
-		ruleset
-			.override_
-			.move_index(enc_pos, mention_idx.saturating_add(1));
-	} else {
-		ruleset.override_.insert(ring_rule());
-		ruleset.override_.insert(ring_encrypted_rule());
-	}
-
+/// Insert any missing MindRoom call-ring override rules right before
+/// `.m.rule.is_user_mention` (or at the end of `override` if absent), leaving
+/// every other stored rule, enabled flag, action, and relative order untouched.
+#[must_use]
+pub fn merged(mut ruleset: Ruleset) -> Ruleset {
+	insert_override_rule_before(
+		&mut ruleset,
+		ring_rule(),
+		&[RING_ENCRYPTED_RULE_ID, PredefinedOverrideRuleId::IsUserMention.as_str()],
+	);
+	insert_override_rule_before(
+		&mut ruleset,
+		ring_encrypted_rule(),
+		&[PredefinedOverrideRuleId::IsUserMention.as_str()],
+	);
 	ruleset
 }
 
-/// Merge MindRoom's server-default call-ring rules into a stored ruleset when
-/// either ring rule is missing, preserving user rules, enabled flags, and
-/// actions.
-#[must_use]
-pub fn merged(user_id: &UserId, mut ruleset: Ruleset) -> Ruleset {
-	if ruleset
-		.get(RuleKind::Override, RING_RULE_ID)
-		.is_none()
-		|| ruleset
-			.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
-			.is_none()
-	{
-		ruleset.update_with_server_default(server_default(user_id));
+fn insert_override_rule_before(
+	ruleset: &mut Ruleset,
+	rule: ConditionalPushRule,
+	before_rule_ids: &[&str],
+) {
+	if ruleset.override_.contains(rule.rule_id.as_str()) {
+		return;
 	}
 
+	let target_idx = before_rule_ids
+		.iter()
+		.find_map(|id| ruleset.override_.get_index_of(*id));
+
+	let (pos, _) = ruleset.override_.insert_full(rule);
+	if let Some(idx) = target_idx {
+		ruleset.override_.move_index(pos, idx);
+	}
+}
+
+/// Whether `rule` is one of MindRoom's two call-ring override rules.
+pub(super) fn is_ring_rule(rule: AnyPushRuleRef<'_>) -> bool {
+	matches!(
+		rule,
+		AnyPushRuleRef::Override(rule)
+			if rule.rule_id == RING_RULE_ID || rule.rule_id == RING_ENCRYPTED_RULE_ID
+	)
+}
+
+/// Whether `ruleset` has an enabled room-kind mute rule for `room_id` (an
+/// enabled `RuleKind::Room` rule whose actions do not notify).
+pub(super) fn is_room_muted(ruleset: &Ruleset, room_id: &RoomId) -> bool {
 	ruleset
+		.get(RuleKind::Room, room_id.as_str())
+		.is_some_and(|rule| rule.enabled() && !rule.triggers_notification())
 }
 
 fn ring_actions() -> ruma::push::Actions {
@@ -171,9 +203,9 @@ fn ring_rule() -> ConditionalPushRule {
 		enabled: true,
 		rule_id: RING_RULE_ID.into(),
 		conditions: vec![
-			PushCondition::EventMatch(EventMatchConditionData::new(
+			PushCondition::EventPropertyIs(EventPropertyIsConditionData::new(
 				"type".into(),
-				RTC_NOTIFICATION_EVENT_TYPE.into(),
+				ScalarJsonValue::String(RTC_NOTIFICATION_EVENT_TYPE.into()),
 			)),
 			PushCondition::EventPropertyIs(EventPropertyIsConditionData::new(
 				"content.notification_type".into(),
@@ -193,9 +225,9 @@ fn ring_encrypted_rule() -> ConditionalPushRule {
 		enabled: true,
 		rule_id: RING_ENCRYPTED_RULE_ID.into(),
 		conditions: vec![
-			PushCondition::EventMatch(EventMatchConditionData::new(
+			PushCondition::EventPropertyIs(EventPropertyIsConditionData::new(
 				"type".into(),
-				ENCRYPTED_EVENT_TYPE.into(),
+				ScalarJsonValue::String(ENCRYPTED_EVENT_TYPE.into()),
 			)),
 			PushCondition::EventPropertyIs(EventPropertyIsConditionData::new(
 				ENCRYPTED_RING_PROPERTY_KEY.into(),
@@ -208,125 +240,174 @@ fn ring_encrypted_rule() -> ConditionalPushRule {
 	.into()
 }
 
-pub(super) fn detect_ring_candidate(
+fn extract_ring_claim(
 	pdu: &Raw<AnySyncTimelineEvent>,
-) -> Option<(RingKind, JsonValue)> {
-	let event = serde_json::to_value(pdu).ok()?;
-	let event_type = event.get("type").and_then(JsonValue::as_str)?;
-	let content = event.get("content")?.as_object()?;
-
-	let kind = match event_type {
-		| RTC_NOTIFICATION_EVENT_TYPE
-			if content
-				.get("notification_type")
-				.and_then(JsonValue::as_str)
-				== Some(RING_NOTIFICATION_TYPE) =>
-			RingKind::Clear,
-		| ENCRYPTED_EVENT_TYPE
-			if content
-				.get(RING_HINT_KEY)
-				.and_then(JsonValue::as_object)
-				.and_then(|hint| hint.get("notification_type"))
-				.and_then(JsonValue::as_str)
-				== Some(RING_NOTIFICATION_TYPE) =>
-			RingKind::Encrypted,
-		| _ => return None,
-	};
-
-	Some((kind, event))
-}
-
-pub(super) fn strip_ring_marker(
-	kind: RingKind,
-	mut event: JsonValue,
-) -> Option<Raw<AnySyncTimelineEvent>> {
-	let content = event.get_mut("content")?.as_object_mut()?;
-	match kind {
-		| RingKind::Clear => {
-			content.remove("notification_type");
-		},
-		| RingKind::Encrypted => {
-			content.remove(RING_HINT_KEY);
-		},
-	}
-
-	to_raw_value(&event).ok().map(Raw::from_json)
-}
-
-fn extract_ring_claim(event: &JsonValue) -> Option<(OwnedEventId, OwnedUserId, OwnedEventId)> {
-	let ring_event_id = event
-		.get("event_id")
-		.and_then(JsonValue::as_str)
-		.and_then(|id| EventId::parse(id).ok())?;
-	let sender = event
-		.get("sender")
-		.and_then(JsonValue::as_str)
-		.and_then(|id| UserId::parse(id).ok())?;
-	let relates_to = event
-		.get("content")
-		.and_then(JsonValue::as_object)
-		.and_then(|content| content.get("m.relates_to"))
-		.and_then(JsonValue::as_object)?;
-
-	if relates_to
-		.get("rel_type")
-		.and_then(JsonValue::as_str)
-		!= Some("m.reference")
-	{
+) -> Option<(OwnedEventId, OwnedUserId, OwnedEventId)> {
+	let claim: RingClaimEvent = serde_json::from_str(pdu.json().get()).ok()?;
+	let relates_to = claim.content.relates_to?;
+	if relates_to.rel_type.as_deref() != Some("m.reference") {
 		return None;
 	}
-
-	let membership_event_id = relates_to
-		.get("event_id")
-		.and_then(JsonValue::as_str)
-		.and_then(|id| EventId::parse(id).ok())?;
-
-	Some((ring_event_id, sender, membership_event_id))
+	let membership_event_id = relates_to.event_id?;
+	Some((claim.event_id, claim.sender, membership_event_id))
 }
 
-fn is_active_call_membership_content(content: &JsonValue) -> bool {
+/// Check whether an `org.matrix.msc3401.call.member` content object describes a
+/// live, unexpired call membership at `now_ms`.
+///
+/// Accepts both the MSC4143 per-device session shape written by matrix-js-sdk
+/// 45.1.0 and the legacy `memberships` array shape. Rejects empty objects,
+/// leave events (`leave_reason`), malformed entries, and expired entries.
+pub(super) fn is_live_call_membership(
+	content: &JsonValue,
+	event_origin_server_ts_ms: u64,
+	now_ms: u64,
+) -> bool {
 	let Some(obj) = content.as_object() else {
 		return false;
 	};
-	if obj.is_empty() {
+	if obj.contains_key("leave_reason") {
 		return false;
 	}
+
 	if let Some(memberships) = obj.get("memberships") {
-		return memberships
-			.as_array()
-			.is_some_and(|list| !list.is_empty());
+		return memberships.as_array().is_some_and(|list| {
+			list.iter().any(|entry| {
+				entry.as_object().is_some_and(|entry| {
+					is_live_session_entry(entry, event_origin_server_ts_ms, now_ms)
+				})
+			})
+		});
 	}
+
+	is_live_session_entry(obj, event_origin_server_ts_ms, now_ms)
+}
+
+fn is_live_session_entry(
+	entry: &JsonMap<String, JsonValue>,
+	event_origin_server_ts_ms: u64,
+	now_ms: u64,
+) -> bool {
+	if !has_valid_session_fields(entry) {
+		return false;
+	}
+
+	let base_ts = match entry.get("created_ts") {
+		| None => event_origin_server_ts_ms,
+		| Some(val) => {
+			let Some(ts) = val.as_u64() else {
+				return false;
+			};
+			ts
+		},
+	};
+
+	let abs_expiry = match entry.get("expires") {
+		| Some(val) => {
+			let Some(expires_ms) = val.as_u64().filter(|&ms| ms > 0) else {
+				return false;
+			};
+			base_ts.saturating_add(expires_ms)
+		},
+		| None => match entry.get("expires_ts") {
+			| Some(val) => {
+				let Some(ts) = val.as_u64().filter(|&ms| ms > 0) else {
+					return false;
+				};
+				ts
+			},
+			| None => base_ts.saturating_add(DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS),
+		},
+	};
+
+	abs_expiry > now_ms
+}
+
+fn has_valid_session_fields(entry: &JsonMap<String, JsonValue>) -> bool {
+	let non_empty_str = |key: &str| {
+		entry
+			.get(key)
+			.and_then(JsonValue::as_str)
+			.is_some_and(|s| !s.is_empty())
+	};
+
+	if !non_empty_str("device_id")
+		|| !non_empty_str("application")
+		|| entry
+			.get("call_id")
+			.and_then(JsonValue::as_str)
+			.is_none()
+	{
+		return false;
+	}
+
+	let focus_active_ok = entry
+		.get("focus_active")
+		.and_then(JsonValue::as_object)
+		.and_then(|focus| focus.get("type"))
+		.and_then(JsonValue::as_str)
+		.is_some_and(|s| !s.is_empty());
+	if !focus_active_ok {
+		return false;
+	}
+
+	if let Some(foci) = entry.get("foci_preferred") {
+		let valid = foci.as_array().is_some_and(|list| {
+			list.iter().all(|item| {
+				item.as_object()
+					.and_then(|obj| obj.get("type"))
+					.and_then(JsonValue::as_str)
+					.is_some_and(|s| !s.is_empty())
+			})
+		});
+		if !valid {
+			return false;
+		}
+	}
+
+	if entry
+		.get("scope")
+		.is_some_and(|val| !val.is_string())
+		|| entry
+			.get("m.call.intent")
+			.is_some_and(|val| !val.is_string())
+	{
+		return false;
+	}
+
+	if let Some(caps) = entry.get("capabilities") {
+		let valid = caps
+			.as_array()
+			.is_some_and(|list| list.iter().all(JsonValue::is_string));
+		if !valid {
+			return false;
+		}
+	}
+
 	true
 }
 
-/// Validate a ring candidate before push rule evaluation.
-///
-/// Returns `None` when the event is not a ring candidate or when it passes all
-/// validation checks. Returns `Some(stripped)` with the ring marker removed
-/// when a ring candidate fails validation so it evaluates with today's rules.
+/// Validate that a matched ring event points at the sender's live, unexpired
+/// call membership in `room_id` while the sender is still joined, and claim
+/// the single audible-ring slot for that membership.
 #[implement(super::Service)]
-pub(super) async fn validate_ring_push(
+pub(super) async fn ring_push_is_valid(
 	&self,
 	room_id: &RoomId,
 	pdu: &Raw<AnySyncTimelineEvent>,
-) -> Option<Raw<AnySyncTimelineEvent>> {
-	let (kind, event) = detect_ring_candidate(pdu)?;
-
-	if self
-		.ring_candidate_is_valid(room_id, &event)
-		.await
-	{
-		return None;
-	}
-
-	strip_ring_marker(kind, event)
-}
-
-#[implement(super::Service)]
-async fn ring_candidate_is_valid(&self, room_id: &RoomId, event: &JsonValue) -> bool {
-	let Some((ring_event_id, sender, membership_event_id)) = extract_ring_claim(event) else {
+) -> bool {
+	let Some((ring_event_id, sender, membership_event_id)) = extract_ring_claim(pdu) else {
 		return false;
 	};
+
+	if !self
+		.services
+		.state_cache
+		.is_joined(&sender, room_id)
+		.await
+	{
+		return false;
+	}
 
 	let Ok(target) = self
 		.services
@@ -349,7 +430,8 @@ async fn ring_candidate_is_valid(&self, room_id: &RoomId, event: &JsonValue) -> 
 		return false;
 	};
 
-	if !is_active_call_membership_content(&target.get_content_as_value()) {
+	let event_ts_ms = u64::from(target.origin_server_ts().get());
+	if !is_live_call_membership(&target.get_content_as_value(), event_ts_ms, now_millis()) {
 		return false;
 	}
 

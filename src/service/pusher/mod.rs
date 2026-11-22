@@ -517,7 +517,7 @@ pub async fn ruleset(&self, user_id: &UserId) -> Ruleset {
 		.log_err(Level::TRACE)
 		.map_or_else(
 			|_| ring_rules::server_default(user_id),
-			|ev: PushRulesEvent| ring_rules::merged(user_id, ev.content.global),
+			|ev: PushRulesEvent| ring_rules::merged(ev.content.global),
 		)
 }
 
@@ -561,9 +561,6 @@ pub async fn get_actions<'a>(
 		| MindroomPushEvaluation::Unchanged => pdu,
 	};
 
-	let validated_ring = self.validate_ring_push(room_id, pdu).await;
-	let pdu = validated_ring.as_ref().unwrap_or(pdu);
-
 	let user_display_name = self
 		.services
 		.profile
@@ -604,7 +601,44 @@ pub async fn get_actions<'a>(
 		| None => ctx,
 	};
 
-	ruleset.get_actions(pdu, &ctx).await
+	let flattened = FlattenedJson::from_raw(pdu);
+	if flattened
+		.get_str("sender")
+		.is_some_and(|sender| sender == ctx.user_id)
+	{
+		return &[];
+	}
+
+	let mut ring_valid: Option<bool> = None;
+
+	for rule in ruleset {
+		if !rule.applies(&flattened, &ctx).await {
+			continue;
+		}
+
+		if ring_rules::is_ring_rule(rule) {
+			if ring_rules::is_room_muted(ruleset, room_id) {
+				continue;
+			}
+
+			let valid = match ring_valid {
+				| Some(valid) => valid,
+				| None => {
+					let valid = self.ring_push_is_valid(room_id, pdu).await;
+					ring_valid = Some(valid);
+					valid
+				},
+			};
+
+			if !valid {
+				continue;
+			}
+		}
+
+		return rule.actions();
+	}
+
+	&[]
 }
 
 /// Resolve the events an event relates to, for the MSC3664 push condition.

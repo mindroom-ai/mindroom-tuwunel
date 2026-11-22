@@ -7,9 +7,9 @@ use ruma::{
 	events::{AnySyncTimelineEvent, TimelineEventType},
 	owned_room_id, owned_user_id,
 	push::{
-		Action, EventMatchConditionData, NewConditionalPushRule, NewPushRule,
-		PredefinedOverrideRuleId, PushCondition, PushConditionRoomCtx, RuleKind, Ruleset,
-		SoundTweakValue, Tweak,
+		Action, ConditionalPushRule, EventMatchConditionData, NewConditionalPushRule,
+		NewPushRule, NewSimplePushRule, PredefinedOverrideRuleId, PushCondition,
+		PushConditionRoomCtx, RuleKind, Ruleset, SoundTweakValue, Tweak,
 	},
 	serde::Raw,
 	uint,
@@ -23,9 +23,9 @@ use super::{
 	ExtractRelatesTo, mindroom_push_suppressed, mindroom_terminal_push_content,
 	mindroom_terminal_push_event,
 	ring_rules::{
-		self, AcceptedRings, MAX_RING_ROOM_MEMBERS, RING_ENCRYPTED_RULE_ID, RING_HINT_KEY,
-		RING_RULE_ID, RING_SOUND_TWEAK, RTC_NOTIFICATION_EVENT_TYPE, RingKind,
-		detect_ring_candidate, strip_ring_marker,
+		self, AcceptedRings, DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS, MAX_RING_ROOM_MEMBERS,
+		RING_ENCRYPTED_RULE_ID, RING_HINT_KEY, RING_RULE_ID, RING_SOUND_TWEAK,
+		RTC_NOTIFICATION_EVENT_TYPE, is_live_call_membership, is_room_muted,
 	},
 };
 
@@ -373,6 +373,22 @@ fn clear_ring_event(
 	notification_type: &str,
 	membership_id: Option<&str>,
 ) -> Raw<AnySyncTimelineEvent> {
+	clear_ring_event_with_type(
+		RTC_NOTIFICATION_EVENT_TYPE,
+		sender,
+		event_id,
+		notification_type,
+		membership_id,
+	)
+}
+
+fn clear_ring_event_with_type(
+	event_type: &str,
+	sender: &str,
+	event_id: &str,
+	notification_type: &str,
+	membership_id: Option<&str>,
+) -> Raw<AnySyncTimelineEvent> {
 	let mut content = json!({
 		"lifetime": 30_000,
 		"m.call.intent": "audio",
@@ -393,12 +409,28 @@ fn clear_ring_event(
 		"event_id": event_id,
 		"origin_server_ts": 1_795_300_000_000_i64,
 		"sender": sender,
-		"type": RTC_NOTIFICATION_EVENT_TYPE,
+		"type": event_type,
 	}))
 	.expect("valid clear ring event")
 }
 
 fn encrypted_ring_event(
+	sender: &str,
+	event_id: &str,
+	hint_notification_type: Option<&str>,
+	membership_id: Option<&str>,
+) -> Raw<AnySyncTimelineEvent> {
+	encrypted_ring_event_with_type(
+		"m.room.encrypted",
+		sender,
+		event_id,
+		hint_notification_type,
+		membership_id,
+	)
+}
+
+fn encrypted_ring_event_with_type(
+	event_type: &str,
 	sender: &str,
 	event_id: &str,
 	hint_notification_type: Option<&str>,
@@ -434,7 +466,7 @@ fn encrypted_ring_event(
 		"event_id": event_id,
 		"origin_server_ts": 1_795_300_000_000_i64,
 		"sender": sender,
-		"type": "m.room.encrypted",
+		"type": event_type,
 	}))
 	.expect("valid encrypted ring event")
 }
@@ -486,7 +518,7 @@ fn ring_rules_match_spec_json_and_position_before_user_mention() {
 			"default": true,
 			"enabled": true,
 			"conditions": [
-				{ "kind": "event_match", "key": "type", "pattern": "org.matrix.msc4075.rtc.notification" },
+				{ "kind": "event_property_is", "key": "type", "value": "org.matrix.msc4075.rtc.notification" },
 				{ "kind": "event_property_is", "key": "content.notification_type", "value": "ring" },
 				{ "kind": "room_member_count", "is": format!("<={MAX_RING_ROOM_MEMBERS}") },
 			],
@@ -508,7 +540,7 @@ fn ring_rules_match_spec_json_and_position_before_user_mention() {
 			"default": true,
 			"enabled": true,
 			"conditions": [
-				{ "kind": "event_match", "key": "type", "pattern": "m.room.encrypted" },
+				{ "kind": "event_property_is", "key": "type", "value": "m.room.encrypted" },
 				{
 					"kind": "event_property_is",
 					"key": r"content.io\.mindroom\.rtc\.notification.notification_type",
@@ -518,6 +550,56 @@ fn ring_rules_match_spec_json_and_position_before_user_mention() {
 			],
 			"actions": ["notify", { "set_tweak": "sound", "value": "ring" }],
 		})
+	);
+}
+
+#[tokio::test]
+async fn ring_rules_require_exact_case_sensitive_type_and_notification_type() {
+	let user = owned_user_id!("@bob:example.com");
+	let ruleset = ring_rules::server_default(&user);
+	let ctx = PushConditionRoomCtx::new(
+		owned_room_id!("!room:example.com"),
+		uint!(2),
+		user,
+		"Bob".into(),
+	);
+
+	let upper_clear = clear_ring_event_with_type(
+		"ORG.MATRIX.MSC4075.RTC.NOTIFICATION",
+		"@alice:example.com",
+		"$upper_clear",
+		"ring",
+		Some("$mem"),
+	);
+	assert!(
+		!has_ring_sound(ruleset.get_actions(&upper_clear, &ctx).await),
+		"case variant of RTC notification type must not match ring rule"
+	);
+
+	let upper_notif =
+		clear_ring_event("@alice:example.com", "$upper_notif", "RING", Some("$mem"));
+	assert!(
+		!has_ring_sound(ruleset.get_actions(&upper_notif, &ctx).await),
+		"case variant of notification_type must not match ring rule"
+	);
+
+	let upper_enc = encrypted_ring_event_with_type(
+		"M.ROOM.ENCRYPTED",
+		"@alice:example.com",
+		"$upper_enc",
+		Some("ring"),
+		Some("$mem"),
+	);
+	assert!(
+		!has_ring_sound(ruleset.get_actions(&upper_enc, &ctx).await),
+		"case variant of m.room.encrypted must not match encrypted ring rule"
+	);
+
+	let upper_enc_notif =
+		encrypted_ring_event("@alice:example.com", "$upper_enc_notif", Some("RING"), Some("$mem"));
+	assert!(
+		!has_ring_sound(ruleset.get_actions(&upper_enc_notif, &ctx).await),
+		"case variant of encrypted hint notification_type must not match ring rule"
 	);
 }
 
@@ -598,7 +680,7 @@ async fn room_mute_override_wins_before_and_after_ring_rule_merge() {
 		)
 		.expect("insert mute override");
 
-	let merged = ring_rules::merged(&user, stored);
+	let merged = ring_rules::merged(stored);
 	let ctx = PushConditionRoomCtx::new(room_id, uint!(2), user, "Bob".into());
 
 	let clear = clear_ring_event("@alice:example.com", "$ring_clear", "ring", Some("$mem"));
@@ -615,13 +697,137 @@ async fn room_mute_override_wins_before_and_after_ring_rule_merge() {
 }
 
 #[test]
+fn room_kind_mute_detection_checks_enabled_and_notify_action() {
+	let user = owned_user_id!("@bob:example.com");
+	let muted_room = owned_room_id!("!muted:example.com");
+	let notify_room = owned_room_id!("!notify:example.com");
+	let disabled_room = owned_room_id!("!disabled:example.com");
+	let other_room = owned_room_id!("!other:example.com");
+
+	let mut ruleset = ring_rules::server_default(&user);
+	ruleset
+		.insert(
+			NewPushRule::Room(NewSimplePushRule::new(muted_room.clone(), Vec::new().into())),
+			None,
+			None,
+		)
+		.expect("insert room mute");
+	ruleset
+		.insert(
+			NewPushRule::Room(NewSimplePushRule::new(
+				notify_room.clone(),
+				vec![Action::Notify].into(),
+			)),
+			None,
+			None,
+		)
+		.expect("insert room notify");
+	ruleset
+		.insert(
+			NewPushRule::Room(NewSimplePushRule::new(disabled_room.clone(), Vec::new().into())),
+			None,
+			None,
+		)
+		.expect("insert disabled room mute");
+	ruleset
+		.set_enabled(RuleKind::Room, disabled_room.as_str(), false)
+		.expect("disable room mute");
+
+	assert!(is_room_muted(&ruleset, &muted_room));
+	assert!(!is_room_muted(&ruleset, &notify_room));
+	assert!(!is_room_muted(&ruleset, &disabled_room));
+	assert!(!is_room_muted(&ruleset, &other_room));
+}
+
+#[tokio::test]
+async fn merged_preserves_genuinely_legacy_ruleset_and_appends_when_mention_absent() {
+	let user = owned_user_id!("@bob:example.com");
+	let mut legacy = Ruleset::server_default(&user);
+	legacy
+		.override_
+		.shift_remove(PredefinedOverrideRuleId::IsUserMention.as_str());
+	#[expect(deprecated)]
+	legacy
+		.override_
+		.insert(ConditionalPushRule::contains_display_name());
+	legacy
+		.set_enabled(RuleKind::Override, PredefinedOverrideRuleId::SuppressNotices.as_str(), false)
+		.expect("disable suppress_notices");
+	let custom_message_actions = vec![
+		Action::Notify,
+		Action::SetTweak(Tweak::Sound(SoundTweakValue::Default)),
+	];
+	legacy
+		.set_actions(
+			RuleKind::Underride,
+			".m.rule.message",
+			custom_message_actions.into(),
+		)
+		.expect("customize message rule");
+
+	let before_ids: Vec<String> = legacy
+		.override_
+		.iter()
+		.map(|r| r.rule_id.to_string())
+		.collect();
+
+	let merged = ring_rules::merged(legacy);
+
+	// All pre-existing override rules stay in their exact original order,
+	// with the two ring rules appended at the end since .m.rule.is_user_mention is absent.
+	let after_ids: Vec<String> = merged
+		.override_
+		.iter()
+		.map(|r| r.rule_id.to_string())
+		.collect();
+	let mut expected_ids = before_ids;
+	expected_ids.push(RING_RULE_ID.to_owned());
+	expected_ids.push(RING_ENCRYPTED_RULE_ID.to_owned());
+	assert_eq!(after_ids, expected_ids);
+
+	// Deprecated rule and custom enabled/action states are preserved untouched.
+	#[expect(deprecated)]
+	let contains_dn = PredefinedOverrideRuleId::ContainsDisplayName.as_str();
+	assert!(merged.get(RuleKind::Override, contains_dn).is_some());
+	assert!(
+		!merged
+			.get(RuleKind::Override, PredefinedOverrideRuleId::SuppressNotices.as_str())
+			.expect("suppress_notices preserved")
+			.enabled()
+	);
+
+	// Ordinary message matching .m.rule.contains_display_name evaluates unchanged.
+	let ctx = PushConditionRoomCtx::new(
+		owned_room_id!("!room:example.com"),
+		uint!(2),
+		user,
+		"Bob".into(),
+	);
+	let msg: Raw<AnySyncTimelineEvent> = from_value(json!({
+		"content": { "msgtype": "m.text", "body": "hey Bob" },
+		"event_id": "$msg1",
+		"origin_server_ts": 1,
+		"sender": "@alice:example.com",
+		"type": "m.room.message",
+	}))
+	.expect("valid message");
+	let actions = merged.get_actions(&msg, &ctx).await;
+	assert!(actions.iter().any(Action::should_notify));
+	assert!(has_highlight(actions));
+
+	// Ring rules are present and match.
+	let clear = clear_ring_event("@alice:example.com", "$ring_legacy", "ring", Some("$mem"));
+	assert!(has_ring_sound(merged.get_actions(&clear, &ctx).await));
+}
+
+#[test]
 fn merged_adds_missing_ring_rules_and_preserves_user_overrides_and_state() {
 	let user = owned_user_id!("@bob:example.com");
 	let mut old = Ruleset::server_default(&user);
 	old.set_enabled(RuleKind::Override, PredefinedOverrideRuleId::IsUserMention.as_str(), false)
 		.expect("disable user mention");
 
-	let mut merged = ring_rules::merged(&user, old);
+	let mut merged = ring_rules::merged(old);
 	assert!(
 		merged
 			.get(RuleKind::Override, RING_RULE_ID)
@@ -639,7 +845,7 @@ fn merged_adds_missing_ring_rules_and_preserves_user_overrides_and_state() {
 			.enabled()
 	);
 
-	// Disable clear ring, then ensure a subsequent merge preserves that choice.
+	// Disable clear ring and customize encrypted ring, then re-merge.
 	merged
 		.set_enabled(RuleKind::Override, RING_RULE_ID, false)
 		.expect("disable clear ring");
@@ -649,7 +855,7 @@ fn merged_adds_missing_ring_rules_and_preserves_user_overrides_and_state() {
 		.set_actions(RuleKind::Override, RING_ENCRYPTED_RULE_ID, custom_actions.into())
 		.expect("customize encrypted ring actions");
 
-	let remerged = ring_rules::merged(&user, merged);
+	let remerged = ring_rules::merged(merged);
 	assert!(
 		!remerged
 			.get(RuleKind::Override, RING_RULE_ID)
@@ -698,22 +904,123 @@ fn accepted_rings_allows_same_ring_rejects_second_and_expires_after_two_minutes(
 }
 
 #[test]
-fn ring_marker_detection_and_stripping_preserves_other_events() {
-	let clear = clear_ring_event("@alice:example.com", "$ring_clear", "ring", None);
-	let (kind, value) = detect_ring_candidate(&clear).expect("clear ring detected");
-	assert_eq!(kind, RingKind::Clear);
-	let stripped = strip_ring_marker(kind, value).expect("strip clear ring");
-	assert!(detect_ring_candidate(&stripped).is_none());
+fn call_membership_liveness_checks_shape_leave_and_expiry() {
+	let origin_ts: u64 = 1_795_300_000_000;
+	let now_ms: u64 = origin_ts.saturating_add(10_000);
 
-	let encrypted = encrypted_ring_event("@alice:example.com", "$ring_enc", Some("ring"), None);
-	let (kind, value) = detect_ring_candidate(&encrypted).expect("encrypted ring detected");
-	assert_eq!(kind, RingKind::Encrypted);
-	let stripped = strip_ring_marker(kind, value).expect("strip encrypted ring");
-	assert!(detect_ring_candidate(&stripped).is_none());
+	// Valid MSC4143 session shape with explicit expires.
+	let valid_session = json!({
+		"application": "m.call",
+		"call_id": "",
+		"device_id": "DEV1",
+		"expires": 60_000,
+		"focus_active": { "type": "livekit", "focus_selection": "oldest_membership" },
+		"foci_preferred": [{ "type": "livekit", "livekit_service_url": "https://rtc.example.com" }],
+		"scope": "m.room",
+	});
+	assert!(is_live_call_membership(&valid_session, origin_ts, now_ms));
 
-	let group_notif = clear_ring_event("@alice:example.com", "$group", "notification", None);
-	assert!(detect_ring_candidate(&group_notif).is_none());
+	// Valid MSC4143 session shape with omitted expires uses default 4h lifetime.
+	let default_expiry = json!({
+		"application": "m.call",
+		"call_id": "",
+		"device_id": "DEV1",
+		"focus_active": { "type": "livekit" },
+	});
+	assert!(is_live_call_membership(&default_expiry, origin_ts, now_ms));
+	assert!(
+		!is_live_call_membership(
+			&default_expiry,
+			origin_ts,
+			origin_ts.saturating_add(DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS),
+		),
+		"default expiry expires at origin_ts + DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS"
+	);
 
-	let plain_encrypted = encrypted_ring_event("@alice:example.com", "$enc", None, None);
-	assert!(detect_ring_candidate(&plain_encrypted).is_none());
+	// Expired via created_ts + expires (even though origin_server_ts is fresh).
+	let expired_created = json!({
+		"application": "m.call",
+		"call_id": "",
+		"created_ts": origin_ts.saturating_sub(120_000),
+		"device_id": "DEV1",
+		"expires": 60_000,
+		"focus_active": { "type": "livekit" },
+	});
+	assert!(!is_live_call_membership(&expired_created, origin_ts, now_ms));
+
+	// Expired via origin_server_ts + expires.
+	let expired_origin = json!({
+		"application": "m.call",
+		"call_id": "",
+		"device_id": "DEV1",
+		"expires": 5_000,
+		"focus_active": { "type": "livekit" },
+	});
+	assert!(!is_live_call_membership(&expired_origin, origin_ts, now_ms));
+
+	// Valid legacy `memberships` list (one expired + one live).
+	let legacy_live = json!({
+		"memberships": [
+			{
+				"application": "m.call",
+				"call_id": "",
+				"device_id": "OLD",
+				"expires": 1_000,
+				"focus_active": { "type": "livekit" },
+			},
+			{
+				"application": "m.call",
+				"call_id": "",
+				"device_id": "LIVE",
+				"expires": 60_000,
+				"focus_active": { "type": "livekit" },
+			},
+		]
+	});
+	assert!(is_live_call_membership(&legacy_live, origin_ts, now_ms));
+
+	// Legacy `memberships` list with only expired entries is invalid.
+	let legacy_expired = json!({
+		"memberships": [
+			{
+				"application": "m.call",
+				"call_id": "",
+				"device_id": "OLD",
+				"expires": 1_000,
+				"focus_active": { "type": "livekit" },
+			},
+		]
+	});
+	assert!(!is_live_call_membership(&legacy_expired, origin_ts, now_ms));
+
+	// Leave with only `leave_reason`, empty object, empty memberships, malformed shapes.
+	assert!(!is_live_call_membership(&json!({ "leave_reason": "user_left" }), origin_ts, now_ms));
+	assert!(!is_live_call_membership(&json!({}), origin_ts, now_ms));
+	assert!(!is_live_call_membership(&json!({ "memberships": [] }), origin_ts, now_ms));
+	assert!(!is_live_call_membership(
+		&json!({ "application": "m.call", "call_id": "", "device_id": "DEV1" }),
+		origin_ts,
+		now_ms,
+	));
+	assert!(!is_live_call_membership(
+		&json!({
+			"application": "m.call",
+			"call_id": "",
+			"device_id": "DEV1",
+			"expires": 0,
+			"focus_active": { "type": "livekit" },
+		}),
+		origin_ts,
+		now_ms,
+	));
+	assert!(!is_live_call_membership(
+		&json!({
+			"application": 42,
+			"call_id": "",
+			"device_id": "DEV1",
+			"focus_active": { "type": "livekit" },
+		}),
+		origin_ts,
+		now_ms,
+	));
 }
