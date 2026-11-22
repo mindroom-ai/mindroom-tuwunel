@@ -1506,10 +1506,10 @@ fn expect_absent(value: &Value, name: &str) -> Result {
 }
 
 
-const ALICE_RING_TOKEN: &str = "call-ring-alice-token";
-const BOB_RING_TOKEN: &str = "call-ring-bob-token";
-const CHARLIE_RING_TOKEN: &str = "call-ring-charlie-token";
-const DANA_RING_TOKEN: &str = "call-ring-dana-token";
+const ALICE_RING_TOKEN: &str = "call-ring-push-rules-test-alice-access-token";
+const BOB_RING_TOKEN: &str = "call-ring-push-rules-test-bob-access-token";
+const CHARLIE_RING_TOKEN: &str = "call-ring-push-rules-test-charlie-access-token";
+const DANA_RING_TOKEN: &str = "call-ring-push-rules-test-dana-access-token";
 
 struct RingTestUsers<'a> {
 	alice: client::Client<'a>,
