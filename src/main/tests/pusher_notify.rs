@@ -1568,9 +1568,12 @@ async fn exercise_call_ring_cases(services: &Services, base: &str) -> Result {
 
 	verify_live_clear_and_encrypted_rings(services, &users, &room2, &room3, &mut bob_rx).await?;
 	verify_invalid_ring_references(services, &users, &room2, &other_room).await?;
+	verify_membership_liveness_and_fallback(services, &users, &room2).await?;
 	verify_four_members_and_group_notification(services, &users, &room2, &room4).await?;
-	verify_room_mute_and_ignore_precedence(services, &users, &mut bob_rx).await?;
-	verify_old_ruleset_merge_get_and_disable_before_get(services, &users, &room2).await
+	verify_override_and_room_kind_mutes(services, &users, &mut bob_rx).await?;
+	verify_ignore_precedence(services, &users).await?;
+	verify_old_ruleset_merge_get_and_disable_before_get(services, &users, &room2).await?;
+	verify_genuinely_legacy_ruleset(services, &users, &room2).await
 }
 
 async fn create_room_with(
@@ -1965,6 +1968,32 @@ async fn verify_invalid_ring_references(
 	)
 	.await?;
 
+	// Live membership in another room.
+	let other_room_mem = users
+		.alice
+		.put_state(
+			other_room,
+			CALL_MEMBER_EVENT_TYPE,
+			"_alice_other_room",
+			&active_call_member_content("DEV_O"),
+		)
+		.await?;
+	assert_ring_refused(
+		services,
+		&users.bob_id,
+		&users.alice,
+		room2,
+		"other-room",
+		Some(&other_room_mem),
+	)
+	.await
+}
+
+async fn verify_membership_liveness_and_fallback(
+	services: &Services,
+	users: &RingTestUsers<'_>,
+	room2: &RoomId,
+) -> Result {
 	// Leave event with only `leave_reason`.
 	let left_reason = users
 		.alice
@@ -2150,25 +2179,7 @@ async fn verify_invalid_ring_references(
 		return Err!("ring from sender who left the room must not ring: {after_leave_actions:?}");
 	}
 
-	// Live membership in another room.
-	let other_room_mem = users
-		.alice
-		.put_state(
-			other_room,
-			CALL_MEMBER_EVENT_TYPE,
-			"_alice_other_room",
-			&active_call_member_content("DEV_O"),
-		)
-		.await?;
-	assert_ring_refused(
-		services,
-		&users.bob_id,
-		&users.alice,
-		room2,
-		"other-room",
-		Some(&other_room_mem),
-	)
-	.await
+	Ok(())
 }
 
 async fn verify_four_members_and_group_notification(
@@ -2229,7 +2240,7 @@ async fn verify_four_members_and_group_notification(
 	Ok(())
 }
 
-async fn verify_room_mute_and_ignore_precedence(
+async fn verify_override_and_room_kind_mutes(
 	services: &Services,
 	users: &RingTestUsers<'_>,
 	bob_rx: &mut CaptureRx,
@@ -2346,6 +2357,10 @@ async fn verify_room_mute_and_ignore_precedence(
 	}
 	drain_pushes(bob_rx);
 
+	Ok(())
+}
+
+async fn verify_ignore_precedence(services: &Services, users: &RingTestUsers<'_>) -> Result {
 	// Ignore Alice for Dana, then send rings in a 2-member room with Alice and Dana.
 	let ignore_room = create_room_with(&users.alice, &[(&users.dana, &users.dana_id)]).await?;
 	let (mut dana_rx, _dana_stub) =
@@ -2498,6 +2513,46 @@ async fn verify_old_ruleset_merge_get_and_disable_before_get(
 		return Err!("GET pushrules must not write ring rules to stored account data");
 	}
 
+	// A user with an old stored ruleset can disable a ring rule before any GET.
+	store_old_ruleset(services, &users.charlie_id).await?;
+	users
+		.charlie
+		.put(
+			&format!("pushrules/global/override/{RING_RULE_ID}/enabled"),
+			&json!({ "enabled": false }),
+		)
+		.await?;
+
+	// That write persisted the merged ruleset with the clear ring rule disabled.
+	let stored_charlie: PushRulesEvent = services
+		.account_data
+		.get_global(&users.charlie_id, GlobalAccountDataEventType::PushRules)
+		.await?;
+	let clear_rule = stored_charlie
+		.content
+		.global
+		.get(RuleKind::Override, RING_RULE_ID)
+		.ok_or_else(|| err!("clear ring rule not persisted on disable write"))?;
+	if clear_rule.enabled() {
+		return Err!("clear ring rule should be persisted as disabled");
+	}
+	let enc_rule = stored_charlie
+		.content
+		.global
+		.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
+		.ok_or_else(|| err!("encrypted ring rule not persisted on disable write"))?;
+	if !enc_rule.enabled() {
+		return Err!("encrypted ring rule should remain enabled");
+	}
+
+	Ok(())
+}
+
+async fn verify_genuinely_legacy_ruleset(
+	services: &Services,
+	users: &RingTestUsers<'_>,
+	room2: &RoomId,
+) -> Result {
 	// Genuinely legacy stored ruleset containing `.m.rule.contains_display_name` (and missing
 	// `.m.rule.is_user_mention`): ordinary message evaluation is unchanged, ring rules are
 	// present for evaluation and GET, single-rule GET does not write, and full GET legacy-repair
@@ -2636,38 +2691,6 @@ async fn verify_old_ruleset_merge_get_and_disable_before_get(
 			.is_some()
 	{
 		return Err!("GET legacy repair must not persist ring defaults");
-	}
-
-	// A user with an old stored ruleset can disable a ring rule before any GET.
-	store_old_ruleset(services, &users.charlie_id).await?;
-	users
-		.charlie
-		.put(
-			&format!("pushrules/global/override/{RING_RULE_ID}/enabled"),
-			&json!({ "enabled": false }),
-		)
-		.await?;
-
-	// That write persisted the merged ruleset with the clear ring rule disabled.
-	let stored_charlie: PushRulesEvent = services
-		.account_data
-		.get_global(&users.charlie_id, GlobalAccountDataEventType::PushRules)
-		.await?;
-	let clear_rule = stored_charlie
-		.content
-		.global
-		.get(RuleKind::Override, RING_RULE_ID)
-		.ok_or_else(|| err!("clear ring rule not persisted on disable write"))?;
-	if clear_rule.enabled() {
-		return Err!("clear ring rule should be persisted as disabled");
-	}
-	let enc_rule = stored_charlie
-		.content
-		.global
-		.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
-		.ok_or_else(|| err!("encrypted ring rule not persisted on disable write"))?;
-	if !enc_rule.enabled() {
-		return Err!("encrypted ring rule should remain enabled");
 	}
 
 	Ok(())
