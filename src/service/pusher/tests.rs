@@ -735,11 +735,26 @@ fn ring_permitted_needs_ring_actions_a_known_small_count_and_no_room_mute() {
 	assert!(!ring_permitted(ring, &ruleset, &room, Some(max.saturating_add(1))));
 	assert!(!ring_permitted(ring, &ruleset, &muted_room, Some(2)), "room-kind mute");
 
-	let default_sound = Action::SetTweak(Tweak::Sound(SoundTweakValue::Default));
-	let ring_sound = Action::SetTweak(Tweak::Sound(RING_SOUND_TWEAK.into()));
-	for actions in [vec![], vec![Action::Notify], vec![Action::Notify, default_sound], vec![
-		ring_sound,
-	]] {
+	let default_sound = || Action::SetTweak(Tweak::Sound(SoundTweakValue::Default));
+	let ring_sound = || Action::SetTweak(Tweak::Sound(RING_SOUND_TWEAK.into()));
+	let highlight = Action::SetTweak(Tweak::Highlight(HighlightTweakValue::Yes));
+	assert!(ring_permitted(
+		&[Action::Notify, highlight, ring_sound()],
+		&ruleset,
+		&room,
+		Some(2)
+	));
+
+	// The ring sound must be the only sound tweak.
+	for actions in [
+		vec![],
+		vec![Action::Notify],
+		vec![Action::Notify, default_sound()],
+		vec![ring_sound()],
+		vec![Action::Notify, ring_sound(), default_sound()],
+		vec![Action::Notify, default_sound(), ring_sound()],
+		vec![Action::Notify, ring_sound(), ring_sound()],
+	] {
 		assert!(!ring_permitted(&actions, &ruleset, &room, Some(2)), "{actions:?}");
 	}
 }
@@ -1018,6 +1033,23 @@ fn call_membership_liveness_checks_shape_leave_and_expiry() {
 	assert!(!live(member(json!({ "device_id": "" })), now_ms));
 	assert!(!live(member(json!({ "expires": "soon" })), now_ms));
 	assert!(!live(json!({ "application": "m.call", "call_id": "" }), now_ms));
+
+	// Each field matrix-js-sdk requires: `call_id` and `focus_active.type`.
+	let without = |key: &str| {
+		let mut content = member(json!({}));
+		content
+			.as_object_mut()
+			.expect("content object")
+			.remove(key);
+		content
+	};
+	assert!(!live(without("call_id"), now_ms));
+	assert!(!live(member(json!({ "call_id": 42 })), now_ms));
+	assert!(!live(without("focus_active"), now_ms));
+	assert!(!live(member(json!({ "focus_active": {} })), now_ms));
+	assert!(!live(member(json!({ "focus_active": { "type": 42 } })), now_ms));
+	assert!(!live(without("device_id"), now_ms));
+	assert!(!live(without("application"), now_ms));
 	assert!(
 		!live(json!({ "memberships": [member(json!({ "expires": 60_000 }))] }), now_ms),
 		"the legacy memberships array is not supported"

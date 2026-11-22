@@ -83,15 +83,26 @@ struct RingRelation {
 	event_id: OwnedEventId,
 }
 
-/// The per-device MSC4143 `call.member` content matrix-js-sdk writes. The
-/// older `memberships` array form is not supported.
+/// The per-device MSC4143 `call.member` content matrix-js-sdk writes, with
+/// the fields it requires. The older `memberships` array form is not
+/// supported.
 #[derive(Deserialize)]
 struct CallMembership {
 	application: String,
 	device_id: String,
+	#[serde(rename = "call_id")]
+	_call_id: String,
+	#[serde(rename = "focus_active")]
+	_focus_active: FocusActive,
 	created_ts: Option<u64>,
 	expires: Option<u64>,
 	leave_reason: Option<IgnoredAny>,
+}
+
+#[derive(Deserialize)]
+struct FocusActive {
+	#[serde(rename = "type")]
+	_kind: String,
 }
 
 /// Call membership event ID to the one ring event that claimed it, kept for
@@ -222,10 +233,14 @@ pub(super) fn ring_permitted(
 	room_id: &RoomId,
 	joined_count: Option<u64>,
 ) -> bool {
+	// Exactly one sound tweak, so that no other sound can override the ring.
+	let mut sounds = actions.iter().filter_map(|action| match action {
+		| Action::SetTweak(Tweak::Sound(sound)) => Some(sound.as_str()),
+		| _ => None,
+	});
 	let rings = actions.iter().any(Action::should_notify)
-		&& actions.iter().any(|action| {
-			matches!(action, Action::SetTweak(Tweak::Sound(sound)) if sound.as_str() == RING_SOUND_TWEAK)
-		});
+		&& sounds.next() == Some(RING_SOUND_TWEAK)
+		&& sounds.next().is_none();
 
 	let muted = ruleset
 		.get(RuleKind::Room, room_id.as_str())

@@ -1927,10 +1927,21 @@ async fn verify_membership_liveness(users: &RingTestUsers<'_>, room2: &RoomId) -
 	let mut other_application = active_call_member_content("OTHER");
 	other_application["application"] = json!("m.other");
 
+	let without = |key: &str| {
+		let mut content = active_call_member_content("PARTIAL");
+		content
+			.as_object_mut()
+			.expect("content object")
+			.remove(key);
+		content
+	};
+
 	let cases = [
 		("left", json!({})),
 		("leave-reason", json!({ "leave_reason": "user_left" })),
 		("malformed", json!({ "application": "m.call" })),
+		("no-call-id", without("call_id")),
+		("no-focus-active", without("focus_active")),
 		("expired", expired),
 		("other-application", other_application),
 		// The legacy array form is not supported.
