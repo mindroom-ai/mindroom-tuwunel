@@ -163,12 +163,12 @@ fn merged_old_ruleset_allows_disabling_ring_rule_and_blocks_deleting_it() {
 			.enabled()
 	);
 
-	assert_eq!(
+	assert!(matches!(
 		loaded.remove(RuleKind::Override, RING_RULE_ID),
 		Err(RemovePushRuleError::ServerDefault),
-	);
-	assert_eq!(
+	));
+	assert!(matches!(
 		loaded.remove(RuleKind::Override, RING_ENCRYPTED_RULE_ID),
 		Err(RemovePushRuleError::ServerDefault),
-	);
+	));
 }
