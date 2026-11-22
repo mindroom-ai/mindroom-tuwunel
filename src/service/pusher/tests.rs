@@ -25,7 +25,7 @@ use super::{
 	ring_rules::{
 		self, AcceptedRings, DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS, MAX_RING_ROOM_MEMBERS,
 		RING_ENCRYPTED_RULE_ID, RING_RULE_ID, RING_SOUND_TWEAK, RTC_NOTIFICATION_EVENT_TYPE,
-		is_live_call_membership, ring_permitted,
+		is_live_call_membership, ring_permitted, ring_reference,
 	},
 };
 
@@ -964,6 +964,41 @@ fn merged_adds_missing_ring_rules_and_preserves_user_overrides_and_state() {
 }
 
 #[test]
+fn ring_reference_needs_an_object_m_reference() {
+	let ring = |content: JsonValue| -> Raw<AnySyncTimelineEvent> {
+		from_value(json!({
+			"content": content,
+			"event_id": "$ring",
+			"origin_server_ts": 1_795_300_000_000_i64,
+			"sender": "@alice:example.com",
+			"type": RTC_NOTIFICATION_EVENT_TYPE,
+		}))
+		.expect("valid ring event")
+	};
+	let relation = |relates_to: JsonValue| ring(json!({ "m.relates_to": relates_to }));
+
+	let (ring_id, sender, membership_id) =
+		ring_reference(&relation(json!({ "rel_type": "m.reference", "event_id": "$mem" })))
+			.expect("a reference");
+	assert_eq!(ring_id, "$ring");
+	assert_eq!(sender, "@alice:example.com");
+	assert_eq!(membership_id, "$mem");
+
+	assert!(ring_reference(&ring(json!({}))).is_none());
+	assert!(
+		ring_reference(&relation(json!({ "rel_type": "m.thread", "event_id": "$mem" })))
+			.is_none()
+	);
+
+	// Objects only: serde's derive would also take the fields as an array.
+	assert!(ring_reference(&relation(json!(["m.reference", "$mem"]))).is_none());
+	assert!(
+		ring_reference(&ring(json!([{ "rel_type": "m.reference", "event_id": "$mem" }])))
+			.is_none()
+	);
+}
+
+#[test]
 fn accepted_rings_allows_same_ring_rejects_second_and_expires_after_two_minutes() {
 	let claims = AcceptedRings::default();
 	let membership = EventId::parse("$membership_a").expect("event id");
@@ -1033,6 +1068,11 @@ fn call_membership_liveness_checks_shape_leave_and_expiry() {
 	assert!(!live(member(json!({ "device_id": "" })), now_ms));
 	assert!(!live(member(json!({ "expires": "soon" })), now_ms));
 	assert!(!live(json!({ "application": "m.call", "call_id": "" }), now_ms));
+
+	// Objects only: serde's derive would also take the fields as an array.
+	let positional = json!(["m.call", "DEV1", "", { "type": "livekit" }, null, null, null]);
+	assert!(!live(positional, now_ms));
+	assert!(!live(member(json!({ "focus_active": ["livekit"] })), now_ms));
 
 	// Each field matrix-js-sdk requires: `call_id` and `focus_active.type`.
 	let without = |key: &str| {

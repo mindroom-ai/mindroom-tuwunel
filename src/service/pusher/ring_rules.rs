@@ -35,8 +35,11 @@ use ruma::{
 	},
 	serde::Raw,
 };
-use serde::{Deserialize, de::IgnoredAny};
-use serde_json::Value as JsonValue;
+use serde::{
+	Deserialize, Deserializer,
+	de::{DeserializeOwned, Error as _, IgnoredAny},
+};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use tuwunel_core::{implement, utils::time::now_millis};
 use tuwunel_matrix::Event;
 
@@ -68,12 +71,13 @@ const RING_CLAIM_TTL: Duration = Duration::from_mins(2);
 struct RingEvent {
 	event_id: OwnedEventId,
 	sender: OwnedUserId,
+	#[serde(deserialize_with = "object")]
 	content: RingContent,
 }
 
 #[derive(Deserialize)]
 struct RingContent {
-	#[serde(rename = "m.relates_to")]
+	#[serde(rename = "m.relates_to", deserialize_with = "object")]
 	relates_to: RingRelation,
 }
 
@@ -92,7 +96,7 @@ struct CallMembership {
 	device_id: String,
 	#[serde(rename = "call_id")]
 	_call_id: String,
-	#[serde(rename = "focus_active")]
+	#[serde(rename = "focus_active", deserialize_with = "object")]
 	_focus_active: FocusActive,
 	created_ts: Option<u64>,
 	expires: Option<u64>,
@@ -103,6 +107,18 @@ struct CallMembership {
 struct FocusActive {
 	#[serde(rename = "type")]
 	_kind: String,
+}
+
+/// Deserialize `T` from a JSON object only. serde's derive alone would also
+/// accept an array holding the fields in order.
+fn object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+	D: Deserializer<'de>,
+	T: DeserializeOwned,
+{
+	let object = JsonMap::deserialize(deserializer)?;
+
+	T::deserialize(JsonValue::Object(object)).map_err(D::Error::custom)
 }
 
 /// Call membership event ID to the one ring event that claimed it, kept for
@@ -249,6 +265,17 @@ pub(super) fn ring_permitted(
 	rings && !muted && joined_count.is_some_and(|count| count <= MAX_RING_ROOM_MEMBERS.into())
 }
 
+/// The ring's event ID, its sender and the event it `m.reference`s.
+pub(super) fn ring_reference(
+	pdu: &Raw<AnySyncTimelineEvent>,
+) -> Option<(OwnedEventId, OwnedUserId, OwnedEventId)> {
+	let pdu = &mut serde_json::Deserializer::from_str(pdu.json().get());
+	let ring: RingEvent = object(pdu).ok()?;
+	let RingRelation { rel_type, event_id } = ring.content.relates_to;
+
+	(rel_type == "m.reference").then_some((ring.event_id, ring.sender, event_id))
+}
+
 /// Whether `content` is a per-device MSC4143 `m.call` membership that has
 /// not left or expired at `now_ms`.
 pub(super) fn is_live_call_membership(
@@ -256,7 +283,7 @@ pub(super) fn is_live_call_membership(
 	origin_server_ts_ms: u64,
 	now_ms: u64,
 ) -> bool {
-	let Ok(member) = CallMembership::deserialize(content) else {
+	let Ok(member) = object::<_, CallMembership>(content) else {
 		return false;
 	};
 
@@ -315,14 +342,12 @@ async fn live_ring_membership(
 	room_id: &RoomId,
 	pdu: &Raw<AnySyncTimelineEvent>,
 ) -> Option<(OwnedEventId, OwnedEventId)> {
-	let ring: RingEvent = serde_json::from_str(pdu.json().get()).ok()?;
-	let RingRelation { rel_type, event_id: membership_id } = ring.content.relates_to;
-	if rel_type != "m.reference"
-		|| !self
-			.services
-			.state_cache
-			.is_joined(&ring.sender, room_id)
-			.await
+	let (ring_id, sender, membership_id) = ring_reference(pdu)?;
+	if !self
+		.services
+		.state_cache
+		.is_joined(&sender, room_id)
+		.await
 	{
 		return None;
 	}
@@ -336,7 +361,7 @@ async fn live_ring_membership(
 	let state_key = member.state_key()?;
 	if member.room_id() != room_id
 		|| member.kind().to_cow_str() != CALL_MEMBER_EVENT_TYPE
-		|| member.sender() != ring.sender
+		|| member.sender() != sender
 		|| !is_live_call_membership(
 			&member.get_content_as_value(),
 			member.origin_server_ts().get().into(),
@@ -352,5 +377,5 @@ async fn live_ring_membership(
 		.await
 		.ok()?;
 
-	(current == membership_id).then_some((membership_id, ring.event_id))
+	(current == membership_id).then_some((membership_id, ring_id))
 }
