@@ -978,10 +978,14 @@
 # registered OIDC redirect URIs.
 #
 # When nonempty, every redirect URI must match or registration is
-# rejected: hosts match case-insensitively, while hostless private-use
-# URIs such as `io.element.android:/` match their scheme under [RFC
+# rejected: bare host entries (for example `element.io`, `localhost`,
+# `127.0.0.1`, or `::1` / `[::1]`) match only `https` URIs with that
+# exact host or loopback `http` URIs, while colon-suffixed scheme entries
+# (for example `io.element.android:`) match only hostless private-use URIs
+# with no authority whose scheme contains a dot under [RFC
 # 8252](https://www.rfc-editor.org/rfc/rfc8252). For example,
-# `["element.io", "io.element.android"]` covers web and mobile clients.
+# `["element.io", "io.element.android:"]` covers web and mobile clients
+# without letting a host entry match a private-use scheme or vice versa.
 #
 # The empty default imposes no registration restriction and vouches for
 # no client, so every sign-in remains subject to
@@ -989,7 +993,7 @@
 # for any responding client: a scheme covers any device app claiming it
 # under [RFC 8252 section
 # 8.6](https://www.rfc-editor.org/rfc/rfc8252#section-8.6), and a host
-# covers every path.
+# covers every path and port.
 #
 # reloadable: yes
 #

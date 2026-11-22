@@ -69,7 +69,7 @@ fn native_completion_ends_form_navigation() -> Result {
 		.with_option("rate_limiting.login.failed.per_second=0.000001")
 		.with_option(
 			"authentication.oidc.registration_allowed_redirect_hosts=[\"trusted.example\",\"127.\
-			 0.0.1\"]",
+			 0.0.1\",\"io.allowed.app:\"]",
 		);
 
 	let args = [("first", "First SSO"), ("second", "Second SSO")]
@@ -136,6 +136,7 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		.build()?;
 
 	check_password_limits(services, &client, base).await?;
+	check_dcr_allowlist(&client, base).await?;
 
 	check_provider_choices(services, &client, base).await?;
 	check_local_resubmission(services, &client, base).await?;
@@ -154,6 +155,9 @@ async fn exercise(services: &Services, base: &str) -> Result {
 		("http://127.0.0.1:49152/callback?existing=a%26b", true, true, true),
 		("https://untrusted.example/universal", true, false, false),
 		("io.example.app:/callback", true, false, false),
+		("trusted.example:/callback", true, false, false),
+		("io.allowed.app:/callback", true, true, false),
+		("https://io.allowed.app/callback", false, false, true),
 	] {
 		for mode in ["query", "fragment"] {
 			let case = Case { redirect, native, waived, automatic };
@@ -245,6 +249,32 @@ async fn exercise(services: &Services, base: &str) -> Result {
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
+async fn check_dcr_allowlist(client: &Client, base: &str) -> Result {
+	for (redirect, app_type, expected) in [
+		("https://trusted.example/cb", "web", StatusCode::CREATED),
+		("io.allowed.app:/cb", "native", StatusCode::CREATED),
+		("trusted.example:/cb", "native", StatusCode::FORBIDDEN),
+		("https://io.allowed.app/cb", "web", StatusCode::FORBIDDEN),
+	] {
+		let response = client
+			.post(format!("{base}/_tuwunel/oidc/registration"))
+			.json(&json!({
+				"redirect_uris": [redirect],
+				"application_type": app_type,
+			}))
+			.send()
+			.await?;
+
+		assert_eq!(
+			response.status(),
+			expected,
+			"unexpected DCR status for {redirect} ({app_type})",
+		);
+	}
+
+	Ok(())
+}
+
 async fn check_password_limits(services: &Services, client: &Client, base: &str) -> Result {
 	let redirect = "https://trusted.example/limited";
 	let client_id = register_client(services, redirect).await?;
