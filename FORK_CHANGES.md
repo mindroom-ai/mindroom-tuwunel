@@ -1722,17 +1722,13 @@ Behavior:
   `content.io\.mindroom\.rtc\.notification.notification_type == "ring"`). Both use exact
   `event_property_is` matches, need `<=3` joined members, and have the actions
   `["notify", {"set_tweak": "sound", "value": "ring"}]`.
-- The sound tweak is not authorization, so `pusher::Service::get_actions` enforces one
-  invariant. A push gets `sound: "ring"` only if (a) one of the two ring rules is the winning
-  rule for this recipient, enabled, with `notify` and `sound: "ring"` actions; (b) the room's
-  joined count is known and at most 3; (c) no enabled room-kind or override mute for this room
-  wins; (d) the ring `m.reference`s the sender's current, live MSC4143
-  `org.matrix.msc3401.call.member` state in that room (per-device form, `application ==
-  "m.call"`, not left, not expired) and the sender is joined; (e) no other ring event already
-  claimed that membership (in memory, for two minutes; the same ring passes again for other
-  recipients and at dispatch). Otherwise the ring rules are skipped and the unchanged event is
-  evaluated exactly as without them. The legacy `memberships` array form of `call.member` is
-  not supported. A user turns rings off by disabling the rules or muting the room.
+- `pusher::Service::get_actions` lets a ring rule win only if (a) it is the first rule that
+  matches for this recipient, enabled, with `notify` and `"ring"` as its only sound tweak;
+  (b) the room's joined count is known and at most 3; (c) no enabled room-kind or override
+  mute for this room wins. Otherwise the ring rules are skipped and the unchanged event is
+  evaluated exactly as without them. A user turns rings off by disabling the rules or muting
+  the room. The rules do not check that a call exists: a member who can send the event can
+  ring the others in the room.
 - The rules are merged on read, not migrated: a stored ruleset that lacks a ring rule gets it
   for evaluation (`pusher::Service::ruleset`), on both `GET /pushrules` routes and in
   `load_push_rules` (the single-rule routes), with nothing else in the ruleset changed. No

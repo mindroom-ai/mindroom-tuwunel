@@ -1,56 +1,38 @@
 //! Push rules for MatrixRTC incoming-call rings.
 //!
 //! Two MindRoom server-default override rules give ring events in small rooms
-//! the `sound: "ring"` tweak. The tweak is not authorization, so
-//! [`Service::get_actions`](super::Service::get_actions) enforces this
-//! invariant. A push gets `sound: "ring"` only if
+//! the `sound: "ring"` tweak. [`Service::get_actions`](super::Service::get_actions)
+//! lets a ring rule win only if
 //!
-//! - (a) one of the two ring rules is the winning rule for this recipient,
-//!   enabled, with `notify` and `sound: "ring"` actions;
+//! - (a) it is the first rule that matches for this recipient, enabled, with
+//!   `notify` and `"ring"` as its only sound tweak;
 //! - (b) the room's joined count is known and at most
 //!   [`MAX_RING_ROOM_MEMBERS`];
-//! - (c) no enabled room-kind or override mute for this room wins;
-//! - (d) the ring `m.reference`s the sender's current, live MSC4143
-//!   `call.member` state in that room and the sender is joined;
-//! - (e) no other ring event already claimed that membership.
+//! - (c) no enabled room-kind or override mute for this room wins.
 //!
 //! Otherwise the ring rules are skipped and the event is evaluated exactly as
 //! without them. A user turns rings off by disabling the rules or muting the
 //! room.
-
-use std::{
-	collections::HashMap,
-	sync::{Mutex, PoisonError},
-	time::{Duration, Instant},
-};
+//!
+//! The rules do not check that a call exists: a member who can send the
+//! event can ring the others in the room.
 
 use ruma::{
-	EventId, OwnedEventId, OwnedUserId, RoomId, UInt, UserId,
-	events::{AnySyncTimelineEvent, StateEventType},
+	RoomId, UInt, UserId,
 	push::{
 		Action, AnyPushRuleRef, ConditionalPushRule, ConditionalPushRuleInit,
 		EventPropertyIsConditionData, PredefinedOverrideRuleId, PushCondition,
 		RoomMemberCountConditionData, RoomMemberCountIs, RuleKind, Ruleset, ScalarJsonValue,
 		SoundTweakValue, Tweak,
 	},
-	serde::Raw,
 };
-use serde::{
-	Deserialize, Deserializer,
-	de::{DeserializeOwned, Error as _, IgnoredAny},
-};
-use serde_json::{Map as JsonMap, Value as JsonValue};
-use tuwunel_core::{implement, utils::time::now_millis};
-use tuwunel_matrix::Event;
+use tuwunel_core::implement;
 
 /// Maximum joined member count of a room in which a call rings.
 pub const MAX_RING_ROOM_MEMBERS: u32 = 3;
 
 /// MSC4075 MatrixRTC notification event type.
 pub const RTC_NOTIFICATION_EVENT_TYPE: &str = "org.matrix.msc4075.rtc.notification";
-
-/// MSC4143 MatrixRTC call membership state event type.
-pub const CALL_MEMBER_EVENT_TYPE: &str = "org.matrix.msc3401.call.member";
 
 /// Rule ID for unencrypted rings.
 pub const RING_RULE_ID: &str = ".io.mindroom.rule.rtc.ring";
@@ -60,90 +42,6 @@ pub const RING_ENCRYPTED_RULE_ID: &str = ".io.mindroom.rule.rtc.ring_encrypted";
 
 /// Sound tweak value of a ring push.
 pub const RING_SOUND_TWEAK: &str = "ring";
-
-/// Call membership lifetime when `expires` is omitted (matrix-js-sdk
-/// `DEFAULT_EXPIRE_DURATION`).
-pub const DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS: u64 = 4 * 60 * 60 * 1_000;
-
-const RING_CLAIM_TTL: Duration = Duration::from_mins(2);
-
-#[derive(Deserialize)]
-struct RingEvent {
-	event_id: OwnedEventId,
-	sender: OwnedUserId,
-	#[serde(deserialize_with = "object")]
-	content: RingContent,
-}
-
-#[derive(Deserialize)]
-struct RingContent {
-	#[serde(rename = "m.relates_to", deserialize_with = "object")]
-	relates_to: RingRelation,
-}
-
-#[derive(Deserialize)]
-struct RingRelation {
-	rel_type: String,
-	event_id: OwnedEventId,
-}
-
-/// The per-device MSC4143 `call.member` content matrix-js-sdk writes, with
-/// the fields it requires. The older `memberships` array form is not
-/// supported.
-#[derive(Deserialize)]
-struct CallMembership {
-	application: String,
-	device_id: String,
-	#[serde(rename = "call_id")]
-	_call_id: String,
-	#[serde(rename = "focus_active", deserialize_with = "object")]
-	_focus_active: FocusActive,
-	created_ts: Option<u64>,
-	expires: Option<u64>,
-	leave_reason: Option<IgnoredAny>,
-}
-
-#[derive(Deserialize)]
-struct FocusActive {
-	#[serde(rename = "type")]
-	_kind: String,
-}
-
-/// Deserialize `T` from a JSON object only. serde's derive alone would also
-/// accept an array holding the fields in order.
-fn object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-	D: Deserializer<'de>,
-	T: DeserializeOwned,
-{
-	let object = JsonMap::deserialize(deserializer)?;
-
-	T::deserialize(JsonValue::Object(object)).map_err(D::Error::custom)
-}
-
-/// Call membership event ID to the one ring event that claimed it, kept for
-/// two minutes.
-#[derive(Default)]
-pub(super) struct AcceptedRings(Mutex<HashMap<OwnedEventId, (OwnedEventId, Instant)>>);
-
-impl AcceptedRings {
-	/// Whether `ring_id` holds the claim on `membership_id`, claiming it if
-	/// it is free. The same ring passes again for other recipients and at
-	/// dispatch.
-	pub(super) fn claim(&self, membership_id: &EventId, ring_id: &EventId, now: Instant) -> bool {
-		let mut claims = self
-			.0
-			.lock()
-			.unwrap_or_else(PoisonError::into_inner);
-
-		claims.retain(|_, (_, at)| now.saturating_duration_since(*at) < RING_CLAIM_TTL);
-		claims
-			.entry(membership_id.to_owned())
-			.or_insert_with(|| (ring_id.to_owned(), now))
-			.0
-			== ring_id
-	}
-}
 
 /// Ruma's server-default ruleset plus the two ring rules.
 #[must_use]
@@ -239,10 +137,10 @@ fn ring_rule(
 	.into()
 }
 
-/// Parts (a) to (c) of the invariant for a ring rule that matched: its
-/// actions still notify with the ring sound, the joined count is known and
-/// small, and no enabled room-kind rule mutes the room. An override mute
-/// needs no check here: user override rules precede the ring rules.
+/// The invariant for a ring rule that matched: its actions still notify with
+/// the ring sound, the joined count is known and small, and no enabled
+/// room-kind rule mutes the room. An override mute needs no check here: user
+/// override rules precede the ring rules.
 pub(super) fn ring_permitted(
 	actions: &[Action],
 	ruleset: &Ruleset,
@@ -265,53 +163,14 @@ pub(super) fn ring_permitted(
 	rings && !muted && joined_count.is_some_and(|count| count <= MAX_RING_ROOM_MEMBERS.into())
 }
 
-/// The ring's event ID, its sender and the event it `m.reference`s.
-pub(super) fn ring_reference(
-	pdu: &Raw<AnySyncTimelineEvent>,
-) -> Option<(OwnedEventId, OwnedUserId, OwnedEventId)> {
-	let pdu = &mut serde_json::Deserializer::from_str(pdu.json().get());
-	let ring: RingEvent = object(pdu).ok()?;
-	let RingRelation { rel_type, event_id } = ring.content.relates_to;
-
-	(rel_type == "m.reference").then_some((ring.event_id, ring.sender, event_id))
-}
-
-/// Whether `content` is a per-device MSC4143 `m.call` membership that has
-/// not left or expired at `now_ms`.
-pub(super) fn is_live_call_membership(
-	content: &JsonValue,
-	origin_server_ts_ms: u64,
-	now_ms: u64,
-) -> bool {
-	let Ok(member) = object::<_, CallMembership>(content) else {
-		return false;
-	};
-
-	let expires_at = member
-		.created_ts
-		.unwrap_or(origin_server_ts_ms)
-		.saturating_add(
-			member
-				.expires
-				.unwrap_or(DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS),
-		);
-
-	member.application == "m.call"
-		&& !member.device_id.is_empty()
-		&& member.leave_reason.is_none()
-		&& expires_at > now_ms
-}
-
-/// Whether the ring rule `rule`, which matched `pdu`, may ring. See the
-/// module documentation. The claim (e) is taken last, so a ring that fails
-/// any other part leaves the membership free.
+/// Whether the ring rule `rule`, which matched an event in `room_id`, may
+/// ring. See the module documentation.
 #[implement(super::Service)]
 pub(super) async fn ring_allowed(
 	&self,
 	rule: AnyPushRuleRef<'_>,
 	ruleset: &Ruleset,
 	room_id: &RoomId,
-	pdu: &Raw<AnySyncTimelineEvent>,
 ) -> bool {
 	// The evaluation context turns a failed count lookup into 0, which the
 	// rule's own `<=3` condition accepts, so the count is read again here.
@@ -322,60 +181,5 @@ pub(super) async fn ring_allowed(
 		.await
 		.ok();
 
-	if !ring_permitted(rule.actions(), ruleset, room_id, joined_count) {
-		return false;
-	}
-
-	self.live_ring_membership(room_id, pdu)
-		.await
-		.is_some_and(|(membership_id, ring_id)| {
-			self.accepted_rings
-				.claim(&membership_id, &ring_id, Instant::now())
-		})
-}
-
-/// Part (d) of the invariant: the sender's current, live call membership
-/// that the ring `pdu` references, with the ring's own event ID.
-#[implement(super::Service)]
-async fn live_ring_membership(
-	&self,
-	room_id: &RoomId,
-	pdu: &Raw<AnySyncTimelineEvent>,
-) -> Option<(OwnedEventId, OwnedEventId)> {
-	let (ring_id, sender, membership_id) = ring_reference(pdu)?;
-	if !self
-		.services
-		.state_cache
-		.is_joined(&sender, room_id)
-		.await
-	{
-		return None;
-	}
-
-	let member = self
-		.services
-		.timeline
-		.get_pdu(&membership_id)
-		.await
-		.ok()?;
-	let state_key = member.state_key()?;
-	if member.room_id() != room_id
-		|| member.kind().to_cow_str() != CALL_MEMBER_EVENT_TYPE
-		|| member.sender() != sender
-		|| !is_live_call_membership(
-			&member.get_content_as_value(),
-			member.origin_server_ts().get().into(),
-			now_millis(),
-		) {
-		return None;
-	}
-
-	let current: OwnedEventId = self
-		.services
-		.state_accessor
-		.room_state_get_id(room_id, &StateEventType::from(CALL_MEMBER_EVENT_TYPE), state_key)
-		.await
-		.ok()?;
-
-	(current == membership_id).then_some((membership_id, ring_id))
+	ring_permitted(rule.actions(), ruleset, room_id, joined_count)
 }

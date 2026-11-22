@@ -125,7 +125,6 @@ pub struct Service {
 	sent_badges: SentBadges,
 	email_wakes: email::Wakes,
 	email_locks: email::Locks,
-	accepted_rings: ring_rules::AcceptedRings,
 }
 
 enum MindroomPushEvaluation {
@@ -275,7 +274,6 @@ impl crate::Service for Service {
 			sent_badges: SentBadges::default(),
 			email_wakes: email::Wakes::default(),
 			email_locks: MutexMap::new(),
-			accepted_rings: ring_rules::AcceptedRings::default(),
 		}))
 	}
 
@@ -614,9 +612,7 @@ pub async fn get_actions<'a>(
 	for rule in ruleset {
 		if rule.applies(&flattened, &ctx).await
 			&& (!ring_rules::is_ring_rule(rule)
-				|| self
-					.ring_allowed(rule, ruleset, room_id, pdu)
-					.await)
+				|| self.ring_allowed(rule, ruleset, room_id).await)
 		{
 			return rule.actions();
 		}

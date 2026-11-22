@@ -1,7 +1,5 @@
 #![cfg(test)]
 
-use std::time::{Duration, Instant};
-
 use ruma::{
 	EventId, RoomId, UInt, UserId,
 	events::{AnySyncTimelineEvent, TimelineEventType},
@@ -23,9 +21,8 @@ use super::{
 	ExtractRelatesTo, mindroom_push_suppressed, mindroom_terminal_push_content,
 	mindroom_terminal_push_event,
 	ring_rules::{
-		self, AcceptedRings, DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS, MAX_RING_ROOM_MEMBERS,
-		RING_ENCRYPTED_RULE_ID, RING_RULE_ID, RING_SOUND_TWEAK, RTC_NOTIFICATION_EVENT_TYPE,
-		is_live_call_membership, ring_permitted, ring_reference,
+		self, MAX_RING_ROOM_MEMBERS, RING_ENCRYPTED_RULE_ID, RING_RULE_ID, RING_SOUND_TWEAK,
+		RTC_NOTIFICATION_EVENT_TYPE, ring_permitted,
 	},
 };
 
@@ -961,137 +958,4 @@ fn merged_adds_missing_ring_rules_and_preserves_user_overrides_and_state() {
 	assert!(enc_actions.iter().any(|action| {
 		matches!(action, Action::SetTweak(Tweak::Sound(SoundTweakValue::Default)))
 	}));
-}
-
-#[test]
-fn ring_reference_needs_an_object_m_reference() {
-	let ring = |content: JsonValue| -> Raw<AnySyncTimelineEvent> {
-		from_value(json!({
-			"content": content,
-			"event_id": "$ring",
-			"origin_server_ts": 1_795_300_000_000_i64,
-			"sender": "@alice:example.com",
-			"type": RTC_NOTIFICATION_EVENT_TYPE,
-		}))
-		.expect("valid ring event")
-	};
-	let relation = |relates_to: JsonValue| ring(json!({ "m.relates_to": relates_to }));
-
-	let (ring_id, sender, membership_id) =
-		ring_reference(&relation(json!({ "rel_type": "m.reference", "event_id": "$mem" })))
-			.expect("a reference");
-	assert_eq!(ring_id, "$ring");
-	assert_eq!(sender, "@alice:example.com");
-	assert_eq!(membership_id, "$mem");
-
-	assert!(ring_reference(&ring(json!({}))).is_none());
-	assert!(
-		ring_reference(&relation(json!({ "rel_type": "m.thread", "event_id": "$mem" })))
-			.is_none()
-	);
-
-	// Objects only: serde's derive would also take the fields as an array.
-	assert!(ring_reference(&relation(json!(["m.reference", "$mem"]))).is_none());
-	assert!(
-		ring_reference(&ring(json!([{ "rel_type": "m.reference", "event_id": "$mem" }])))
-			.is_none()
-	);
-}
-
-#[test]
-fn accepted_rings_allows_same_ring_rejects_second_and_expires_after_two_minutes() {
-	let claims = AcceptedRings::default();
-	let membership = EventId::parse("$membership_a").expect("event id");
-	let other_membership = EventId::parse("$membership_b").expect("event id");
-	let ring1 = EventId::parse("$ring_1").expect("event id");
-	let ring2 = EventId::parse("$ring_2").expect("event id");
-
-	let t0 = Instant::now();
-	let later = t0
-		.checked_add(Duration::from_secs(10))
-		.expect("instant");
-	let expired = t0
-		.checked_add(Duration::from_secs(121))
-		.expect("instant");
-	assert!(claims.claim(&membership, &ring1, t0));
-	assert!(
-		claims.claim(&membership, &ring1, later),
-		"the same ring passes again at dispatch"
-	);
-	assert!(!claims.claim(&membership, &ring2, later), "a second ring is rejected");
-	assert!(claims.claim(&other_membership, &ring2, later), "memberships are independent");
-	assert!(claims.claim(&membership, &ring2, expired), "claims expire after two minutes");
-}
-
-#[test]
-fn call_membership_liveness_checks_shape_leave_and_expiry() {
-	let origin_ts: u64 = 1_795_300_000_000;
-	let now_ms = origin_ts.saturating_add(10_000);
-	let live =
-		|content: JsonValue, now_ms: u64| is_live_call_membership(&content, origin_ts, now_ms);
-	let member = |extra: JsonValue| {
-		let mut content = json!({
-			"application": "m.call",
-			"call_id": "",
-			"device_id": "DEV1",
-			"focus_active": { "type": "livekit", "focus_selection": "oldest_membership" },
-			"foci_preferred": [],
-			"scope": "m.room",
-		});
-		content
-			.as_object_mut()
-			.expect("content object")
-			.extend(extra.as_object().expect("extra object").clone());
-		content
-	};
-
-	// The per-device MSC4143 form, with and without an explicit lifetime.
-	assert!(live(member(json!({ "expires": 60_000 })), now_ms));
-	assert!(live(member(json!({})), now_ms));
-	assert!(
-		!live(member(json!({})), origin_ts.saturating_add(DEFAULT_CALL_MEMBERSHIP_EXPIRE_MS)),
-		"the default lifetime counts from origin_server_ts"
-	);
-
-	// Expired, counted from `created_ts` when present and `origin_server_ts` otherwise.
-	let created_ts = origin_ts.saturating_sub(120_000);
-	assert!(!live(member(json!({ "created_ts": created_ts, "expires": 60_000 })), now_ms));
-	assert!(!live(member(json!({ "expires": 5_000 })), now_ms));
-	assert!(!live(member(json!({ "expires": 0 })), now_ms));
-
-	// Left, another application, or not the per-device form.
-	assert!(!live(json!({}), now_ms));
-	assert!(!live(json!({ "leave_reason": "user_left" }), now_ms));
-	assert!(!live(member(json!({ "leave_reason": "user_left" })), now_ms));
-	assert!(!live(member(json!({ "application": "m.other" })), now_ms));
-	assert!(!live(member(json!({ "application": 42 })), now_ms));
-	assert!(!live(member(json!({ "device_id": "" })), now_ms));
-	assert!(!live(member(json!({ "expires": "soon" })), now_ms));
-	assert!(!live(json!({ "application": "m.call", "call_id": "" }), now_ms));
-
-	// Objects only: serde's derive would also take the fields as an array.
-	let positional = json!(["m.call", "DEV1", "", { "type": "livekit" }, null, null, null]);
-	assert!(!live(positional, now_ms));
-	assert!(!live(member(json!({ "focus_active": ["livekit"] })), now_ms));
-
-	// Each field matrix-js-sdk requires: `call_id` and `focus_active.type`.
-	let without = |key: &str| {
-		let mut content = member(json!({}));
-		content
-			.as_object_mut()
-			.expect("content object")
-			.remove(key);
-		content
-	};
-	assert!(!live(without("call_id"), now_ms));
-	assert!(!live(member(json!({ "call_id": 42 })), now_ms));
-	assert!(!live(without("focus_active"), now_ms));
-	assert!(!live(member(json!({ "focus_active": {} })), now_ms));
-	assert!(!live(member(json!({ "focus_active": { "type": 42 } })), now_ms));
-	assert!(!live(without("device_id"), now_ms));
-	assert!(!live(without("application"), now_ms));
-	assert!(
-		!live(json!({ "memberships": [member(json!({ "expires": 60_000 }))] }), now_ms),
-		"the legacy memberships array is not supported"
-	);
 }
