@@ -9,6 +9,7 @@ use ruma::{
 	push::{PredefinedContentRuleId, PredefinedOverrideRuleId, Ruleset},
 };
 use tuwunel_core::{Result, err};
+use tuwunel_service::pusher::ring_rules;
 
 use crate::Ruma;
 
@@ -47,7 +48,7 @@ pub(crate) async fn get_pushrules_global_route(
 			.await?;
 
 		return Ok(get_pushrules_global_scope::v3::Response {
-			global: Ruleset::server_default(sender_user),
+			global: ring_rules::server_default(sender_user),
 		});
 	};
 
@@ -86,7 +87,7 @@ pub(crate) async fn get_pushrules_global_route(
 				.remove(Content, PredefinedContentRuleId::ContainsUserName)
 				.ok();
 
-			global_ruleset.update_with_server_default(Ruleset::server_default(sender_user));
+			ring_rules::update_with_server_default(&mut global_ruleset, sender_user);
 
 			services
 				.account_data
@@ -104,6 +105,8 @@ pub(crate) async fn get_pushrules_global_route(
 				.await?;
 		}
 	};
+
+	let global_ruleset = ring_rules::merged(global_ruleset);
 
 	Ok(get_pushrules_global_scope::v3::Response { global: global_ruleset })
 }

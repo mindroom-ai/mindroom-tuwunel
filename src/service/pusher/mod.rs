@@ -9,6 +9,7 @@ mod email;
 mod notification;
 mod redact;
 mod request;
+pub mod ring_rules;
 mod send;
 mod suppressed;
 #[cfg(test)]
@@ -512,7 +513,10 @@ pub async fn ruleset(&self, user_id: &UserId) -> Ruleset {
 		.get_global(user_id, GlobalAccountDataEventType::PushRules)
 		.await
 		.log_err(Level::TRACE)
-		.map_or_else(|_| Ruleset::server_default(user_id), |ev: PushRulesEvent| ev.content.global)
+		.map_or_else(
+			|_| ring_rules::server_default(user_id),
+			|ev: PushRulesEvent| ring_rules::merged(ev.content.global),
+		)
 }
 
 #[implement(Service)]
@@ -595,7 +599,26 @@ pub async fn get_actions<'a>(
 		| None => ctx,
 	};
 
-	ruleset.get_actions(pdu, &ctx).await
+	let flattened = FlattenedJson::from_raw(pdu);
+	if flattened
+		.get_str("sender")
+		.is_some_and(|sender| sender == ctx.user_id)
+	{
+		return &[];
+	}
+
+	// `Ruleset::get_actions`, except that a ring rule wins only if the ring is
+	// allowed (see `ring_rules`).
+	for rule in ruleset {
+		if rule.applies(&flattened, &ctx).await
+			&& (!ring_rules::is_ring_rule(rule)
+				|| self.ring_allowed(rule, ruleset, room_id).await)
+		{
+			return rule.actions();
+		}
+	}
+
+	&[]
 }
 
 /// Resolve the events an event relates to, for the MSC3664 push condition.

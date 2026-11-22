@@ -1,10 +1,14 @@
 #![cfg(test)]
 
 use ruma::{
-	EventId, RoomId, UserId,
+	EventId, RoomId, UInt, UserId,
 	events::{AnySyncTimelineEvent, TimelineEventType},
 	owned_room_id, owned_user_id,
-	push::{Action, PushConditionRoomCtx, Ruleset},
+	push::{
+		Action, ConditionalPushRuleInit, EventMatchConditionData, HighlightTweakValue,
+		NewConditionalPushRule, NewPushRule, NewSimplePushRule, PredefinedOverrideRuleId,
+		PushCondition, PushConditionRoomCtx, RuleKind, Ruleset, SoundTweakValue, Tweak,
+	},
 	serde::Raw,
 	uint,
 };
@@ -16,6 +20,10 @@ use tuwunel_database::{
 use super::{
 	ExtractRelatesTo, mindroom_push_suppressed, mindroom_terminal_push_content,
 	mindroom_terminal_push_event,
+	ring_rules::{
+		self, MAX_RING_ROOM_MEMBERS, RING_ENCRYPTED_RULE_ID, RING_RULE_ID, RING_SOUND_TWEAK,
+		RTC_NOTIFICATION_EVENT_TYPE, ring_permitted,
+	},
 };
 
 const ROOM: &str = "!room:example.com";
@@ -354,4 +362,600 @@ async fn terminal_encrypted_edit_uses_encrypted_message_push_rule() {
 			.iter()
 			.any(|action| matches!(action, Action::Notify))
 	);
+}
+
+fn clear_ring_event(
+	sender: &str,
+	event_id: &str,
+	notification_type: &str,
+	membership_id: Option<&str>,
+) -> Raw<AnySyncTimelineEvent> {
+	clear_ring_event_with_type(
+		RTC_NOTIFICATION_EVENT_TYPE,
+		sender,
+		event_id,
+		notification_type,
+		membership_id,
+	)
+}
+
+fn clear_ring_event_with_type(
+	event_type: &str,
+	sender: &str,
+	event_id: &str,
+	notification_type: &str,
+	membership_id: Option<&str>,
+) -> Raw<AnySyncTimelineEvent> {
+	let mut content = json!({
+		"lifetime": 30_000,
+		"m.call.intent": "audio",
+		"notification_type": notification_type,
+		"sender_ts": 1_795_300_000_000_i64,
+	});
+	if let Some(membership_id) = membership_id {
+		content
+			.as_object_mut()
+			.expect("content object")
+			.insert(
+				"m.relates_to".into(),
+				json!({ "rel_type": "m.reference", "event_id": membership_id }),
+			);
+	}
+	from_value(json!({
+		"content": content,
+		"event_id": event_id,
+		"origin_server_ts": 1_795_300_000_000_i64,
+		"sender": sender,
+		"type": event_type,
+	}))
+	.expect("valid clear ring event")
+}
+
+fn encrypted_ring_event(
+	sender: &str,
+	event_id: &str,
+	hint_notification_type: Option<&str>,
+	membership_id: Option<&str>,
+) -> Raw<AnySyncTimelineEvent> {
+	encrypted_ring_event_with_type(
+		"m.room.encrypted",
+		sender,
+		event_id,
+		hint_notification_type,
+		membership_id,
+	)
+}
+
+fn encrypted_ring_event_with_type(
+	event_type: &str,
+	sender: &str,
+	event_id: &str,
+	hint_notification_type: Option<&str>,
+	membership_id: Option<&str>,
+) -> Raw<AnySyncTimelineEvent> {
+	let mut content = json!({
+		"algorithm": "m.megolm.v1.aes-sha2",
+		"ciphertext": "encrypted ring payload",
+		"device_id": "DEVICE",
+		"sender_key": "sender key",
+		"session_id": "session",
+	});
+	let obj = content.as_object_mut().expect("content object");
+	if let Some(notification_type) = hint_notification_type {
+		obj.insert(
+			"io.mindroom.rtc.notification".into(),
+			json!({
+				"lifetime": 30_000,
+				"m.call.intent": "audio",
+				"notification_type": notification_type,
+				"sender_ts": 1_795_300_000_000_i64,
+			}),
+		);
+	}
+	if let Some(membership_id) = membership_id {
+		obj.insert(
+			"m.relates_to".into(),
+			json!({ "rel_type": "m.reference", "event_id": membership_id }),
+		);
+	}
+	from_value(json!({
+		"content": content,
+		"event_id": event_id,
+		"origin_server_ts": 1_795_300_000_000_i64,
+		"sender": sender,
+		"type": event_type,
+	}))
+	.expect("valid encrypted ring event")
+}
+
+fn has_ring_sound(actions: &[Action]) -> bool {
+	actions.iter().any(|action| {
+		matches!(action, Action::SetTweak(Tweak::Sound(sound)) if sound.as_str() == RING_SOUND_TWEAK)
+	})
+}
+
+fn has_highlight(actions: &[Action]) -> bool {
+	actions
+		.iter()
+		.any(|action| matches!(action, Action::SetTweak(Tweak::Highlight(_))))
+}
+
+#[test]
+fn ring_rules_match_spec_json_and_position_before_user_mention() {
+	let user = owned_user_id!("@bob:example.com");
+	let ruleset = ring_rules::server_default(&user);
+
+	let clear_idx = ruleset
+		.override_
+		.get_index_of(RING_RULE_ID)
+		.expect("clear ring rule present");
+	let enc_idx = ruleset
+		.override_
+		.get_index_of(RING_ENCRYPTED_RULE_ID)
+		.expect("encrypted ring rule present");
+	let mention_idx = ruleset
+		.override_
+		.get_index_of(PredefinedOverrideRuleId::IsUserMention.as_str())
+		.expect("user mention rule present");
+
+	assert_eq!(clear_idx.saturating_add(1), enc_idx);
+	assert_eq!(enc_idx.saturating_add(1), mention_idx);
+
+	let clear_json = serde_json::to_value(
+		ruleset
+			.override_
+			.get(RING_RULE_ID)
+			.expect("clear ring rule"),
+	)
+	.expect("serialize clear rule");
+	assert_eq!(
+		clear_json,
+		json!({
+			"rule_id": ".io.mindroom.rule.rtc.ring",
+			"default": true,
+			"enabled": true,
+			"conditions": [
+				{ "kind": "event_property_is", "key": "type", "value": "org.matrix.msc4075.rtc.notification" },
+				{ "kind": "event_property_is", "key": "content.notification_type", "value": "ring" },
+				{ "kind": "room_member_count", "is": format!("<={MAX_RING_ROOM_MEMBERS}") },
+			],
+			"actions": ["notify", { "set_tweak": "sound", "value": "ring" }],
+		})
+	);
+
+	let enc_json = serde_json::to_value(
+		ruleset
+			.override_
+			.get(RING_ENCRYPTED_RULE_ID)
+			.expect("encrypted ring rule"),
+	)
+	.expect("serialize encrypted rule");
+	assert_eq!(
+		enc_json,
+		json!({
+			"rule_id": ".io.mindroom.rule.rtc.ring_encrypted",
+			"default": true,
+			"enabled": true,
+			"conditions": [
+				{ "kind": "event_property_is", "key": "type", "value": "m.room.encrypted" },
+				{
+					"kind": "event_property_is",
+					"key": r"content.io\.mindroom\.rtc\.notification.notification_type",
+					"value": "ring",
+				},
+				{ "kind": "room_member_count", "is": format!("<={MAX_RING_ROOM_MEMBERS}") },
+			],
+			"actions": ["notify", { "set_tweak": "sound", "value": "ring" }],
+		})
+	);
+}
+
+#[tokio::test]
+async fn ring_rules_require_exact_case_sensitive_type_and_notification_type() {
+	let user = owned_user_id!("@bob:example.com");
+	let ruleset = ring_rules::server_default(&user);
+	let ctx = PushConditionRoomCtx::new(
+		owned_room_id!("!room:example.com"),
+		uint!(2),
+		user,
+		"Bob".into(),
+	);
+
+	let upper_clear = clear_ring_event_with_type(
+		"ORG.MATRIX.MSC4075.RTC.NOTIFICATION",
+		"@alice:example.com",
+		"$upper_clear",
+		"ring",
+		Some("$mem"),
+	);
+	assert!(
+		!has_ring_sound(ruleset.get_actions(&upper_clear, &ctx).await),
+		"case variant of RTC notification type must not match ring rule"
+	);
+
+	let upper_notif =
+		clear_ring_event("@alice:example.com", "$upper_notif", "RING", Some("$mem"));
+	assert!(
+		!has_ring_sound(ruleset.get_actions(&upper_notif, &ctx).await),
+		"case variant of notification_type must not match ring rule"
+	);
+
+	let upper_enc = encrypted_ring_event_with_type(
+		"M.ROOM.ENCRYPTED",
+		"@alice:example.com",
+		"$upper_enc",
+		Some("ring"),
+		Some("$mem"),
+	);
+	assert!(
+		!has_ring_sound(ruleset.get_actions(&upper_enc, &ctx).await),
+		"case variant of m.room.encrypted must not match encrypted ring rule"
+	);
+
+	let upper_enc_notif = encrypted_ring_event(
+		"@alice:example.com",
+		"$upper_enc_notif",
+		Some("RING"),
+		Some("$mem"),
+	);
+	assert!(
+		!has_ring_sound(ruleset.get_actions(&upper_enc_notif, &ctx).await),
+		"case variant of encrypted hint notification_type must not match ring rule"
+	);
+}
+
+#[tokio::test]
+async fn ring_rules_match_small_rooms_and_ignore_four_members_and_group_notifications() {
+	let user = owned_user_id!("@bob:example.com");
+	let ruleset = ring_rules::server_default(&user);
+	let clear = clear_ring_event("@alice:example.com", "$ring_clear", "ring", Some("$mem"));
+	let encrypted =
+		encrypted_ring_event("@alice:example.com", "$ring_enc", Some("ring"), Some("$mem"));
+	let group_notif =
+		clear_ring_event("@alice:example.com", "$group_notif", "notification", Some("$mem"));
+
+	for count in [2_u32, MAX_RING_ROOM_MEMBERS] {
+		let ctx = PushConditionRoomCtx::new(
+			owned_room_id!("!room:example.com"),
+			UInt::from(count),
+			user.clone(),
+			"Bob".into(),
+		);
+
+		let clear_actions = ruleset.get_actions(&clear, &ctx).await;
+		assert!(clear_actions.iter().any(Action::should_notify));
+		assert!(has_ring_sound(clear_actions));
+		assert!(!has_highlight(clear_actions));
+
+		let enc_actions = ruleset.get_actions(&encrypted, &ctx).await;
+		assert!(enc_actions.iter().any(Action::should_notify));
+		assert!(has_ring_sound(enc_actions));
+		assert!(!has_highlight(enc_actions));
+
+		assert!(
+			ruleset
+				.get_actions(&group_notif, &ctx)
+				.await
+				.is_empty()
+		);
+	}
+
+	let four_members_ctx = PushConditionRoomCtx::new(
+		owned_room_id!("!room:example.com"),
+		UInt::from(MAX_RING_ROOM_MEMBERS.saturating_add(1)),
+		user,
+		"Bob".into(),
+	);
+	assert!(
+		ruleset
+			.get_actions(&clear, &four_members_ctx)
+			.await
+			.is_empty()
+	);
+	let enc_four = ruleset
+		.get_actions(&encrypted, &four_members_ctx)
+		.await;
+	assert!(enc_four.iter().any(Action::should_notify));
+	assert!(!has_ring_sound(enc_four));
+}
+
+#[tokio::test]
+async fn room_mute_override_wins_before_and_after_ring_rule_merge() {
+	let user = owned_user_id!("@bob:example.com");
+	let room_id = owned_room_id!("!muted:example.com");
+
+	let mut stored = Ruleset::server_default(&user);
+	stored
+		.insert(
+			NewPushRule::Override(NewConditionalPushRule::new(
+				room_id.as_str().into(),
+				vec![PushCondition::EventMatch(EventMatchConditionData::new(
+					"room_id".into(),
+					room_id.to_string(),
+				))]
+				.into(),
+				Vec::new().into(),
+			)),
+			None,
+			None,
+		)
+		.expect("insert mute override");
+
+	let merged = ring_rules::merged(stored);
+	let ctx = PushConditionRoomCtx::new(room_id, uint!(2), user, "Bob".into());
+
+	let clear = clear_ring_event("@alice:example.com", "$ring_clear", "ring", Some("$mem"));
+	let encrypted =
+		encrypted_ring_event("@alice:example.com", "$ring_enc", Some("ring"), Some("$mem"));
+
+	assert!(merged.get_actions(&clear, &ctx).await.is_empty());
+	assert!(
+		merged
+			.get_actions(&encrypted, &ctx)
+			.await
+			.is_empty()
+	);
+}
+
+#[test]
+fn ring_permitted_needs_ring_actions_a_known_small_count_and_no_room_mute() {
+	let user = owned_user_id!("@bob:example.com");
+	let room = owned_room_id!("!room:example.com");
+	let muted_room = owned_room_id!("!muted:example.com");
+	let disabled_mute_room = owned_room_id!("!disabled:example.com");
+
+	let mut ruleset = ring_rules::server_default(&user);
+	for room_id in [&muted_room, &disabled_mute_room] {
+		ruleset
+			.insert(
+				NewPushRule::Room(NewSimplePushRule::new(room_id.clone(), Vec::new().into())),
+				None,
+				None,
+			)
+			.expect("insert room mute");
+	}
+	ruleset
+		.set_enabled(RuleKind::Room, disabled_mute_room.as_str(), false)
+		.expect("disable room mute");
+
+	let ring = ruleset
+		.get(RuleKind::Override, RING_RULE_ID)
+		.expect("ring rule")
+		.actions();
+	let max = u64::from(MAX_RING_ROOM_MEMBERS);
+
+	assert!(ring_permitted(ring, &ruleset, &room, Some(2)));
+	assert!(ring_permitted(ring, &ruleset, &room, Some(max)));
+	assert!(ring_permitted(ring, &ruleset, &disabled_mute_room, Some(2)));
+
+	assert!(!ring_permitted(ring, &ruleset, &room, None), "unknown joined count");
+	assert!(!ring_permitted(ring, &ruleset, &room, Some(max.saturating_add(1))));
+	assert!(!ring_permitted(ring, &ruleset, &muted_room, Some(2)), "room-kind mute");
+
+	let default_sound = || Action::SetTweak(Tweak::Sound(SoundTweakValue::Default));
+	let ring_sound = || Action::SetTweak(Tweak::Sound(RING_SOUND_TWEAK.into()));
+	let highlight = Action::SetTweak(Tweak::Highlight(HighlightTweakValue::Yes));
+	assert!(ring_permitted(
+		&[Action::Notify, highlight, ring_sound()],
+		&ruleset,
+		&room,
+		Some(2)
+	));
+
+	// The ring sound must be the only sound tweak.
+	for actions in [
+		vec![],
+		vec![Action::Notify],
+		vec![Action::Notify, default_sound()],
+		vec![ring_sound()],
+		vec![Action::Notify, ring_sound(), default_sound()],
+		vec![Action::Notify, default_sound(), ring_sound()],
+		vec![Action::Notify, ring_sound(), ring_sound()],
+	] {
+		assert!(!ring_permitted(&actions, &ruleset, &room, Some(2)), "{actions:?}");
+	}
+}
+
+#[test]
+fn legacy_repair_keeps_stored_ring_rules_and_adds_no_missing_one() {
+	let user = owned_user_id!("@bob:example.com");
+
+	// Stored: the plain ring rule disabled, the encrypted one with custom actions.
+	let mut stored = ring_rules::server_default(&user);
+	stored
+		.set_enabled(RuleKind::Override, RING_RULE_ID, false)
+		.expect("disable ring rule");
+	stored
+		.set_actions(RuleKind::Override, RING_ENCRYPTED_RULE_ID, vec![Action::Notify].into())
+		.expect("customize encrypted ring rule");
+
+	ring_rules::update_with_server_default(&mut stored, &user);
+	let repaired = ring_rules::merged(stored);
+	assert!(
+		!repaired
+			.get(RuleKind::Override, RING_RULE_ID)
+			.expect("ring rule kept")
+			.enabled()
+	);
+	assert!(matches!(
+		repaired
+			.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
+			.expect("encrypted ring rule kept")
+			.actions(),
+		[Action::Notify]
+	));
+	let ids: Vec<_> = repaired
+		.override_
+		.iter()
+		.map(|rule| rule.rule_id.as_str())
+		.collect();
+	let ring_at = ids
+		.iter()
+		.position(|id| *id == RING_RULE_ID)
+		.expect("ring rule position");
+	assert_eq!(ids[ring_at..ring_at.saturating_add(3)], [
+		RING_RULE_ID,
+		RING_ENCRYPTED_RULE_ID,
+		PredefinedOverrideRuleId::IsUserMention.as_str()
+	]);
+
+	// Stored without ring rules: the repair persists none.
+	let mut old = Ruleset::server_default(&user);
+	ring_rules::update_with_server_default(&mut old, &user);
+	assert!(
+		old.get(RuleKind::Override, RING_RULE_ID)
+			.is_none()
+	);
+	assert!(
+		old.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
+			.is_none()
+	);
+}
+
+#[tokio::test]
+async fn merged_preserves_genuinely_legacy_ruleset_and_appends_when_mention_absent() {
+	let user = owned_user_id!("@bob:example.com");
+	let mut legacy = Ruleset::server_default(&user);
+	legacy
+		.override_
+		.shift_remove(PredefinedOverrideRuleId::IsUserMention.as_str());
+	#[expect(deprecated)]
+	legacy.override_.insert(
+		ConditionalPushRuleInit {
+			actions: vec![
+				Action::Notify,
+				Action::SetTweak(Tweak::Sound(SoundTweakValue::Default)),
+				Action::SetTweak(Tweak::Highlight(HighlightTweakValue::Yes)),
+			]
+			.into(),
+			default: true,
+			enabled: true,
+			rule_id: PredefinedOverrideRuleId::ContainsDisplayName
+				.as_str()
+				.into(),
+			conditions: vec![PushCondition::ContainsDisplayName].into(),
+		}
+		.into(),
+	);
+	legacy
+		.set_enabled(
+			RuleKind::Override,
+			PredefinedOverrideRuleId::SuppressNotices.as_str(),
+			false,
+		)
+		.expect("disable suppress_notices");
+	let custom_message_actions =
+		vec![Action::Notify, Action::SetTweak(Tweak::Sound(SoundTweakValue::Default))];
+	legacy
+		.set_actions(RuleKind::Underride, ".m.rule.message", custom_message_actions.into())
+		.expect("customize message rule");
+
+	let before_ids: Vec<String> = legacy
+		.override_
+		.iter()
+		.map(|r| r.rule_id.to_string())
+		.collect();
+
+	let merged = ring_rules::merged(legacy);
+
+	// All pre-existing override rules stay in their exact original order,
+	// with the two ring rules appended at the end since .m.rule.is_user_mention is absent.
+	let after_ids: Vec<String> = merged
+		.override_
+		.iter()
+		.map(|r| r.rule_id.to_string())
+		.collect();
+	let mut expected_ids = before_ids;
+	expected_ids.push(RING_RULE_ID.to_owned());
+	expected_ids.push(RING_ENCRYPTED_RULE_ID.to_owned());
+	assert_eq!(after_ids, expected_ids);
+
+	// Deprecated rule and custom enabled/action states are preserved untouched.
+	#[expect(deprecated)]
+	let contains_dn = PredefinedOverrideRuleId::ContainsDisplayName.as_str();
+	assert!(
+		merged
+			.get(RuleKind::Override, contains_dn)
+			.is_some()
+	);
+	assert!(
+		!merged
+			.get(RuleKind::Override, PredefinedOverrideRuleId::SuppressNotices.as_str())
+			.expect("suppress_notices preserved")
+			.enabled()
+	);
+
+	// Ordinary message matching .m.rule.contains_display_name evaluates unchanged.
+	let ctx = PushConditionRoomCtx::new(
+		owned_room_id!("!room:example.com"),
+		uint!(2),
+		user,
+		"Bob".into(),
+	);
+	let msg: Raw<AnySyncTimelineEvent> = from_value(json!({
+		"content": { "msgtype": "m.text", "body": "hey Bob" },
+		"event_id": "$msg1",
+		"origin_server_ts": 1,
+		"sender": "@alice:example.com",
+		"type": "m.room.message",
+	}))
+	.expect("valid message");
+	let actions = merged.get_actions(&msg, &ctx).await;
+	assert!(actions.iter().any(Action::should_notify));
+	assert!(has_highlight(actions));
+
+	// Ring rules are present and match.
+	let clear = clear_ring_event("@alice:example.com", "$ring_legacy", "ring", Some("$mem"));
+	assert!(has_ring_sound(merged.get_actions(&clear, &ctx).await));
+}
+
+#[test]
+fn merged_adds_missing_ring_rules_and_preserves_user_overrides_and_state() {
+	let user = owned_user_id!("@bob:example.com");
+	let mut old = Ruleset::server_default(&user);
+	old.set_enabled(RuleKind::Override, PredefinedOverrideRuleId::IsUserMention.as_str(), false)
+		.expect("disable user mention");
+
+	let mut merged = ring_rules::merged(old);
+	assert!(
+		merged
+			.get(RuleKind::Override, RING_RULE_ID)
+			.is_some_and(ruma::push::AnyPushRuleRef::enabled)
+	);
+	assert!(
+		merged
+			.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
+			.is_some_and(ruma::push::AnyPushRuleRef::enabled)
+	);
+	assert!(
+		!merged
+			.get(RuleKind::Override, PredefinedOverrideRuleId::IsUserMention.as_str())
+			.expect("user mention rule preserved")
+			.enabled()
+	);
+
+	// Disable clear ring and customize encrypted ring, then re-merge.
+	merged
+		.set_enabled(RuleKind::Override, RING_RULE_ID, false)
+		.expect("disable clear ring");
+	let custom_actions =
+		vec![Action::Notify, Action::SetTweak(Tweak::Sound(SoundTweakValue::Default))];
+	merged
+		.set_actions(RuleKind::Override, RING_ENCRYPTED_RULE_ID, custom_actions.into())
+		.expect("customize encrypted ring actions");
+
+	let remerged = ring_rules::merged(merged);
+	assert!(
+		!remerged
+			.get(RuleKind::Override, RING_RULE_ID)
+			.expect("clear ring present")
+			.enabled()
+	);
+	let enc_actions = remerged
+		.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
+		.expect("encrypted ring present")
+		.actions();
+	assert!(enc_actions.iter().any(|action| {
+		matches!(action, Action::SetTweak(Tweak::Sound(SoundTweakValue::Default)))
+	}));
 }
