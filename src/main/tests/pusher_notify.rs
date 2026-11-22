@@ -12,7 +12,7 @@ use tokio::{
 	task::JoinHandle,
 	time::{sleep, timeout},
 };
-use tuwunel::{Args, Runtime, Server, async_run, async_start, async_stop};
+use tuwunel::{Args, Runtime, Server, async_run, async_stop};
 use tuwunel_core::{
 	Err, Result, err,
 	ruma::{
@@ -123,10 +123,14 @@ struct Fixture<'a> {
 /// One server boot runs the cases sequentially.
 #[test]
 fn pusher_notify() -> Result {
+	let listener = StdTcpListener::bind(("127.0.0.1", 0))?;
+	let port = listener.local_addr()?.port();
 	let db_path = Args::test_database_path("test-pusher-notify");
 
 	let args = Args::default_test(&["fresh", "cleanup"])
 		.with_database_path(&db_path)
+		.with_loopback_listener(port)
+		.with_option("listening=true")
 		.with_option("network.http.ip_range_denylist=[]")
 		.with_option("sending.startup_netburst=true")
 		.with_option("push.suppress_when_active=true")
@@ -145,21 +149,28 @@ fn pusher_notify() -> Result {
 			.await
 			.insert(services.clone());
 
-		let outcome = async {
-			verify_badge_recovery(&services, &mut recovery).await?;
-			verify_push_retry(&services, &mut push_retry).await?;
-			verify_badge_retry(&services).await?;
-			verify_permanent_push_error(&services).await?;
-			verify_missing_pusher_reap(&services).await?;
-			run_cases(&services).await
-		}
-		.await;
+		let base = format!("http://127.0.0.1:{port}");
+		drop(listener);
 
-		server.server.shutdown()?;
+		let exercise = async {
+			let outcome = async {
+				verify_badge_recovery(&services, &mut recovery).await?;
+				verify_push_retry(&services, &mut push_retry).await?;
+				verify_badge_retry(&services).await?;
+				verify_permanent_push_error(&services).await?;
+				verify_missing_pusher_reap(&services).await?;
+				run_cases(&services).await?;
+				exercise_call_ring_cases(&services, &base).await
+			}
+			.await;
+			let shutdown = server.server.shutdown();
+			outcome.and(shutdown)
+		};
+
+		let (run_result, outcome) = tokio::join!(async_run(&server), exercise);
 		drop(services);
-
-		async_run(&server).await?;
 		async_stop(&server).await?;
+		run_result?;
 
 		outcome
 	});
@@ -1499,46 +1510,6 @@ const ALICE_RING_TOKEN: &str = "call-ring-alice-token";
 const BOB_RING_TOKEN: &str = "call-ring-bob-token";
 const CHARLIE_RING_TOKEN: &str = "call-ring-charlie-token";
 const DANA_RING_TOKEN: &str = "call-ring-dana-token";
-
-/// End-to-end tests for MindRoom's incoming-call ring push rules, membership
-/// validation, one-audible-ring-per-membership limit, mute/ignore precedence,
-/// and merge-on-read migration without GET writes.
-#[test]
-fn call_ring_push_rules() -> Result {
-	let listener = StdTcpListener::bind(("127.0.0.1", 0))?;
-	let port = listener.local_addr()?.port();
-	let db_path = Args::test_database_path("test-call-ring-push-rules");
-
-	let args = Args::default_test(&["fresh", "cleanup"])
-		.with_database_path(&db_path)
-		.with_loopback_listener(port)
-		.with_option("listening=true")
-		.with_option("network.http.ip_range_denylist=[]");
-
-	let runtime = Runtime::new(Some(&args))?;
-	let server = Server::new(Some(&args), Some(&runtime))?;
-	let result: Result = runtime.block_on(async {
-		let services = async_start(&server).await?;
-		let base = format!("http://127.0.0.1:{port}");
-		drop(listener);
-
-		let exercise = async {
-			let outcome = exercise_call_ring_cases(&services, &base).await;
-			let shutdown = server.server.shutdown();
-			outcome.and(shutdown)
-		};
-
-		let (run_result, outcome) = tokio::join!(async_run(&server), exercise);
-		drop(services);
-		async_stop(&server).await?;
-		run_result?;
-		outcome
-	});
-
-	drop(runtime);
-	remove_dir_all(&db_path).ok();
-	result
-}
 
 struct RingTestUsers<'a> {
 	alice: client::Client<'a>,
