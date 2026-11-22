@@ -244,7 +244,7 @@ on the next restart.
 | Option | Default | Description |
 |---|---|---|
 | `oidc_registration_access_token` | (unset) | When set, the registration endpoint requires callers to present this value as an `Authorization: Bearer` credential. Matrix clients have no way to supply one, so any value here blocks next-gen auth for every ordinary client. Leave it unset unless the only callers are ones you register yourself. |
-| `oidc_registration_allowed_redirect_hosts` | `[]` | When non-empty, every `redirect_uri` presented at registration must match this list, otherwise the registration is rejected. A `redirect_uri` with a host matches an entry naming that host; a private-use scheme carries no host (RFC 8252, as in `io.element.android:/`) and matches an entry naming the scheme. Matching ignores case. Empty imposes no restriction at registration, and vouches for no client. |
+| `oidc_registration_allowed_redirect_hosts` | `[]` | When non-empty, every `redirect_uri` presented at registration must match this list, otherwise the registration is rejected. A bare host entry (`element.io`, `127.0.0.1`, `::1` / `[::1]`) matches only an `https` URI with that exact host or a loopback `http` URI. A colon-suffixed scheme entry (`io.element.android:`) matches only a hostless private-use URI with no authority whose scheme contains a dot (RFC 8252 §7.1, as in `io.element.android:/`). Matching ignores case. Empty imposes no restriction at registration, and vouches for no client. |
 | `oidc_registration_require_client_uri` | `false` | Refuse a registration that carries no `client_uri`, so every client is held to the host rules in [Accepted redirect URIs](#accepted-redirect-uris). When false, a client may omit it, and one that supplies it is still held to those rules. |
 | `oidc_require_client_approval` | `true` | Show the user an approve/deny page naming the client before an authorization code is issued to a client the operator has not vetted. A client is vetted when its redirect host or private-use scheme appears in `oidc_registration_allowed_redirect_hosts`. |
 
@@ -272,12 +272,17 @@ is required: any client that supports dynamic registration can authenticate.
 To bound which clients may register, use
 `oidc_registration_allowed_redirect_hosts`. It restricts registration to clients
 whose `redirect_uri` you list, and ordinary Matrix clients keep working so long
-as they appear in it. List a web client by host and a mobile client by its
-private-use scheme, so a deployment serving Element X on both platforms reads:
+as they appear in it. List a web or universal-link client by bare host and a
+mobile client by its colon-suffixed private-use scheme, so a deployment serving
+Element X on both platforms reads:
 
 ```toml
-oidc_registration_allowed_redirect_hosts = ["element.io", "io.element.android"]
+oidc_registration_allowed_redirect_hosts = ["element.io", "io.element.android:"]
 ```
+
+Replace any older bare private-use scheme entry with the colon-suffixed form
+rather than keeping both, because a bare entry matches an `https` host of the
+same name.
 
 ### Accepted redirect URIs
 

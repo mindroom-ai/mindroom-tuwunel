@@ -275,6 +275,31 @@ mod tests {
 				"a locked account's login must not mint a loginToken: {locked_location2:?}",
 			);
 
+			// --- Scenario F: non-HTTPS or scheme-aliased redirects must confirm -
+			// `client.example.test` is allowlisted as a host only: plaintext HTTP,
+			// custom schemes carrying that host, and a hostless custom scheme with
+			// that name must show the Continue sign-in page instead of redirecting
+			// straight to the target with a loginToken.
+			for untrusted_redirect in [
+				"http%3A%2F%2Fclient.example.test%2Fdone",
+				"evil%3A%2F%2Fclient.example.test%2Fdone",
+				"client.example.test%3A%2Fdone",
+			] {
+				let (_sess, status, location) =
+					drive_login_to(&router, "reuse-client", untrusted_redirect).await;
+				assert_eq!(
+					status,
+					StatusCode::OK,
+					"untrusted redirect {untrusted_redirect} must show confirmation page, got \
+					 {status} ({location:?})",
+				);
+				assert!(
+					location.is_none(),
+					"untrusted redirect {untrusted_redirect} must not auto-redirect: \
+					 {location:?}",
+				);
+			}
+
 			Ok(())
 		});
 
@@ -300,19 +325,27 @@ mod tests {
 		]
 	}
 
-	/// Drive one full redirect -> callback for `client` and return
-	/// `(sess_id, callback_status, callback_location)`. The redirect is always
-	/// expected to succeed (pre-auth); the callback status/location are
-	/// returned unasserted so callers can pin both success and rejection.
+	/// Drive one full redirect -> callback for `client` to the allowlisted HTTPS
+	/// test redirect URL and return `(sess_id, callback_status, callback_location)`.
 	async fn drive_login(router: &Router, client: &str) -> (String, StatusCode, Option<String>) {
+		drive_login_to(router, client, "https%3A%2F%2Fclient.example.test%2Fdone").await
+	}
+
+	/// Drive one full redirect -> callback for `client` with an explicit
+	/// percent-encoded `redirect_url`.
+	async fn drive_login_to(
+		router: &Router,
+		client: &str,
+		encoded_redirect_url: &str,
+	) -> (String, StatusCode, Option<String>) {
 		let response = router
 			.clone()
 			.oneshot(
 				Request::builder()
 					.method("GET")
 					.uri(format!(
-						"/_matrix/client/v3/login/sso/redirect/{client}?redirectUrl=https%3A%2F%\
-						 2Fclient.example.test%2Fdone",
+						"/_matrix/client/v3/login/sso/redirect/{client}?\
+						 redirectUrl={encoded_redirect_url}",
 					))
 					.header("X-Forwarded-For", "127.0.0.1")
 					.body(Body::empty())

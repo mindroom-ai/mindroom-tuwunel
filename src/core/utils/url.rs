@@ -3,7 +3,10 @@
 //! These helpers provide reusable matching rules that the URL parser does not
 //! expose directly.
 
-use std::fmt::{self, Display, Write};
+use std::{
+	fmt::{self, Display, Write},
+	net::{Ipv4Addr, Ipv6Addr},
+};
 
 use http::Uri;
 use url::{Host, Url};
@@ -28,20 +31,72 @@ pub fn url_encode(s: &str) -> String {
 		})
 }
 
-/// Whether a URI's host, or its scheme when it has no host, appears in `allowed`.
+/// Whether a redirect URI matches an entry in `allowed`.
 ///
-/// A URI with no host is the RFC 8252 §7.1 private-use form, as in
-/// `io.element.android:/callback`. The comparison ignores case, and an
-/// unparsable URI never matches.
+/// Entries take two distinct forms so hosts and private-use URI schemes never
+/// alias each other:
+///
+/// - A bare host entry (for example `element.io`, `localhost`, `127.0.0.1`, or
+///   `::1` / `[::1]`) matches only an `https` URI with that exact host, or an
+///   `http` URI whose host is loopback ([RFC 8252
+///   §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3)).
+/// - A colon-suffixed scheme entry (for example `io.element.android:`) matches
+///   only a hostless private-use URI with no authority whose scheme contains a
+///   dot ([RFC 8252 §7.1](https://www.rfc-editor.org/rfc/rfc8252#section-7.1),
+///   as in `io.element.android:/callback`).
+///
+/// Comparisons ignore ASCII case. Unparsable URIs and URIs carrying userinfo
+/// never match.
 #[must_use]
 pub fn redirect_allowlisted(allowed: &[String], uri: &str) -> bool {
-	Url::parse(uri).is_ok_and(|url| {
-		let name = url.host_str().unwrap_or_else(|| url.scheme());
+	let Ok(url) = Url::parse(uri) else {
+		return false;
+	};
 
-		allowed
-			.iter()
-			.any(|entry| entry.eq_ignore_ascii_case(name))
-	})
+	if !url.username().is_empty() || url.password().is_some() {
+		return false;
+	}
+
+	match url.host() {
+		| Some(host) => {
+			let transport_allowed =
+				url.scheme() == "https" || (url.scheme() == "http" && is_loopback(&url));
+
+			transport_allowed
+				&& allowed
+					.iter()
+					.any(|entry| host_entry_matches(entry, &host))
+		},
+		| None => {
+			if url.has_authority() || !url.scheme().contains('.') {
+				return false;
+			}
+
+			allowed.iter().any(|entry| {
+				entry
+					.strip_suffix(':')
+					.is_some_and(|scheme| scheme.eq_ignore_ascii_case(url.scheme()))
+			})
+		},
+	}
+}
+
+fn host_entry_matches(entry: &str, host: &Host<&str>) -> bool {
+	match host {
+		| Host::Domain(domain) => entry.eq_ignore_ascii_case(domain),
+		| Host::Ipv4(ip) => entry
+			.parse::<Ipv4Addr>()
+			.is_ok_and(|addr| addr == *ip),
+		| Host::Ipv6(ip) => {
+			let raw = entry
+				.strip_prefix('[')
+				.and_then(|s| s.strip_suffix(']'))
+				.unwrap_or(entry);
+
+			raw.parse::<Ipv6Addr>()
+				.is_ok_and(|addr| addr == *ip)
+		},
+	}
 }
 
 /// Reports whether a hostname is equal to or beneath a domain name.
@@ -177,5 +232,57 @@ mod tests {
 			"/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}?<redacted>"
 		);
 		assert!(!out.contains("secret"));
+	}
+
+	#[test]
+	fn redirect_allowlisted_separates_hosts_and_private_use_schemes() {
+		let allowed = [
+			"element.io".to_owned(),
+			"io.element.android:".to_owned(),
+			"localhost".to_owned(),
+			"127.0.0.1".to_owned(),
+			"::1".to_owned(),
+		];
+
+		// HTTPS hosts match bare entries case-insensitively.
+		assert!(redirect_allowlisted(&allowed, "https://element.io/oauth/ios/x"));
+		assert!(redirect_allowlisted(&["Element.IO".to_owned()], "https://element.io/cb"));
+
+		// Loopback hosts allow http and https (with any port) and both IPv6 forms.
+		assert!(redirect_allowlisted(&allowed, "http://localhost:8080/cb"));
+		assert!(redirect_allowlisted(&allowed, "http://127.0.0.1:49152/cb"));
+		assert!(redirect_allowlisted(&allowed, "http://[::1]:8080/cb"));
+		assert!(redirect_allowlisted(&allowed, "https://[::1]/cb"));
+		assert!(redirect_allowlisted(&["[::1]".to_owned()], "http://[::1]:8080/cb"));
+
+		// Colon-suffixed entries match dotted hostless private-use schemes only.
+		assert!(redirect_allowlisted(&allowed, "io.element.android:/callback"));
+		assert!(redirect_allowlisted(
+			&["IO.Element.Android:".to_owned()],
+			"io.element.android:/callback"
+		));
+
+		// Bare host entries must never match private-use schemes, non-loopback http,
+		// or arbitrary schemes carrying that host.
+		assert!(!redirect_allowlisted(&allowed, "element.io:/callback"));
+		assert!(!redirect_allowlisted(&allowed, "http://element.io/callback"));
+		assert!(!redirect_allowlisted(&allowed, "evil://element.io/callback"));
+		assert!(!redirect_allowlisted(&allowed, "evil://localhost/callback"));
+		assert!(!redirect_allowlisted(&allowed, "https://user@element.io/callback"));
+		assert!(!redirect_allowlisted(&allowed, "http://user:pass@localhost/callback"));
+
+		// Colon-suffixed scheme entries must never match HTTPS hosts or URIs with an
+		// authority, and undotted schemes never match.
+		assert!(!redirect_allowlisted(&allowed, "https://io.element.android/callback"));
+		assert!(!redirect_allowlisted(&allowed, "io.element.android://callback"));
+		assert!(!redirect_allowlisted(&allowed, "io.element.android:///callback"));
+		assert!(!redirect_allowlisted(&["element:".to_owned()], "element:/callback"));
+		assert!(!redirect_allowlisted(&["http:".to_owned()], "http:/callback"));
+		assert!(!redirect_allowlisted(&["https:".to_owned()], "https:/callback"));
+
+		// Subdomains, empty lists, and malformed URIs never match.
+		assert!(!redirect_allowlisted(&allowed, "https://app.element.io/cb"));
+		assert!(!redirect_allowlisted(&[], "https://element.io/cb"));
+		assert!(!redirect_allowlisted(&allowed, "not a uri"));
 	}
 }
