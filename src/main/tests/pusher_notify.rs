@@ -1572,7 +1572,12 @@ async fn create_room_with(
 	members: &[(&client::Client<'_>, &UserId)],
 ) -> Result<OwnedRoomId> {
 	let room_id = creator
-		.create_room(&json!({ "preset": "private_chat" }))
+		.create_room(&json!({
+			"preset": "private_chat",
+			"power_level_content_override": {
+				"events": { CALL_MEMBER_EVENT_TYPE: 0 },
+			},
+		}))
 		.await?;
 	for (member_client, member_id) in members {
 		creator
