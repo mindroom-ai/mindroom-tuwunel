@@ -21,6 +21,7 @@ use tuwunel_core::{Err, Result, err, utils::json::serialized_len};
 use tuwunel_service::{
 	Services,
 	account_data::{MAX_RULE_BYTES, MAX_RULE_ID_BYTES, admits_rule},
+	pusher::ring_rules,
 };
 
 pub(crate) use self::{
@@ -35,11 +36,15 @@ pub(crate) use self::{
 };
 
 async fn load_push_rules(services: &Services, sender_user: &UserId) -> Result<PushRulesEvent> {
-	services
+	let mut event: PushRulesEvent = services
 		.account_data
 		.get_global(sender_user, GlobalAccountDataEventType::PushRules)
 		.await
-		.map_err(|_| err!(Request(NotFound("PushRules event not found."))))
+		.map_err(|_| err!(Request(NotFound("PushRules event not found."))))?;
+
+	event.content.global = ring_rules::merged(sender_user, event.content.global);
+
+	Ok(event)
 }
 
 async fn save_push_rules(

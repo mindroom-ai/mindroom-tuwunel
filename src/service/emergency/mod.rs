@@ -85,7 +85,8 @@ async fn set_emergency_access(&self, password: Option<&str>) -> Result {
 			.await?;
 	}
 
-	let ruleset = password.map_or_else(Ruleset::new, |_| Ruleset::server_default(server_user));
+	let ruleset = password
+		.map_or_else(Ruleset::new, |_| crate::pusher::ring_rules::server_default(server_user));
 	let event_type = GlobalAccountDataEventType::PushRules
 		.to_string()
 		.into();

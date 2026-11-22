@@ -9,6 +9,7 @@ mod email;
 mod notification;
 mod redact;
 mod request;
+pub mod ring_rules;
 mod send;
 mod suppressed;
 #[cfg(test)]
@@ -124,6 +125,7 @@ pub struct Service {
 	sent_badges: SentBadges,
 	email_wakes: email::Wakes,
 	email_locks: email::Locks,
+	accepted_rings: ring_rules::AcceptedRings,
 }
 
 enum MindroomPushEvaluation {
@@ -273,6 +275,7 @@ impl crate::Service for Service {
 			sent_badges: SentBadges::default(),
 			email_wakes: email::Wakes::default(),
 			email_locks: MutexMap::new(),
+			accepted_rings: ring_rules::AcceptedRings::default(),
 		}))
 	}
 
@@ -512,7 +515,10 @@ pub async fn ruleset(&self, user_id: &UserId) -> Ruleset {
 		.get_global(user_id, GlobalAccountDataEventType::PushRules)
 		.await
 		.log_err(Level::TRACE)
-		.map_or_else(|_| Ruleset::server_default(user_id), |ev: PushRulesEvent| ev.content.global)
+		.map_or_else(
+			|_| ring_rules::server_default(user_id),
+			|ev: PushRulesEvent| ring_rules::merged(user_id, ev.content.global),
+		)
 }
 
 #[implement(Service)]
@@ -554,6 +560,9 @@ pub async fn get_actions<'a>(
 		| MindroomPushEvaluation::Normalize(event) => event,
 		| MindroomPushEvaluation::Unchanged => pdu,
 	};
+
+	let validated_ring = self.validate_ring_push(room_id, pdu).await;
+	let pdu = validated_ring.as_ref().unwrap_or(pdu);
 
 	let user_display_name = self
 		.services

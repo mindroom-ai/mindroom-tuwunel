@@ -4,10 +4,14 @@ use ruma::{
 	OwnedRoomId, RoomId, UserId,
 	push::{
 		Action, Actions, EventMatchConditionData, NewConditionalPushRule, NewPatternedPushRule,
-		NewPushRule, NewSimplePushRule, PushCondition, RuleKind, Ruleset, SimplePushRule,
+		NewPushRule, NewSimplePushRule, PushCondition, RemovePushRuleError, RuleKind, Ruleset,
+		SimplePushRule,
 	},
 };
-use tuwunel_service::account_data::{MAX_RULE_BYTES, MAX_RULE_ID_BYTES, MAX_RULES, admits_rule};
+use tuwunel_service::{
+	account_data::{MAX_RULE_BYTES, MAX_RULE_ID_BYTES, MAX_RULES, admits_rule},
+	pusher::ring_rules::{self, RING_ENCRYPTED_RULE_ID, RING_RULE_ID},
+};
 
 use super::{check_rule_admission, check_rule_size};
 
@@ -107,7 +111,7 @@ fn content_rule(rule_id: &str, pattern: &str) -> NewPushRule {
 /// an empty override set is not a shape this code ever sees.
 fn ruleset_with(rule: NewPushRule) -> Ruleset {
 	let user = UserId::parse("@test:example.com").expect("the user id parses");
-	let mut ruleset = Ruleset::server_default(&user);
+	let mut ruleset = ring_rules::server_default(&user);
 
 	ruleset
 		.insert(rule, None, None)
@@ -134,3 +138,37 @@ fn room_id(index: usize) -> OwnedRoomId {
 }
 
 fn notify() -> Actions { once(Action::Notify).collect() }
+
+
+#[test]
+fn merged_old_ruleset_allows_disabling_ring_rule_and_blocks_deleting_it() {
+	let user = UserId::parse("@bob:example.com").expect("user id");
+	let stored = Ruleset::server_default(&user);
+	assert!(stored.get(RuleKind::Override, RING_RULE_ID).is_none());
+
+	let mut loaded = ring_rules::merged(&user, stored);
+	loaded
+		.set_enabled(RuleKind::Override, RING_RULE_ID, false)
+		.expect("ring rule can be disabled immediately after merge-on-read");
+	assert!(
+		!loaded
+			.get(RuleKind::Override, RING_RULE_ID)
+			.expect("ring rule present")
+			.enabled()
+	);
+	assert!(
+		loaded
+			.get(RuleKind::Override, RING_ENCRYPTED_RULE_ID)
+			.expect("encrypted ring rule present")
+			.enabled()
+	);
+
+	assert_eq!(
+		loaded.remove(RuleKind::Override, RING_RULE_ID),
+		Err(RemovePushRuleError::ServerDefault),
+	);
+	assert_eq!(
+		loaded.remove(RuleKind::Override, RING_ENCRYPTED_RULE_ID),
+		Err(RemovePushRuleError::ServerDefault),
+	);
+}

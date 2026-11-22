@@ -1707,6 +1707,35 @@ suspended sender, passes unchanged. File:
 `src/main/tests/delayed_events.rs` drives the unstable path, so its
 expectations for such a conflict change from 409 to 404 in two lines.
 
+### Incoming-call ring push rules
+
+Files:
+- `src/service/pusher/ring_rules.rs`
+- `src/service/pusher/mod.rs`
+- `src/service/users/register.rs`, `src/service/emergency/mod.rs`, `src/api/federation/invite.rs`
+- `src/api/client/push/{mod.rs,pushrules.rs,pushrules_global.rs}`
+- `src/service/pusher/tests.rs`, `src/api/client/push/tests.rs`, `src/main/tests/pusher_notify.rs`
+
+Behavior:
+- Adds two server-default override push rules immediately before `.m.rule.is_user_mention`:
+  `.io.mindroom.rule.rtc.ring` (clear `org.matrix.msc4075.rtc.notification` with
+  `content.notification_type == "ring"`) and `.io.mindroom.rule.rtc.ring_encrypted`
+  (`m.room.encrypted` carrying the cleartext `io.mindroom.rtc.notification` hint with
+  `notification_type == "ring"`), both matching rooms with `<=3` joined members and
+  emitting `["notify", {"set_tweak": "sound", "value": "ring"}]`.
+- Before push-rule evaluation in `pusher::Service::get_actions`, validates every ring
+  candidate: its cleartext `m.relates_to` must be an `m.reference` to an
+  `org.matrix.msc3401.call.member` state event in the same room, sent by the ring's
+  sender, with active non-empty content, still current state for its state key, and not
+  already claimed by another ring event (in-memory membership-to-ring map with a 2-minute
+  TTL so the same ring passes again at dispatch). Failing candidates have their ring
+  marker stripped and evaluate with today's rules.
+- Existing stored rulesets missing either ring rule are merged on read via
+  `update_with_server_default` across evaluation (`pusher::Service::ruleset`), both
+  `GET /pushrules` routes, and `load_push_rules` (single-rule routes). `GET` routes do
+  not write to account data; the merged ruleset is persisted only on a rule write, and
+  user override mutes and ignored-sender filtering keep their precedence.
+
 ### 1) `mindroom/edits: compact /sync, purge superseded edits, bundle the survivor`
 Files:
 - `src/api/client/sync/mod.rs`, `src/api/client/sync/mindroom_edits.rs`
