@@ -617,7 +617,11 @@ its listed address names another account than the one it carries. The
 checks are made under the account's password lock, held until the link is
 stored, and an account with an empty password gets the sentinel and origin
 `sso` in the same write batch as the link, with a warning; other accounts
-keep their password and origin. Every first sign-in that takes an
+keep their password and origin. Because an assigned or claimed account is
+already verified to exist and held under that lock, `complete_sso_session`
+skips the redundant `users.exists` read before registration, so a storage
+read error there cannot enter `register_user` and deadlock on its own
+password lock. Every first sign-in that takes an
 account by name, new or existing (a new registration, or an identity's
 fallback username), now holds that lock from after any registration until
 its link is stored and checks the account's link index again under it, so

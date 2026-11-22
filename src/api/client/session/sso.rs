@@ -728,7 +728,10 @@ async fn complete_sso_session(
 			..session
 		};
 
-		let created = !services.users.exists(&user_id).await;
+		// An account already held here (assigned or claimed) is known to exist and
+		// holds its password lock; a redundant `exists` read failing on a storage
+		// error would enter `register_user` and deadlock on that lock.
+		let created = held.is_none() && !services.users.exists(&user_id).await;
 		let terms = if created {
 			let origin = match provider.registration {
 				| true => "sso",
