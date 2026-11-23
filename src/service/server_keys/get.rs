@@ -154,7 +154,8 @@ async fn get_verify_key_from_notaries(
 	{
 		if let Ok(server_keys) = self.notary_request(notary, origin).await {
 			for server_key in server_keys.clone() {
-				self.add_signing_keys(server_key).await;
+				self.add_signing_keys(server_key, &[key_id.to_owned()])
+					.await;
 			}
 
 			for server_key in server_keys {
@@ -175,7 +176,8 @@ async fn get_verify_key_from_origin(
 	key_id: &ServerSigningKeyId,
 ) -> Result<VerifyKey> {
 	if let Ok(server_key) = self.server_request(origin).await {
-		self.add_signing_keys(server_key.clone()).await;
+		self.add_signing_keys(server_key.clone(), &[key_id.to_owned()])
+			.await;
 		if let Some(result) = extract_key(server_key, key_id) {
 			return Ok(result);
 		}
