@@ -26,7 +26,7 @@ use tuwunel_matrix::{
 use super::merge_member_content;
 use crate::{
 	Services,
-	test_utils::{keyed_fixture, pdu_id, with_field},
+	test_utils::{fixture, pdu_id, with_field},
 };
 
 const MAX_BYTES: usize = 4096;
@@ -37,7 +37,7 @@ const MAX_BYTES: usize = 4096;
 /// An event of another room in the same response is not stored.
 #[tokio::test]
 async fn an_altered_send_join_event_is_stored_redacted() -> Result {
-	let Some(fixture) = keyed_fixture(Figment::new()).await? else {
+	let Some(fixture) = fixture(Figment::new()).await? else {
 		return Ok(());
 	};
 
@@ -99,7 +99,7 @@ async fn an_altered_send_join_event_is_stored_redacted() -> Result {
 /// altered content.
 #[tokio::test]
 async fn a_send_join_event_replaces_only_an_altered_outlier() -> Result {
-	let Some(fixture) = keyed_fixture(Figment::new()).await? else {
+	let Some(fixture) = fixture(Figment::new()).await? else {
 		return Ok(());
 	};
 
@@ -281,7 +281,7 @@ fn reserved_join_keys_are_dropped_from_the_extras() -> Result {
 /// is not stored.
 #[tokio::test]
 async fn send_join_create_keeps_its_own_room_id() -> Result {
-	let Some(fixture) = keyed_fixture(Figment::new()).await? else {
+	let Some(fixture) = fixture(Figment::new()).await? else {
 		return Ok(());
 	};
 
@@ -332,7 +332,7 @@ async fn send_join_create_keeps_its_own_room_id() -> Result {
 /// the topic and are rejected.
 #[tokio::test]
 async fn send_join_state_is_authorized() -> Result {
-	let Some(fixture) = keyed_fixture(Figment::new()).await? else {
+	let Some(fixture) = fixture(Figment::new()).await? else {
 		return Ok(());
 	};
 
@@ -405,7 +405,7 @@ async fn send_join_state_is_authorized() -> Result {
 /// joining user's own join there still applies.
 #[tokio::test]
 async fn send_join_state_leaves_other_local_users_alone() -> Result {
-	let Some(fixture) = keyed_fixture(Figment::new()).await? else {
+	let Some(fixture) = fixture(Figment::new()).await? else {
 		return Ok(());
 	};
 
@@ -484,7 +484,7 @@ async fn send_join_state_leaves_other_local_users_alone() -> Result {
 /// again.
 #[tokio::test]
 async fn send_join_state_keeps_other_local_members() -> Result {
-	let Some(fixture) = keyed_fixture(Figment::new()).await? else {
+	let Some(fixture) = fixture(Figment::new()).await? else {
 		return Ok(());
 	};
 
@@ -584,7 +584,7 @@ async fn send_join_state_keeps_other_local_members() -> Result {
 /// the invite, which names the unban rather than the ban.
 #[tokio::test]
 async fn send_join_state_follows_other_local_members() -> Result {
-	let Some(fixture) = keyed_fixture(Figment::new()).await? else {
+	let Some(fixture) = fixture(Figment::new()).await? else {
 		return Ok(());
 	};
 
@@ -643,7 +643,7 @@ async fn send_join_state_follows_other_local_members() -> Result {
 /// have, so a v11 answer for a v12 room is refused.
 #[tokio::test]
 async fn send_join_refuses_a_rejected_create() -> Result {
-	let Some(fixture) = keyed_fixture(Figment::new()).await? else {
+	let Some(fixture) = fixture(Figment::new()).await? else {
 		return Ok(());
 	};
 
