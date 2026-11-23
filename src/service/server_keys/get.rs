@@ -168,7 +168,8 @@ async fn get_verify_key_from_notaries(
 			.fold(None, async |found, server_key| {
 				let found = found.or_else(|| extract_key(&server_key, key_id));
 
-				self.add_signing_keys(server_key).await;
+				self.add_signing_keys(server_key, &[key_id.to_owned()])
+					.await;
 				found
 			})
 			.await;
@@ -190,7 +191,8 @@ async fn get_verify_key_from_origin(
 	if let Ok(server_key) = self.server_request(origin).await {
 		let found = extract_key(&server_key, key_id);
 
-		self.add_signing_keys(server_key).await;
+		self.add_signing_keys(server_key, &[key_id.to_owned()])
+			.await;
 
 		if let Some(result) = found {
 			return Ok(result);

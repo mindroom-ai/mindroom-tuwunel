@@ -31,6 +31,7 @@ use super::{
 		RoomDetails, StateRead, StickyEvents, handle_room, membership_allows_required_state,
 		merged_room_details, room_config,
 	},
+	selection::ListSelections,
 };
 use crate::is_empty_account_data_event;
 
@@ -141,13 +142,15 @@ pub(super) async fn collect(
 ) -> Results {
 	let ignored = OnceCell::new();
 	let empty_room = Room::default();
+	let selections = ListSelections::new(conn);
 	let ranges = window
 		.iter()
 		.stream()
 		.broad_filter_map(async |(room_id, window_room)| {
 			let room = conn.rooms.get(room_id).unwrap_or(&empty_room);
 
-			let room_details = merged_room_details(conn, &window_room.lists, room_id);
+			let room_details =
+				merged_room_details(conn, &selections, &window_room.lists, room_id);
 
 			match collect_room(sync_info, conn, window_room, room, room_details, &ignored).await {
 				| Ok(range) => Some((room_id.clone(), range)),
