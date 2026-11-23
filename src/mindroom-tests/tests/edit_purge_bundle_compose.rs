@@ -425,7 +425,7 @@ mod tests {
 		assert_eq!(bundle["type"], "m.room.message", "bundle type: {bundle}");
 		assert!(
 			bundle["origin_server_ts"].is_u64(),
-			"bundle must carry origin_server_ts (MindRoom Cinny requires it): {bundle}"
+			"bundle must carry origin_server_ts (MindRoom Chat requires it): {bundle}"
 		);
 		assert_eq!(
 			bundle["content"]["m.new_content"]["body"], *new_body,
