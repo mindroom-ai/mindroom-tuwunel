@@ -2,9 +2,9 @@
 
 This document describes the current MindRoom fork behavior on top of upstream
 `tuwunel`. The fork is rebased directly onto upstream commits; see
-`docs/rebase-*.md` for the per-rebase log. As of the 2026-11-17 rebase the base
-is the upstream `v2.0.0` release (`a3feae1a2`), 121 commits past the previous
-base, upstream `main` at `8c6c4a210`. Earlier changes merged upstream and
+`docs/rebase-*.md` for the per-rebase log. As of the 2026-11-24 rebase the base
+is upstream `main` at `f7dc0770b` (not a release tag), 218 commits past the
+previous base, the upstream `v2.0.0` release (`a3feae1a2`). Earlier changes merged upstream and
 dropped from the fork include the room-creation default power-level override
 and the SSO grant-cookie path hardening (2026-07-07 rebase; the cookie's name
 and path now differ again), and the drained/zero one-time-key counts fix and
@@ -105,6 +105,32 @@ the new email pusher, account creation in `write_credentials` and
 table, and the CI formatter pin.
 See the [v2.0.0 rebase record](docs/rebase-v2.0.0-2026-11-17.md).
 
+On upstream `main` (`f7dc0770b`), upstream contains 18 more of the fork's fixes
+(11 via merged upstream PRs, 5 via upstream's own replacements, 1 test helper
+fix, and 1 backport): `/sync` history visibility (#55), never-joined left-room
+state (#61), `/state_ids` and local-build room checks (#67), sliding sync
+selector fingerprinting (#68), unfolded `/initialSync` and `/notifications`
+(#69), `send_join` create room-id test and event authorization (#88, #95),
+unified `provenance.rs` local-join and create checks (#100, #116), SSO
+exclusive-namespace username checks (#111), `/state_ids` deduplication (#112),
+`send_join` retry membership and restricted-join authoriser checks (#114,
+#120), refresh-token access refusal (#127), redacted events excluded from
+`/relations` (#141), UIAA linked-provider selection (#156), watch-probe
+polling, and active local key counting (#188). Four commits keep only what
+upstream lacks: #45 (edit-bundle visibility), #119 (sliding sync range
+deduplication), #129 (walk budgets, dual-parent dedup, and backfilled `from`
+normalization on upstream's 3-level recursive `/relations`), and #183 (stripping
+stored `m.relations` on embedded `m.replace` edits and `#143` previews using
+upstream's `served_unfolded_to`/`remove_aggregations`). Upstream also adds
+MSC4354 sticky events (`443a6dd30`), moves the default SSO callback path to
+`/_tuwunel/sso/callback/{idp_id}` (`6e7510b88`), requires auth on
+`/rtc/transports` (`d6af5010a`), and updates the locked toolchain to Rust
+1.100; the fork's delayed-event scope now also permits a sender's own delayed
+MSC4354 sticky `m.rtc.member`/`org.matrix.msc4143.rtc.member` leave, sliding
+sync limits now cover `sticky_events`, and the CI formatter pin moves to
+`nightly-2026-11-20`.
+See the [upstream main `f7dc0770b` rebase record](docs/rebase-upstream-f7dc077-2026-11-24.md).
+
 ## How To Inspect
 - Fork commits: `git log --reverse --oneline <upstream-base>..HEAD`
 - Files changed in the fork: `git diff --stat <upstream-base>..HEAD`
@@ -117,11 +143,10 @@ verification needs in the test environment instead of carrying extra patches.
 The history keeps the v1.9.1 ownership layout of eight commits (shared test
 infrastructure, five runtime features with their tests and compatibility
 changes, CI, and docs), followed by the squash-merged fork PRs that upstream
-does not contain, in merge order (#15 to #171), with the v1.9.3 and 2026-10-06
-upstream main rebase records after #64, the v1.9.4 record after #105, the
-2026-11-08 upstream main record after #156, and then the two delayed-event
-commits and this rebase's documentation last. No upstream backports are
-carried. The [v2.0.0 rebase record](docs/rebase-v2.0.0-2026-11-17.md)
+does not contain, in merge order (#15 to #189), with the earlier rebase records
+in their historical positions, the two delayed-event commits and v2.0.0 record
+after #171, and this rebase's documentation last. No upstream backports are
+carried. The [upstream main `f7dc0770b` rebase record](docs/rebase-upstream-f7dc077-2026-11-24.md)
 describes this rebase. Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
@@ -234,8 +259,9 @@ The fork first kept only the first entries instead, which could drop a
 a list that excluded it (#174). A `spaces` entry also looks up the one
 `m.space.child` event naming the room instead of reading the space's whole
 state. Upstream has the same bug; the check follows the upstream proposal
-matrix-construct/tuwunel#732, without its sticky events scope, which the
-fork's Ruma lacks, and with the grouping and distinct counting above, so that
+matrix-construct/tuwunel#732, covering upstream's MSC4480 `sticky_events` scope
+(`443a6dd30`) alongside the other extensions, and with the grouping and
+distinct counting above, so that
 it refuses little the fork accepted before: only the three-list case above
 and selections it used to cut. Files:
 `src/api/client/sync/v5/{limits.rs,selection.rs,rooms.rs,range.rs,filter.rs}`,
@@ -246,16 +272,12 @@ and selections it used to cut. Files:
 `src/main/tests/sync_v5_request_limits.rs` and
 `src/main/tests/sync_v5_list_filters.rs`.
 
-### Sliding sync copies each window room once
+### Sliding sync deduplicates repeated ranges
 
-Each pass copied a room, with the IDs of the lists it matched, once for every
-list and range that selected it, and a list kept a range repeated in a request
-as often as it was sent. The window holds each room once, so 64 lists of 16
-identical full ranges copied every room about a thousand times in a pass that
-does not yield, and kept a worker busy for seconds with a thousand rooms. A
-list now keeps each distinct range once, and the window copies a room the
-first time a range selects it. Upstream has the same bug. Files:
-`src/service/sync/mod.rs`, `src/api/client/sync/v5/selector.rs`; test in
+Upstream `928a4abd2` (PR #715) and `2726515ec` now copy each sliding sync
+window room once in `selector.rs`. The fork keeps range deduplication in the
+connection state so a list stores each distinct range once instead of repeating
+duplicate ranges sent in a request. Files: `src/service/sync/mod.rs`; test in
 `src/service/sync/tests.rs`.
 
 ### A multi-word search reads the shortest list first and looks up rare hits
@@ -303,7 +325,7 @@ to-device messages. Upstream
 bounds to-device messages, device IDs and the EDU bytes of a federation
 transaction since v1.9.4 (`ff77c2220`), but still stores and sends keys of any
 size. Files:
-`src/api/client/{dehydrated_device.rs,keys/upload_keys.rs,keys/upload_signing_keys.rs}`,
+`src/api/client/{dehydrated_device/put_dehydrated_device.rs,keys/upload_keys.rs,keys/upload_signing_keys.rs}`,
 `src/service/sending/{mod.rs,sender/mod.rs}`; test in
 `src/main/tests/edu_content_size.rs`.
 
@@ -672,8 +694,11 @@ reads only that name, and the removal cookie has the same name, `Path=/` and
 at once in one browser only the later one completes. A sign-in started
 before the upgrade fails at its callback once and succeeds when retried.
 Upstream names the cookie `tuwunel_grant_session` and scopes it to the
-callback path. File: `src/api/client/session/sso.rs`; tests in that file
-and `src/mindroom-tests/tests/sso_redirect.rs`.
+callback path (moved by upstream `6e7510b88` to
+`/_tuwunel/sso/callback/{idp_id}`, with the legacy unstable path kept mounted
+until 3.0 when `callback_url` names it or when `callback_url` and
+`well_known.client` are unset). File: `src/api/client/session/sso.rs`; tests in
+that file and `src/mindroom-tests/tests/sso_redirect.rs`.
 
 ### SSO registration rules gate new accounts and join their rooms
 
@@ -1156,15 +1181,14 @@ upstream decides. Upstream has the same bug. Files:
 `src/api/client/sync/v3/left.rs`; tests in
 `src/main/tests/{knock_withdrawal_history.rs,sync_v5_departed_ephemeral.rs}`.
 
-### Bundled aggregations follow the requester's visibility
+### Bundled edit aggregations follow the requester's visibility
 
-A served event's bundled `m.thread` summary and `m.replace` edits were added
-without checking whether the requester may see them, so a user who had left or
-been removed from a room still got a thread's newest reply and the newest edit
-of an event they could read, even when those were sent after they left. A
-requester who is no longer in the room now gets an edit only when the room's
-history visibility lets them see it, and no thread summary when it hides the
-latest reply. Upstream has the same bug. File:
+Upstream `563c670b5`/`7752984d2` now enforces requester visibility on bundled
+`m.thread` summaries (serving visible pre-leave replies). The fork keeps
+visibility enforcement for bundled `m.replace` edits: `newest_replacement`
+checks `user_can_see_event` and `erased_for` so a former member or requester
+with erased-sender filtering does not receive an edit hidden by history
+visibility. Upstream has the same gap on edit bundles (open PR #707). File:
 `src/service/rooms/pdu_metadata/bundling.rs`; test in
 `src/main/tests/bundled_relations_after_leave.rs`.
 
@@ -1179,6 +1203,26 @@ reads one relation past its limit and gives `next_batch` only when that
 relation exists, in both directions and with `recurse`. Upstream has the same
 bug. File: `src/api/client/relations.rs`; test in
 `src/main/tests/relations_next_batch.rs`.
+
+### Recursive `/relations` walks stay bounded and deduplicated
+
+Upstream `cf063b67b` owns the 3-level filter-stops-recursion `/relations` walk
+(`RECURSION_DEPTH = 3`) and excludes redacted events (`4121ace12`). On top of
+upstream's `walk_level`, the fork keeps three bounds and ordering invariants:
+- Normalizes backfilled `from` cursors with `PduCount::into_normal` in
+  `relation_keys` so forward/backward seeks stay consistent.
+- Deduplicates events reachable under more than one parent (`WalkState.seen`),
+  counting and walking each distinct event once.
+- Bounds recursive walks at 32,768 distinct events and 262,144 scanned relation
+  rows (`Service::requester_relation_rows`, which `requester_relations`
+  delegates to): exceeding either limit drops the overflowing level whole
+  (`debug_warn!`), and overflowing depth 1 falls back to lazy depth-0 direct
+  relations.
+
+Files: `src/api/client/relations.rs`,
+`src/service/rooms/pdu_metadata/relations.rs`; tests in
+`src/api/client/relations.rs`, `src/service/rooms/pdu_metadata/tests.rs`, and
+`src/main/tests/relations_recurse_order.rs`.
 
 ### CORS allows the Cloudflare Access token header
 
@@ -1409,28 +1453,39 @@ Behavior:
 ### Only a MatrixRTC call leave can be delayed
 
 Upstream's MSC4140 lets a client delay any event. The fork lets a client delay
-only its own MatrixRTC call leave: an `org.matrix.msc3401.call.member` state
-event with empty content (`{}`), under a state key that names the sender's own
-call slot. That key is the sender's user ID, an underscore and the rest, with
-or without one more underscore in front, as in
-`_@alice:example.org_DEVICE_m.call`. Every other delayed event is refused with
-403 `M_FORBIDDEN` before anything else is read, whether it comes with the
-`org.matrix.msc4140.delay` query on `/send` or `/state` or through the
-`delayed_event` route, stable or unstable: a message, any other state event, a
-call membership with content, such as a join, and a leave under any other
-state key, such as another user's slot.
+only its own MatrixRTC call leave, in either of the two MatrixRTC shapes:
+
+1. **Legacy state leave:** an `org.matrix.msc3401.call.member` (or alias
+   `m.call.member`) state event with empty content (`{}`), under a state key
+   that names the sender's own call slot (the sender's user ID, an underscore
+   and the rest, with or without one more underscore in front, as in
+   `_@alice:example.org_DEVICE_m.call`).
+2. **MSC4354 sticky `rtc.member` leave:** an `m.rtc.member` or
+   `org.matrix.msc4143.rtc.member` message-like event carrying a sticky
+   duration (`org.matrix.msc4354.sticky_duration_ms`), a non-empty `slot_id`
+   and sticky key (`msc4354_sticky_key` and/or `sticky_key`), and either a
+   `member` object with `membership: "leave"`, non-empty `id`, optional
+   `user_id` matching the sender, optional non-empty `device_id`, and optional
+   `leave_reason` (`code` + optional string `reason`), or the legacy
+   `{slot_id, sticky_key}` leave shape, with no extra fields.
+
+Every other delayed event is refused with 403 `M_FORBIDDEN` before anything
+else is read, whether it comes with the `org.matrix.msc4140.delay` query on
+`/send` or `/state` or through the `delayed_event` route, stable or unstable: a
+message, any other state event, a delayed sticky `rtc.member` join, a delayed
+sticky legacy `call.member` message, a call membership with content, and a
+leave under another user's slot.
 
 A MatrixRTC client schedules its own call leave and keeps postponing it, and
-that is the only delayed event MindRoom's clients send: matrix-js-sdk 41.7.0,
-which MindRoom Chat pins, delays that state event from its `MembershipManager`
-(`clientSendDelayedDisconnectMembership`), with `{}` as its content and its
-own slot as its state key. Its `StickyEventMembershipManager` delays an
-`org.matrix.msc4143.rtc.member` message instead, but only for a client that
-opts in to MSC4354 sticky events, which MindRoom Chat does not and this server
-does not have. matrix-rust-sdk delays only what a widget such as Element Call
-asks it to. ruma reads `m.call.member` as another name of the allowed type, so
-a leave that names it is delayed, and sent, as an
-`org.matrix.msc3401.call.member` event.
+that is the only delayed event MindRoom's and Element Call's clients send:
+matrix-js-sdk 41.7.0, which MindRoom Chat pins, delays the legacy state leave
+from its `MembershipManager` (`clientSendDelayedDisconnectMembership`), and
+its `StickyEventMembershipManager` (used by MSC4354 sticky-event clients such
+as Element Call) delays a sticky `org.matrix.msc4143.rtc.member` leave now that
+upstream implements MSC4354 (`443a6dd30`). matrix-rust-sdk delays only what a
+widget such as Element Call asks it to. ruma reads `m.call.member` as another
+name of `org.matrix.msc3401.call.member`, so a leave that names it is delayed,
+and sent, as an `org.matrix.msc3401.call.member` event.
 
 A delayed event is sent later, without the request an ordinary send passes
 through, and upstream's send path rechecks suspension alone. For other events
@@ -1453,7 +1508,8 @@ would still be sent after a lock and read back from its record, and room auth
 does not tie a state key with an underscore in front to its sender, so a
 delayed leave could empty another user's slot. With its own call leave alone,
 all that a locked or deactivated account can still have sent takes one of its
-own devices out of a call, and the record kept of it holds empty content. Room auth still decides, when the leave is scheduled and when
+own devices out of a call, and the record kept of it holds empty content or a
+leave-only sticky payload. Room auth still decides, when the leave is scheduled and when
 it is sent, whether the sender may write that state. Upstream's limits,
 persistence, management routes and finalised records are unchanged, and the
 feature flags and capabilities stay advertised. File:
@@ -1462,17 +1518,18 @@ feature flags and capabilities stay advertised. File:
 the state key, `only_own_call_leave_is_delayed` in
 `src/api/client/delayed_events/tests.rs`.
 
-Upstream's `src/main/tests/delayed_events.rs` and the delayed case of
-`src/main/tests/profile_legacy_member.rs` delayed messages, topics and room
-memberships. The cases about the routes now delay a call leave and keep what
-they check. Three cases are about what the service does with an event the
-routes now refuse: an empty-key state event that falls due, a send that is
-stored before a later step fails, and a scheduled event that survives a
-restart. They schedule upstream's event in the service, which is not held to
-this scope. `every_form_schedules` expects the refusal of a message, of a call
-membership with content and of one outside the sender's slot, and the delayed
-room membership is refused too: upstream's check that it is held to the member
-limits when scheduled cannot be reached by a client any more.
+Upstream's `src/main/tests/delayed_events.rs`, `profile_legacy_member.rs`,
+`livekit_delegation.rs`, `livekit_webhook.rs`, `state_member_invite.rs`, and
+`sticky_events.rs` delayed messages, topics, and room memberships. The route
+and LiveKit cases now delay an own-slot call leave and keep what they check;
+`sticky_events.rs` keeps upstream's positive delayed-fire and timer tests for
+`org.matrix.msc4143.rtc.member` leaves while asserting 403 for sticky
+`rtc.member` joins, legacy `call.member` messages, and delayed `m.room.topic`
+(testing 400 `M_INVALID_PARAM` on an own-slot delayed state leave with
+`sticky_duration_ms`). Three cases in `delayed_events.rs` schedule upstream's
+event directly in the service, which is not held to this scope, while
+`every_form_schedules` and `state_member_invite.rs` assert 403 for disallowed
+delayed events.
 
 ### A conflict with a finished delayed event is 404 on the unstable MSC4140 paths
 
@@ -1801,11 +1858,10 @@ Behavior:
 - Computes `v<base_version>-mindroom.<n>` tags on `main`, creates/reuses the
   matching GitHub Release, publishes Linux `x86_64`/`aarch64` binaries, and
   dispatches container publication. Runs the fork's own GitHub-hosted checks.
-- Pins CI rustfmt to `nightly-2026-11-03`, which passes upstream `v2.0.0`
-  (`a3feae1a2`) unchanged; upstream CI floats `nightly`. The locked Fenix
-  formatter in `flake.lock` (nightly-2026-08-05) reports fourteen upstream
-  files and `nightly-2026-10-04` one, so the development shell's `cargo fmt`
-  must not be used to reformat. Keep the two CI formatter commands aligned.
+- Pins CI rustfmt to `nightly-2026-11-20`, matching upstream `f7dc0770b`'s
+  locked Fenix nightly formatter (`rustfmt 1.12.0-nightly 6905905bb7
+  2026-11-19`), which passes both `f7dc0770b` and all fork commits; upstream CI
+  floats `nightly`. Keep the two CI formatter commands aligned.
 - Frees about 30 GB on the GitHub runner before building (preinstalled .NET,
   Android, GHC and CodeQL), because the v2.0.0 debug test build and the
   release build together no longer fit in its free disk.
@@ -1997,7 +2053,11 @@ clients read the title only from `io.mindroom.title`.
 
 Reads skip redacted, ignored-user, forbidden-server and erased events and
 enforce the requester's history visibility for each candidate and each edit.
-Newly embedded copies omit stored `m.relations`. Unreadable unsigned data is
+Newly embedded copies omit stored `m.relations` (upstream `0dbe24238` and
+`7752984d2` cover `/initialSync`, `/notifications`, `/events`, `/state`,
+`/search`, and `m.thread.latest_event`; the fork's `#183` remainder strips
+stored `m.relations` on embedded `m.replace` edits and `#143` previews via
+upstream's `served_unfolded_to`/`remove_aggregations`). Unreadable unsigned data is
 omitted from the copy; fresh, requester-checked bundles may be added afterwards.
 A redacted root keeps previews of its live children.
 
