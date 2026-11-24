@@ -222,6 +222,7 @@ fn mindroom_tool_approval_push_evaluation(
 	}
 
 	let mention_user = approver == Some(user.as_str());
+	let relates_to = content.get("m.relates_to").cloned();
 	let Some(event_object) = event.as_object_mut() else {
 		return MindroomPushEvaluation::Suppress;
 	};
@@ -236,6 +237,9 @@ fn mindroom_tool_approval_push_evaluation(
 		synthetic_content["m.mentions"] = json!({
 			"user_ids": [user.as_str()],
 		});
+	}
+	if let Some(relates_to) = relates_to {
+		synthetic_content["m.relates_to"] = relates_to;
 	}
 	event_object.insert("content".into(), synthetic_content);
 
