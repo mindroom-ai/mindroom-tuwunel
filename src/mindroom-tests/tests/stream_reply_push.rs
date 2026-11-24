@@ -197,6 +197,7 @@ async fn check_finished_replies(
 	check_read_while_streaming(services, router, captured, &room, &question).await;
 	check_mentions_only(services, router, captured).await;
 	check_encrypted(services, router, captured).await;
+	check_working_state_and_tool_approval(services, router, captured).await;
 
 	// Nothing else is queued: the next push is the next message's.
 	let last = send(router, &room, HELPER_TOKEN, "last", text("Anything else?")).await;
@@ -323,6 +324,177 @@ async fn check_encrypted(
 		.await;
 	receipt(router, &room, &done, Some("main")).await;
 	assert_eq!(main.counts(services).await, (0, 0));
+}
+
+/// Non-notifiable state events, redactions, and `io.mindroom.suppress_push`
+/// messages stay silent even under `RuleKind::Room` ("All messages"), while a
+/// threaded pending `io.mindroom.tool_approval` notifies its addressed approver
+/// in a mentions-only room with its real event payload and thread unread count.
+async fn check_working_state_and_tool_approval(
+	services: &Services,
+	router: &Router,
+	captured: &mut UnboundedReceiver<Value>,
+) {
+	let response = request(
+		router,
+		"POST",
+		"/createRoom",
+		AUTHOR_TOKEN,
+		json!({"preset": "public_chat", "power_level_content_override": {"state_default": 0}}),
+	)
+	.await;
+	let room: OwnedRoomId = response["room_id"]
+		.as_str()
+		.expect("created room id")
+		.try_into()
+		.expect("valid room id");
+	for token in [HELPER_TOKEN, OBSERVER_TOKEN] {
+		request(router, "POST", &format!("/rooms/{room}/join"), token, json!({})).await;
+	}
+
+	check_all_messages_and_suppress_push(services, router, captured, &room).await;
+	check_tool_approval_push(services, router, captured, &room).await;
+}
+
+async fn check_all_messages_and_suppress_push(
+	services: &Services,
+	router: &Router,
+	captured: &mut UnboundedReceiver<Value>,
+	room: &RoomId,
+) {
+	let author = user_id!("@author:localhost");
+	let rule_path = format!("/pushrules/global/room/{room}");
+	request(
+		router,
+		"PUT",
+		&rule_path,
+		AUTHOR_TOKEN,
+		json!({"actions": ["notify", {"set_tweak": "sound", "value": "default"}]}),
+	)
+	.await;
+	request(
+		router,
+		"PUT",
+		&format!("/rooms/{room}/state/io.mindroom.active_runs/"),
+		HELPER_TOKEN,
+		json!({"runs": ["run-1"]}),
+	)
+	.await;
+	let reaction = send_event(
+		router,
+		room,
+		HELPER_TOKEN,
+		"m.reaction",
+		"stop-react",
+		json!({"m.relates_to": {"rel_type": "m.annotation", "event_id": "$root", "key": "🛑"}}),
+	)
+	.await;
+	let redact_path = format!("/rooms/{room}/redact/{reaction}/redact-stop");
+	request(router, "PUT", &redact_path, HELPER_TOKEN, json!({})).await;
+	let quiet_body =
+		json!({"msgtype": "m.text", "body": "Working...", "io.mindroom.suppress_push": true});
+	send(router, room, HELPER_TOKEN, "suppressed-new", quiet_body).await;
+	let handoff =
+		json!({"msgtype": "m.text", "body": "Handoff", "io.mindroom.suppress_push": true});
+	let suppressed = Reply::new(room, None, MESSAGE, handoff, "suppressed-stream");
+	let (first, _) = suppressed.start(services, router).await;
+	suppressed
+		.finish(services, router, captured, &first, "completed", (0, 0))
+		.await;
+	assert_eq!(
+		services
+			.pusher
+			.notification_count(author, room)
+			.await,
+		0
+	);
+}
+
+async fn check_tool_approval_push(
+	services: &Services,
+	router: &Router,
+	captured: &mut UnboundedReceiver<Value>,
+	room: &RoomId,
+) {
+	let author = user_id!("@author:localhost");
+	let observer = user_id!("@observer:localhost");
+	let rule_path = format!("/pushrules/global/room/{room}");
+	request(router, "PUT", &rule_path, AUTHOR_TOKEN, json!({"actions": []})).await;
+	let root = send(router, room, AUTHOR_TOKEN, "approval-root", text("Run tool")).await;
+	let approval = send_event(
+		router,
+		room,
+		HELPER_TOKEN,
+		"io.mindroom.tool_approval",
+		"approval-pending",
+		json!({
+			"status": "pending",
+			"tool_name": "run_shell",
+			"approver_user_id": "@author:localhost",
+			"m.relates_to": {"rel_type": "m.thread", "event_id": root},
+		}),
+	)
+	.await;
+	assert_eq!(
+		services
+			.pusher
+			.notification_count(author, room)
+			.await,
+		0
+	);
+	let author_threads = services
+		.pusher
+		.thread_notification_counts(author, room)
+		.await;
+	assert_eq!(author_threads.get(&root).copied(), Some((1, 1)));
+	// Observer only has the main-timeline `root` message unread, not the approval.
+	assert_eq!(
+		services
+			.pusher
+			.notification_count(observer, room)
+			.await,
+		1
+	);
+	assert!(
+		services
+			.pusher
+			.thread_notification_counts(observer, room)
+			.await
+			.is_empty()
+	);
+	let notification = expect_push(services, captured, &approval, true).await;
+	assert_eq!(notification["type"], "io.mindroom.tool_approval");
+	assert_eq!(notification["content"]["status"], "pending");
+	assert_eq!(notification["content"]["tool_name"], "run_shell");
+	assert_eq!(notification["content"]["approver_user_id"], "@author:localhost");
+
+	send_event(
+		router,
+		room,
+		HELPER_TOKEN,
+		"io.mindroom.tool_approval",
+		"approval-resolved",
+		json!({
+			"status": "approved",
+			"tool_name": "run_shell",
+			"approver_user_id": "@author:localhost",
+			"m.relates_to": {"rel_type": "m.replace", "event_id": approval},
+		}),
+	)
+	.await;
+	let author_threads = services
+		.pusher
+		.thread_notification_counts(author, room)
+		.await;
+	assert_eq!(author_threads.get(&root).copied(), Some((1, 1)));
+	receipt(router, room, &approval, Some(root.as_str())).await;
+	assert!(
+		services
+			.pusher
+			.thread_notification_counts(author, room)
+			.await
+			.is_empty()
+	);
 }
 
 /// A reply the helper streams to the author: a first event and a non-terminal
@@ -459,7 +631,7 @@ async fn expect_push(
 	captured: &mut UnboundedReceiver<Value>,
 	event: &EventId,
 	highlight: bool,
-) {
+) -> Value {
 	let notification = loop {
 		let body = timeout(Duration::from_secs(10), captured.recv())
 			.await
@@ -479,6 +651,7 @@ async fn expect_push(
 		.global_notification_count(user_id!("@author:localhost"))
 		.await;
 	assert_eq!(notification["counts"]["unread"], unread);
+	notification
 }
 
 /// The author's `m.read` receipt on `event`, in `thread` (a root or `"main"`)
