@@ -1,4 +1,5 @@
 #![cfg(test)]
+#![recursion_limit = "256"]
 
 use serde_json::{Value, json, value::to_raw_value};
 use tuwunel_core::{Result, ruma::api::error::ErrorKind};
