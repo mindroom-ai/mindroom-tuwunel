@@ -1806,10 +1806,29 @@ Behavior:
   or unthreaded receipt. Clients therefore name the terminal edit or a later
   event: another receipt on an event the user already acknowledged, such as
   the reply's first event read mid-stream, clears nothing.
-- The `push.everything` debug mode honors the same suppression.
+- Suppresses non-notifiable state events (every event carrying a `state_key`
+  except `m.room.member` and `m.room.tombstone`), `m.room.redaction` events,
+  and `io.mindroom.*` / `com.mindroom.*` timeline control events (except
+  initial pending `io.mindroom.tool_approval`), so room-level `RuleKind::Room`
+  ("All messages") rules do not notify on internal control traffic or room
+  metadata updates while `org.matrix.msc4075.rtc.notification` remains
+  untouched.
+- Honors `io.mindroom.suppress_push: true` on `m.room.message` (top-level
+  `content` or `m.new_content`) and `m.room.encrypted`, suppressing both push
+  delivery and unread counts for intermediate agent turns and handoff relays
+  (including terminal `m.replace` edits).
+- Evaluates initial pending `io.mindroom.tool_approval` timeline events
+  (`status == "pending"`, not `m.replace`) against push rules via a synthetic
+  `m.room.message` (`msgtype: "m.text"`, `body: ""`, plus `m.mentions` for the
+  recipient when `approver_user_id` matches them) while suppressing
+  non-matching approvers, non-pending statuses, and replacement edits. The push
+  gateway still receives the real `io.mindroom.tool_approval` event and
+  content, and threaded approvals increment the thread's unread counts.
+- The `push.everything` debug mode honors all of the same suppressions.
 - Keeps upstream's recipient-based membership-notification target flag. The
   real gateway fixture checks an invite addressed to someone other than its
-  sender, alongside terminal-stream notification behavior.
+  sender, alongside terminal-stream, suppression, and tool-approval
+  notification behavior.
 
 ### 5) `fix(e2ee): reject replacement of existing device identity keys`
 Files:

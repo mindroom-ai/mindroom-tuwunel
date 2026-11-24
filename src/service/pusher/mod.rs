@@ -34,7 +34,7 @@ use ruma::{
 	uint,
 };
 use serde::Deserialize;
-use serde_json::{Value as JsonValue, value::to_raw_value};
+use serde_json::{Value as JsonValue, json, value::to_raw_value};
 use tracing::Level;
 use tuwunel_core::{
 	Err, Result, err, implement,
@@ -110,6 +110,8 @@ struct InReplyTo {
 }
 
 const MINDROOM_STREAM_STATUS_KEY: &str = "io.mindroom.stream_status";
+const MINDROOM_SUPPRESS_PUSH_KEY: &str = "io.mindroom.suppress_push";
+const MINDROOM_TOOL_APPROVAL_EVENT_TYPE: &str = "io.mindroom.tool_approval";
 const MINDROOM_TERMINAL_STREAM_STATUSES: [&str; 4] =
 	["completed", "cancelled", "interrupted", "error"];
 
@@ -154,14 +156,7 @@ pub(super) fn mindroom_terminal_push_content(
 	}
 }
 
-fn is_terminal_mindroom_edit(content: &JsonValue) -> bool {
-	let Some((content, stream_status)) = mindroom_stream_content(content) else {
-		return false;
-	};
-	if !MINDROOM_TERMINAL_STREAM_STATUSES.contains(&stream_status) {
-		return false;
-	}
-
+fn is_replacement_relation(content: &JsonValue) -> bool {
 	content
 		.get("m.relates_to")
 		.and_then(JsonValue::as_object)
@@ -170,46 +165,146 @@ fn is_terminal_mindroom_edit(content: &JsonValue) -> bool {
 		== Some("m.replace")
 }
 
-fn mindroom_stream_content(
-	content: &JsonValue,
-) -> Option<(&serde_json::Map<String, JsonValue>, &str)> {
-	// This is an event-level protocol signal, not an account privilege: senders
-	// may opt their own streamed events into these notification semantics.
-	let content = content.as_object()?;
-	let stream_status = content
-		.get(MINDROOM_STREAM_STATUS_KEY)
-		.and_then(JsonValue::as_str)?;
-	Some((content, stream_status))
+fn is_terminal_mindroom_edit(content: &JsonValue) -> bool {
+	mindroom_stream_status(content)
+		.is_some_and(|status| MINDROOM_TERMINAL_STREAM_STATUSES.contains(&status))
+		&& is_replacement_relation(content)
 }
 
-pub(super) fn mindroom_push_suppressed(pdu: &Raw<AnySyncTimelineEvent>) -> bool {
-	matches!(mindroom_push_evaluation(pdu), MindroomPushEvaluation::Suppress)
+fn mindroom_stream_status(content: &JsonValue) -> Option<&str> {
+	// This is an event-level protocol signal, not an account privilege: senders
+	// may opt their own streamed events into these notification semantics.
+	content
+		.get(MINDROOM_STREAM_STATUS_KEY)
+		.and_then(JsonValue::as_str)
+}
+
+fn has_suppress_push_flag(content: &JsonValue) -> bool {
+	content
+		.get(MINDROOM_SUPPRESS_PUSH_KEY)
+		.and_then(JsonValue::as_bool)
+		== Some(true)
+}
+
+fn is_mindroom_push_suppressed_message(event_type: &str, content: &JsonValue) -> bool {
+	has_suppress_push_flag(content)
+		|| (event_type == "m.room.message"
+			&& content
+				.get("m.new_content")
+				.is_some_and(has_suppress_push_flag))
+}
+
+fn is_mindroom_control_event_type(event_type: &str) -> bool {
+	event_type.starts_with("io.mindroom.") || event_type.starts_with("com.mindroom.")
+}
+
+fn mindroom_tool_approval_push_evaluation(
+	mut event: JsonValue,
+	user: &UserId,
+) -> MindroomPushEvaluation {
+	let Some(content) = event.get("content") else {
+		return MindroomPushEvaluation::Suppress;
+	};
+	if is_replacement_relation(content)
+		|| content.get("status").and_then(JsonValue::as_str) != Some("pending")
+	{
+		return MindroomPushEvaluation::Suppress;
+	}
+
+	let approver = content
+		.get("approver_user_id")
+		.and_then(JsonValue::as_str)
+		.filter(|approver| !approver.is_empty());
+	if let Some(approver) = approver
+		&& approver != user.as_str()
+	{
+		return MindroomPushEvaluation::Suppress;
+	}
+
+	let mention_user = approver == Some(user.as_str());
+	let Some(event_object) = event.as_object_mut() else {
+		return MindroomPushEvaluation::Suppress;
+	};
+	// Normalize only this evaluation copy so ordinary room, mention, mute, and
+	// master push rules decide while the gateway still receives the real event.
+	event_object.insert("type".into(), JsonValue::String("m.room.message".into()));
+	let mut synthetic_content = json!({
+		"msgtype": "m.text",
+		"body": "",
+	});
+	if mention_user {
+		synthetic_content["m.mentions"] = json!({
+			"user_ids": [user.as_str()],
+		});
+	}
+	event_object.insert("content".into(), synthetic_content);
+
+	let Ok(raw_event) = to_raw_value(&event) else {
+		return MindroomPushEvaluation::Suppress;
+	};
+	MindroomPushEvaluation::Normalize(Raw::from_json(raw_event))
+}
+
+pub(super) fn mindroom_push_suppressed(pdu: &Raw<AnySyncTimelineEvent>, user: &UserId) -> bool {
+	matches!(mindroom_push_evaluation(pdu, user), MindroomPushEvaluation::Suppress)
 }
 
 #[cfg(test)]
 fn mindroom_terminal_push_event(
 	pdu: &Raw<AnySyncTimelineEvent>,
+	user: &UserId,
 ) -> Option<Raw<AnySyncTimelineEvent>> {
-	match mindroom_push_evaluation(pdu) {
+	match mindroom_push_evaluation(pdu, user) {
 		| MindroomPushEvaluation::Normalize(event) => Some(event),
 		| MindroomPushEvaluation::Suppress | MindroomPushEvaluation::Unchanged => None,
 	}
 }
 
-fn mindroom_push_evaluation(pdu: &Raw<AnySyncTimelineEvent>) -> MindroomPushEvaluation {
+fn mindroom_push_evaluation(
+	pdu: &Raw<AnySyncTimelineEvent>,
+	user: &UserId,
+) -> MindroomPushEvaluation {
 	let Ok(mut event) = serde_json::to_value(pdu) else {
 		return MindroomPushEvaluation::Unchanged;
 	};
 	let Some(event_type) = event.get("type").and_then(JsonValue::as_str) else {
 		return MindroomPushEvaluation::Unchanged;
 	};
+
+	if event
+		.get("state_key")
+		.is_some_and(|value| !value.is_null())
+	{
+		return if matches!(event_type, "m.room.member" | "m.room.tombstone") {
+			MindroomPushEvaluation::Unchanged
+		} else {
+			MindroomPushEvaluation::Suppress
+		};
+	}
+
+	if event_type == "m.room.redaction" {
+		return MindroomPushEvaluation::Suppress;
+	}
+
+	if event_type == MINDROOM_TOOL_APPROVAL_EVENT_TYPE {
+		return mindroom_tool_approval_push_evaluation(event, user);
+	}
+
+	if is_mindroom_control_event_type(event_type) {
+		return MindroomPushEvaluation::Suppress;
+	}
+
 	if !matches!(event_type, "m.room.message" | "m.room.encrypted") {
 		return MindroomPushEvaluation::Unchanged;
 	}
 	let Some(content) = event.get("content") else {
 		return MindroomPushEvaluation::Unchanged;
 	};
-	let Some((_, stream_status)) = mindroom_stream_content(content) else {
+	if is_mindroom_push_suppressed_message(event_type, content) {
+		return MindroomPushEvaluation::Suppress;
+	}
+
+	let Some(stream_status) = mindroom_stream_status(content) else {
 		return MindroomPushEvaluation::Unchanged;
 	};
 	// Only known terminal states may notify. Future intermediate states fail
@@ -552,7 +647,7 @@ pub async fn get_actions<'a>(
 		related_events,
 	}: Evaluate<'a, '_>,
 ) -> &'a [Action] {
-	let mindroom_push = mindroom_push_evaluation(pdu);
+	let mindroom_push = mindroom_push_evaluation(pdu, user);
 	let pdu = match &mindroom_push {
 		| MindroomPushEvaluation::Suppress => return &[],
 		| MindroomPushEvaluation::Normalize(event) => event,
