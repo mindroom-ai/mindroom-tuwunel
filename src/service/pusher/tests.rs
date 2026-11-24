@@ -1260,7 +1260,12 @@ async fn pending_tool_approval_notifies_addressed_approver_and_respects_rules() 
 	assert_eq!(normalized_json["origin_server_ts"], 42);
 	assert_eq!(
 		normalized_json["content"],
-		json!({"msgtype": "m.text", "body": "", "m.mentions": {"user_ids": [approver.as_str()]}})
+		json!({
+			"msgtype": "m.text",
+			"body": "",
+			"m.mentions": {"user_ids": [approver.as_str()]},
+			"m.relates_to": thread_rel,
+		})
 	);
 	let raw_json: JsonValue = serde_json::from_str(addressed.json().get()).expect("raw json");
 	assert!(
@@ -1350,4 +1355,52 @@ async fn pending_tool_approval_notifies_addressed_approver_and_respects_rules() 
 			"{label}"
 		);
 	}
+}
+
+#[tokio::test]
+async fn pending_tool_approval_respects_thread_mute_override() {
+	let approver = owned_user_id!("@user:example.com");
+	let room_id = owned_room_id!("!room:example.com");
+	let ctx = PushConditionRoomCtx::new(room_id, uint!(3), approver.clone(), "User".into());
+
+	let mut ruleset = ring_rules::server_default(&approver);
+	ruleset
+		.insert(
+			NewPushRule::Override(NewConditionalPushRule::new(
+				"mute-thread-a".into(),
+				vec![PushCondition::EventMatch(EventMatchConditionData::new(
+					r"content.m\.relates_to.event_id".into(),
+					THREAD_ROOT_A.into(),
+				))]
+				.into(),
+				Vec::new().into(),
+			)),
+			None,
+			None,
+		)
+		.expect("insert thread mute override");
+
+	let muted_thread = tool_approval_event(
+		Some("pending"),
+		Some(approver.as_str()),
+		Some(json!({"rel_type": "m.thread", "event_id": THREAD_ROOT_A})),
+	);
+	let active_thread = tool_approval_event(
+		Some("pending"),
+		Some(approver.as_str()),
+		Some(json!({"rel_type": "m.thread", "event_id": THREAD_ROOT_B})),
+	);
+
+	assert!(
+		evaluate_mindroom_actions(&ruleset, &muted_thread, &ctx)
+			.await
+			.is_empty(),
+		"muted thread override must silence pending tool approval"
+	);
+	let actions = evaluate_mindroom_actions(&ruleset, &active_thread, &ctx).await;
+	assert!(
+		actions.iter().any(Action::should_notify),
+		"other thread must still notify addressed approver"
+	);
+	assert!(has_highlight(actions));
 }
