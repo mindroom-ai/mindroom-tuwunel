@@ -18,8 +18,8 @@ use tuwunel_database::{
 };
 
 use super::{
-	ExtractRelatesTo, mindroom_push_suppressed, mindroom_terminal_push_content,
-	mindroom_terminal_push_event,
+	ExtractRelatesTo, MindroomPushEvaluation, mindroom_push_evaluation, mindroom_push_suppressed,
+	mindroom_terminal_push_content, mindroom_terminal_push_event,
 	ring_rules::{
 		self, MAX_RING_ROOM_MEMBERS, RING_ENCRYPTED_RULE_ID, RING_RULE_ID, RING_SOUND_TWEAK,
 		RTC_NOTIFICATION_EVENT_TYPE, ring_permitted,
@@ -223,7 +223,7 @@ fn unrelated_message_resolves_no_relation() {
 #[test]
 fn terminal_mindroom_edit_is_normalized_for_push_rules() {
 	let event = stream_event("@mindroom_helper:example.com", "completed", "m.text");
-	let normalized = mindroom_terminal_push_event(&event).expect("terminal event");
+	let normalized = mindroom_terminal_push_event(&event, user()).expect("terminal event");
 	let value: JsonValue = serde_json::from_str(normalized.json().get()).expect("event json");
 	let content = value["content"]
 		.as_object()
@@ -238,7 +238,7 @@ fn terminal_mindroom_edit_is_normalized_for_push_rules() {
 fn nonterminal_stream_edit_is_not_normalized() {
 	let streaming = stream_event("@mindroom_helper:example.com", "streaming", "m.notice");
 
-	assert!(mindroom_terminal_push_event(&streaming).is_none());
+	assert!(mindroom_terminal_push_event(&streaming, user()).is_none());
 }
 
 #[test]
@@ -246,14 +246,15 @@ fn stream_protocol_is_sender_agnostic() {
 	let remote = stream_event("@mindroom_helper:remote.example", "completed", "m.text");
 	let ordinary_user = stream_event("@alice:example.com", "completed", "m.text");
 
-	assert!(mindroom_terminal_push_event(&remote).is_some());
-	assert!(mindroom_terminal_push_event(&ordinary_user).is_some());
+	assert!(mindroom_terminal_push_event(&remote, user()).is_some());
+	assert!(mindroom_terminal_push_event(&ordinary_user, user()).is_some());
 }
 
 #[test]
 fn terminal_encrypted_edit_removes_only_the_exposed_relation() {
 	let event = encrypted_stream_event("@mindroom_helper:example.com", "completed", true);
-	let normalized = mindroom_terminal_push_event(&event).expect("terminal encrypted event");
+	let normalized =
+		mindroom_terminal_push_event(&event, user()).expect("terminal encrypted event");
 	let value: JsonValue = serde_json::from_str(normalized.json().get()).expect("event json");
 	let content = value["content"]
 		.as_object()
@@ -302,10 +303,10 @@ fn nonterminal_stream_events_are_suppressed_for_any_sender() {
 	let future_intermediate =
 		encrypted_stream_event("@mindroom_helper:example.com", "paused", true);
 
-	assert!(mindroom_push_suppressed(&encrypted_pending));
-	assert!(mindroom_push_suppressed(&encrypted_streaming));
-	assert!(mindroom_push_suppressed(&remote_pending));
-	assert!(mindroom_push_suppressed(&future_intermediate));
+	assert!(mindroom_push_suppressed(&encrypted_pending, user()));
+	assert!(mindroom_push_suppressed(&encrypted_streaming, user()));
+	assert!(mindroom_push_suppressed(&remote_pending, user()));
+	assert!(mindroom_push_suppressed(&future_intermediate, user()));
 }
 
 #[tokio::test]
@@ -326,7 +327,8 @@ async fn terminal_mindroom_edit_uses_normal_message_push_rule() {
 			.await
 			.is_empty()
 	);
-	let normalized = mindroom_terminal_push_event(&event).expect("terminal event");
+	let normalized =
+		mindroom_terminal_push_event(&event, &context.user_id).expect("terminal event");
 	assert!(
 		ruleset
 			.get_actions(&normalized, &context)
@@ -354,7 +356,8 @@ async fn terminal_encrypted_edit_uses_encrypted_message_push_rule() {
 			.await
 			.is_empty()
 	);
-	let normalized = mindroom_terminal_push_event(&event).expect("terminal encrypted event");
+	let normalized =
+		mindroom_terminal_push_event(&event, &context.user_id).expect("terminal encrypted event");
 	assert!(
 		ruleset
 			.get_actions(&normalized, &context)
@@ -958,4 +961,446 @@ fn merged_adds_missing_ring_rules_and_preserves_user_overrides_and_state() {
 	assert!(enc_actions.iter().any(|action| {
 		matches!(action, Action::SetTweak(Tweak::Sound(SoundTweakValue::Default)))
 	}));
+}
+
+async fn evaluate_mindroom_actions<'a>(
+	ruleset: &'a Ruleset,
+	event: &Raw<AnySyncTimelineEvent>,
+	ctx: &PushConditionRoomCtx,
+) -> &'a [Action] {
+	match mindroom_push_evaluation(event, &ctx.user_id) {
+		| MindroomPushEvaluation::Suppress => &[],
+		| MindroomPushEvaluation::Normalize(normalized) =>
+			ruleset.get_actions(&normalized, ctx).await,
+		| MindroomPushEvaluation::Unchanged => ruleset.get_actions(event, ctx).await,
+	}
+}
+
+fn raw_event(value: JsonValue) -> Raw<AnySyncTimelineEvent> {
+	from_value(value).expect("valid timeline event")
+}
+
+fn state_event(
+	event_type: &str,
+	state_key: &str,
+	content: &JsonValue,
+) -> Raw<AnySyncTimelineEvent> {
+	raw_event(json!({
+		"content": content, "event_id": "$state", "origin_server_ts": 1,
+		"sender": "@alice:example.com", "state_key": state_key, "type": event_type,
+	}))
+}
+
+fn tool_approval_event(
+	status: Option<&str>,
+	approver: Option<&str>,
+	relates_to: Option<JsonValue>,
+) -> Raw<AnySyncTimelineEvent> {
+	let mut content = json!({ "tool_name": "run_command" });
+	let obj = content.as_object_mut().expect("content object");
+	if let Some(status) = status {
+		obj.insert("status".into(), json!(status));
+	}
+	if let Some(approver) = approver {
+		obj.insert("approver_user_id".into(), json!(approver));
+	}
+	if let Some(relates_to) = relates_to {
+		obj.insert("m.relates_to".into(), relates_to);
+	}
+	raw_event(json!({
+		"content": content, "event_id": "$approval", "origin_server_ts": 42,
+		"room_id": ROOM, "sender": "@mindroom_helper:example.com",
+		"type": "io.mindroom.tool_approval",
+	}))
+}
+
+fn room_rule_ruleset(user_id: &UserId, room_id: &RoomId, actions: Vec<Action>) -> Ruleset {
+	let mut ruleset = ring_rules::server_default(user_id);
+	ruleset
+		.insert(
+			NewPushRule::Room(NewSimplePushRule::new(room_id.to_owned(), actions.into())),
+			None,
+			None,
+		)
+		.expect("insert room rule");
+	ruleset
+}
+
+fn muted_room_ruleset(user_id: &UserId, room_id: &RoomId) -> Ruleset {
+	let mut ruleset = ring_rules::server_default(user_id);
+	ruleset
+		.insert(
+			NewPushRule::Override(NewConditionalPushRule::new(
+				room_id.as_str().into(),
+				vec![PushCondition::EventMatch(EventMatchConditionData::new(
+					"room_id".into(),
+					room_id.to_string(),
+				))]
+				.into(),
+				Vec::new().into(),
+			)),
+			None,
+			None,
+		)
+		.expect("insert room mute override");
+	ruleset
+}
+
+#[tokio::test]
+async fn room_all_messages_suppresses_non_notifiable_state_redactions_and_mindroom_events() {
+	let recipient = owned_user_id!("@bob:example.com");
+	let room_id = owned_room_id!("!room:example.com");
+	let ruleset = room_rule_ruleset(&recipient, &room_id, vec![
+		Action::Notify,
+		Action::SetTweak(Tweak::Sound(SoundTweakValue::Default)),
+	]);
+	let ctx = PushConditionRoomCtx::new(room_id, uint!(2), recipient.clone(), "Bob".into());
+
+	let suppressed = [
+		("active_runs", state_event("io.mindroom.active_runs", "", &json!({}))),
+		("background_jobs", state_event("io.mindroom.background_jobs", "", &json!({}))),
+		(
+			"scheduled.task",
+			state_event("com.mindroom.scheduled.task", "task-1", &json!({})),
+		),
+		("thread.tags", state_event("com.mindroom.thread.tags", "$root", &json!({}))),
+		("m.room.name", state_event("m.room.name", "", &json!({"name": "Renamed"}))),
+		(
+			"m.room.redaction",
+			raw_event(json!({
+				"content": {}, "event_id": "$redact", "origin_server_ts": 1,
+				"redacts": "$stop_reaction", "sender": "@alice:example.com",
+				"type": "m.room.redaction",
+			})),
+		),
+		(
+			"tool_approval_response",
+			raw_event(json!({
+				"content": {"decision": "approve"}, "event_id": "$resp",
+				"origin_server_ts": 1, "sender": "@alice:example.com",
+				"type": "io.mindroom.tool_approval_response",
+			})),
+		),
+		(
+			"state tool_approval",
+			state_event(
+				"io.mindroom.tool_approval",
+				"",
+				&json!({"status": "pending", "approver_user_id": "@bob:example.com"}),
+			),
+		),
+	];
+	for (label, event) in suppressed {
+		assert!(
+			ruleset
+				.get_actions(&event, &ctx)
+				.await
+				.iter()
+				.any(Action::should_notify),
+			"{label} would notify under RuleKind::Room without suppression"
+		);
+		assert!(mindroom_push_suppressed(&event, &recipient), "{label} must suppress");
+		assert!(
+			evaluate_mindroom_actions(&ruleset, &event, &ctx)
+				.await
+				.is_empty(),
+			"{label}"
+		);
+	}
+
+	let invite =
+		state_event("m.room.member", recipient.as_str(), &json!({"membership": "invite"}));
+	let join_other =
+		state_event("m.room.member", "@carol:example.com", &json!({"membership": "join"}));
+	let tombstone = state_event(
+		"m.room.tombstone",
+		"",
+		&json!({"body": "Upgraded", "replacement_room": "!new:example.com"}),
+	);
+	let message = raw_event(json!({
+		"content": {"msgtype": "m.text", "body": "Hello"}, "event_id": "$msg",
+		"origin_server_ts": 1, "sender": "@alice:example.com", "type": "m.room.message",
+	}));
+	let ring = clear_ring_event("@alice:example.com", "$ring", "ring", Some("$mem"));
+
+	for (label, event) in [
+		("invite", &invite),
+		("tombstone", &tombstone),
+		("message", &message),
+		("rtc ring", &ring),
+	] {
+		assert!(!mindroom_push_suppressed(event, &recipient), "{label}");
+		assert!(
+			evaluate_mindroom_actions(&ruleset, event, &ctx)
+				.await
+				.iter()
+				.any(Action::should_notify),
+			"{label} must still notify"
+		);
+	}
+	assert!(has_ring_sound(evaluate_mindroom_actions(&ruleset, &ring, &ctx).await));
+	assert!(!mindroom_push_suppressed(&join_other, &recipient));
+	assert!(
+		evaluate_mindroom_actions(&ruleset, &join_other, &ctx)
+			.await
+			.is_empty()
+	);
+}
+
+#[tokio::test]
+async fn suppress_push_flag_suppresses_clear_and_encrypted_messages_and_terminal_edits() {
+	let recipient = owned_user_id!("@user:example.com");
+	let ruleset = Ruleset::server_default(&recipient);
+	let ctx = PushConditionRoomCtx::new(
+		owned_room_id!("!room:example.com"),
+		uint!(3),
+		recipient.clone(),
+		"User".into(),
+	);
+	let clear_new = |flag: Option<bool>| {
+		let mut content = json!({"msgtype": "m.text", "body": "Working"});
+		if let Some(flag) = flag {
+			content["io.mindroom.suppress_push"] = json!(flag);
+		}
+		raw_event(json!({
+			"content": content, "event_id": "$msg", "origin_server_ts": 1,
+			"sender": "@mindroom_helper:example.com", "type": "m.room.message",
+		}))
+	};
+	let clear_edit = |outer: Option<bool>, inner: Option<bool>| {
+		let mut value: JsonValue = serde_json::from_str(
+			stream_event("@mindroom_helper:example.com", "completed", "m.text")
+				.json()
+				.get(),
+		)
+		.expect("stream json");
+		if let Some(flag) = outer {
+			value["content"]["io.mindroom.suppress_push"] = json!(flag);
+		}
+		if let Some(flag) = inner {
+			value["content"]["m.new_content"]["io.mindroom.suppress_push"] = json!(flag);
+		}
+		raw_event(value)
+	};
+	let encrypted = |edit: bool, flag: Option<bool>| {
+		let mut value: JsonValue = serde_json::from_str(
+			encrypted_stream_event("@mindroom_helper:example.com", "completed", edit)
+				.json()
+				.get(),
+		)
+		.expect("encrypted json");
+		if !edit {
+			value["content"]
+				.as_object_mut()
+				.expect("obj")
+				.remove("io.mindroom.stream_status");
+		}
+		if let Some(flag) = flag {
+			value["content"]["io.mindroom.suppress_push"] = json!(flag);
+		}
+		raw_event(value)
+	};
+
+	for (label, event) in [
+		("clear new", clear_new(Some(true))),
+		("clear edit outer", clear_edit(Some(true), None)),
+		("clear edit inner", clear_edit(None, Some(true))),
+		("encrypted new", encrypted(false, Some(true))),
+		("encrypted edit", encrypted(true, Some(true))),
+	] {
+		assert!(mindroom_push_suppressed(&event, &recipient), "{label}");
+		assert!(
+			evaluate_mindroom_actions(&ruleset, &event, &ctx)
+				.await
+				.is_empty(),
+			"{label}"
+		);
+	}
+	for (label, event) in [
+		("clear new false", clear_new(Some(false))),
+		("clear new absent", clear_new(None)),
+		("clear edit false", clear_edit(Some(false), Some(false))),
+		("clear edit absent", clear_edit(None, None)),
+		("encrypted new false", encrypted(false, Some(false))),
+		("encrypted new absent", encrypted(false, None)),
+		("encrypted edit false", encrypted(true, Some(false))),
+		("encrypted edit absent", encrypted(true, None)),
+	] {
+		assert!(!mindroom_push_suppressed(&event, &recipient), "{label}");
+		assert!(
+			evaluate_mindroom_actions(&ruleset, &event, &ctx)
+				.await
+				.iter()
+				.any(Action::should_notify),
+			"{label} must notify"
+		);
+	}
+}
+
+#[tokio::test]
+async fn pending_tool_approval_notifies_addressed_approver_and_respects_rules() {
+	let approver = owned_user_id!("@user:example.com");
+	let other = owned_user_id!("@carol:example.com");
+	let room_id = owned_room_id!("!room:example.com");
+	let ctx =
+		PushConditionRoomCtx::new(room_id.clone(), uint!(3), approver.clone(), "User".into());
+	let other_ctx =
+		PushConditionRoomCtx::new(room_id.clone(), uint!(3), other.clone(), "Carol".into());
+	let thread_rel = json!({"rel_type": "m.thread", "event_id": THREAD_ROOT_A});
+	let addressed =
+		tool_approval_event(Some("pending"), Some(approver.as_str()), Some(thread_rel.clone()));
+
+	let normalized =
+		mindroom_terminal_push_event(&addressed, &approver).expect("normalized approval");
+	let normalized_json: JsonValue = serde_json::from_str(normalized.json().get()).expect("json");
+	assert_eq!(normalized_json["type"], "m.room.message");
+	assert_eq!(normalized_json["sender"], "@mindroom_helper:example.com");
+	assert_eq!(normalized_json["room_id"], ROOM);
+	assert_eq!(normalized_json["event_id"], "$approval");
+	assert_eq!(normalized_json["origin_server_ts"], 42);
+	assert_eq!(
+		normalized_json["content"],
+		json!({
+			"msgtype": "m.text",
+			"body": "",
+			"m.mentions": {"user_ids": [approver.as_str()]},
+			"m.relates_to": thread_rel,
+		})
+	);
+	let raw_json: JsonValue = serde_json::from_str(addressed.json().get()).expect("raw json");
+	assert!(
+		mindroom_terminal_push_content(
+			&TimelineEventType::from("io.mindroom.tool_approval"),
+			&raw_json["content"],
+		)
+		.is_none()
+	);
+
+	let default_rules = ring_rules::server_default(&approver);
+	let mentions_only = room_rule_ruleset(&approver, &room_id, Vec::new());
+	let all_messages = room_rule_ruleset(&approver, &room_id, vec![
+		Action::Notify,
+		Action::SetTweak(Tweak::Sound(SoundTweakValue::Default)),
+	]);
+	let muted = muted_room_ruleset(&approver, &room_id);
+	let mut master = ring_rules::server_default(&approver);
+	master
+		.set_enabled(RuleKind::Override, PredefinedOverrideRuleId::Master.as_str(), true)
+		.expect("enable master");
+
+	for (label, ruleset) in [
+		("default", &default_rules),
+		("mentions-only", &mentions_only),
+		("all-messages", &all_messages),
+	] {
+		let actions = evaluate_mindroom_actions(ruleset, &addressed, &ctx).await;
+		assert!(actions.iter().any(Action::should_notify), "{label}");
+		assert!(has_highlight(actions), "{label}");
+	}
+	assert!(
+		evaluate_mindroom_actions(&muted, &addressed, &ctx)
+			.await
+			.is_empty()
+	);
+	assert!(
+		evaluate_mindroom_actions(&master, &addressed, &ctx)
+			.await
+			.is_empty()
+	);
+	assert!(mindroom_push_suppressed(&addressed, &other));
+	assert!(
+		evaluate_mindroom_actions(&ring_rules::server_default(&other), &addressed, &other_ctx)
+			.await
+			.is_empty()
+	);
+
+	for unaddressed in [
+		tool_approval_event(Some("pending"), None, Some(thread_rel.clone())),
+		tool_approval_event(Some("pending"), Some(""), Some(thread_rel)),
+	] {
+		let actions = evaluate_mindroom_actions(&default_rules, &unaddressed, &ctx).await;
+		assert!(actions.iter().any(Action::should_notify));
+		assert!(!has_highlight(actions));
+		assert!(
+			evaluate_mindroom_actions(&mentions_only, &unaddressed, &ctx)
+				.await
+				.is_empty()
+		);
+		assert!(
+			evaluate_mindroom_actions(&muted, &unaddressed, &ctx)
+				.await
+				.is_empty()
+		);
+	}
+
+	let replace = json!({"rel_type": "m.replace", "event_id": "$approval"});
+	for (label, event) in [
+		("approved", tool_approval_event(Some("approved"), Some(approver.as_str()), None)),
+		("denied", tool_approval_event(Some("denied"), Some(approver.as_str()), None)),
+		("missing status", tool_approval_event(None, Some(approver.as_str()), None)),
+		(
+			"replace approved",
+			tool_approval_event(Some("approved"), Some(approver.as_str()), Some(replace.clone())),
+		),
+		(
+			"replace pending",
+			tool_approval_event(Some("pending"), Some(approver.as_str()), Some(replace)),
+		),
+	] {
+		assert!(mindroom_push_suppressed(&event, &approver), "{label}");
+		assert!(
+			evaluate_mindroom_actions(&default_rules, &event, &ctx)
+				.await
+				.is_empty(),
+			"{label}"
+		);
+	}
+}
+
+#[tokio::test]
+async fn pending_tool_approval_respects_thread_mute_override() {
+	let approver = owned_user_id!("@user:example.com");
+	let room_id = owned_room_id!("!room:example.com");
+	let ctx = PushConditionRoomCtx::new(room_id, uint!(3), approver.clone(), "User".into());
+
+	let mut ruleset = ring_rules::server_default(&approver);
+	ruleset
+		.insert(
+			NewPushRule::Override(NewConditionalPushRule::new(
+				"mute-thread-a".into(),
+				vec![PushCondition::EventMatch(EventMatchConditionData::new(
+					r"content.m\.relates_to.event_id".into(),
+					THREAD_ROOT_A.into(),
+				))]
+				.into(),
+				Vec::new().into(),
+			)),
+			None,
+			None,
+		)
+		.expect("insert thread mute override");
+
+	let muted_thread = tool_approval_event(
+		Some("pending"),
+		Some(approver.as_str()),
+		Some(json!({"rel_type": "m.thread", "event_id": THREAD_ROOT_A})),
+	);
+	let active_thread = tool_approval_event(
+		Some("pending"),
+		Some(approver.as_str()),
+		Some(json!({"rel_type": "m.thread", "event_id": THREAD_ROOT_B})),
+	);
+
+	assert!(
+		evaluate_mindroom_actions(&ruleset, &muted_thread, &ctx)
+			.await
+			.is_empty(),
+		"muted thread override must silence pending tool approval"
+	);
+	let actions = evaluate_mindroom_actions(&ruleset, &active_thread, &ctx).await;
+	assert!(
+		actions.iter().any(Action::should_notify),
+		"other thread must still notify addressed approver"
+	);
+	assert!(has_highlight(actions));
 }
