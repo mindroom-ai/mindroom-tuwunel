@@ -41,7 +41,9 @@ where
 	let (power_levels, related_events) = join(power_levels, self.related_events(event)).await;
 
 	let serialized = event.to_format();
-	if self.services.config.push.everything && super::mindroom_push_suppressed(&serialized) {
+	if self.services.config.push.everything
+		&& super::mindroom_push_suppressed(&serialized, user_id)
+	{
 		return Ok(());
 	}
 	let actions = self
