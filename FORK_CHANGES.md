@@ -2059,7 +2059,7 @@ threads with their titles and real last replies without opening each one:
 
 - `io.mindroom.title`: the newest title event in the thread.
 - `io.mindroom.latest_reply`: the newest direct thread event that is not a
-  title.
+  title or a folded anchored secret-request notice.
 
 Both are full client events without `room_id`, like `latest_event`. With
 `rooms.relations.bundle_edits` on, each carries its newest valid `m.replace`
@@ -2078,6 +2078,18 @@ Every other direct thread event is a conversational reply, including an
 `m.text` with a marker and a notice whose marker is `false`, `0`, `""` or
 `null`. A marker inside an edit's `m.new_content` never makes a title:
 clients read the title only from `io.mindroom.title`.
+
+`io.mindroom.latest_reply` also skips folded anchored
+`io.mindroom.secret_request` notices sent as unredacted `m.room.message`
+events by same-homeserver `mindroom_*` agents (ASCII case-insensitive). An
+event qualifies only if its original content already carries an
+`io.mindroom.secret_request` object and its effective content (from the newest
+requester-visible valid `m.replace` edit's `m.new_content` object, else that
+edit's top-level content if it carries `io.mindroom.secret_request`, else the
+original content) has terminal `status` (`saved`, `declined`, or `expired`)
+with non-empty `response_event_id` and `tool_call_id` strings within 512
+UTF-16 code units. `latest_event`, `count`, `current_user_participated`, and
+`io.mindroom.title` are unchanged.
 
 Reads skip redacted, ignored-user, forbidden-server and erased events and
 enforce the requester's history visibility for each candidate and each edit.

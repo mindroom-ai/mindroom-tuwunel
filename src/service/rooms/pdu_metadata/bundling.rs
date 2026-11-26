@@ -640,15 +640,18 @@ pub async fn redacted_root(
 
 const TITLE: &str = "io.mindroom.title";
 const REPLY: &str = "io.mindroom.latest_reply";
+const SECRET_REQUEST: &str = "io.mindroom.secret_request";
+const MAX_SECRET_REQUEST_ID_LEN: usize = 512;
 
 /// Thread relation rows, and edit rows per preview, read for the previews.
 const PREVIEW_ROWS: usize = 50;
 
 /// MindRoom previews beside the standard thread summary: the newest title (an
 /// `m.notice` thread event with a truthy `io.mindroom.thread_summary`) and
-/// the newest other thread event, each with its newest valid edit the
-/// requester may see. Unencrypted rooms only; a field outside the window is
-/// omitted.
+/// the newest other conversational thread event (skipping folded anchored
+/// `io.mindroom.secret_request` notices from same-homeserver `mindroom_*`
+/// agents), each with its newest valid edit the requester may see. Unencrypted
+/// rooms only; a field outside the window is omitted.
 #[implement(Service)]
 async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result {
 	let services = &self.services;
@@ -703,23 +706,29 @@ async fn bundle_thread_previews(&self, user: &UserId, root: &mut Pdu) -> Result 
 			{
 				continue;
 			}
+			let secret_candidate = !title && is_secret_request_candidate(user, &child);
+			let edit = if config.rooms.relations.bundle_edits || secret_candidate {
+				let edits = self
+					.replacement_children(&child, PduId { shortroomid, count }, PREVIEW_ROWS)
+					.filter_map(async |edit| {
+						self.preview_visible(user, &edit)
+							.await
+							.then_some(edit)
+					});
+				pin_mut!(edits);
+				edits.next().await
+			} else {
+				None
+			};
+			if secret_candidate && is_folded_secret_request(user, &child, edit.as_ref()) {
+				continue;
+			}
 			child.remove_aggregations();
-			if config.rooms.relations.bundle_edits {
-				let edit = {
-					let edits = self
-						.replacement_children(&child, PduId { shortroomid, count }, PREVIEW_ROWS)
-						.filter_map(async |edit| {
-							self.preview_visible(user, &edit)
-								.await
-								.then_some(edit)
-						});
-					pin_mut!(edits);
-					edits.next().await
-				};
-				if let Some(edit) = edit {
-					let edit = edit.served_unfolded_to(Some(user));
-					child.set_replacement_bundle(&edit.into_format())?;
-				}
+			if config.rooms.relations.bundle_edits
+				&& let Some(edit) = edit
+			{
+				let edit = edit.served_unfolded_to(Some(user));
+				child.set_replacement_bundle(&edit.into_format())?;
 			}
 			let event: Raw<AnySyncMessageLikeEvent> = child.into_format();
 			thread.insert(field.to_owned(), serde_json::to_value(event)?);
@@ -740,8 +749,82 @@ async fn preview_visible(&self, user: &UserId, event: &Pdu) -> bool {
 	access.user_can_see_event(user, event).await && !access.erased_for(user, event).await
 }
 
+fn is_mindroom_agent_for_viewer(sender: &UserId, viewer: &UserId) -> bool {
+	sender.server_name() == viewer.server_name()
+		&& sender
+			.localpart()
+			.as_bytes()
+			.get(..9)
+			.is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"mindroom_"))
+}
+
+fn is_secret_request_id(value: &Value) -> bool {
+	let Some(id) = value.as_str() else {
+		return false;
+	};
+	!id.is_empty() && id.encode_utf16().count() <= MAX_SECRET_REQUEST_ID_LEN
+}
+
+fn is_secret_request_candidate(user: &UserId, child: &Pdu) -> bool {
+	if *child.kind() != TimelineEventType::RoomMessage
+		|| child.is_redacted()
+		|| !is_mindroom_agent_for_viewer(child.sender(), user)
+	{
+		return false;
+	}
+	let Ok(content) = child.get_content::<Value>() else {
+		return false;
+	};
+	content
+		.get(SECRET_REQUEST)
+		.is_some_and(Value::is_object)
+}
+
+fn is_folded_secret_request(user: &UserId, child: &Pdu, edit: Option<&Pdu>) -> bool {
+	if !is_secret_request_candidate(user, child) {
+		return false;
+	}
+	let Ok(original) = child.get_content::<Value>() else {
+		return false;
+	};
+	let edit_content = edit
+		.filter(|edit| !edit.is_redacted())
+		.and_then(|edit| edit.get_content::<Value>().ok());
+	let effective = edit_content
+		.as_ref()
+		.and_then(|content| {
+			if let Some(new_content) = content.get("m.new_content")
+				&& new_content.is_object()
+			{
+				return Some(new_content);
+			}
+			content
+				.get(SECRET_REQUEST)
+				.is_some()
+				.then_some(content)
+		})
+		.unwrap_or(&original);
+	let Some(secret_request) = effective
+		.get(SECRET_REQUEST)
+		.and_then(Value::as_object)
+	else {
+		return false;
+	};
+	secret_request
+		.get("status")
+		.and_then(Value::as_str)
+		.is_some_and(|status| matches!(status, "saved" | "declined" | "expired"))
+		&& secret_request
+			.get("response_event_id")
+			.is_some_and(is_secret_request_id)
+		&& secret_request
+			.get("tool_call_id")
+			.is_some_and(is_secret_request_id)
+}
+
 #[cfg(test)]
 mod tests {
+	use ruma::user_id;
 	use serde_json::{from_str, from_value, json};
 
 	use super::*;
@@ -805,6 +888,256 @@ mod tests {
 			"room_id": "!room:example.com",
 			"sender": "@alice:example.com",
 			"state_key": "@alice:example.com",
+			"prev_events": ["$prev:example.com"],
+			"auth_events": ["$auth:example.com"],
+			"origin_server_ts": 1_838_188_000,
+			"depth": 12,
+			"hashes": { "sha256": "thishashcoversallfieldsincasethisisredacted" },
+			"unsigned": unsigned,
+		}))
+		.expect("test fixture should deserialize as a valid PDU")
+	}
+
+	#[test]
+	fn folded_secret_request_accepts_terminal_edits_and_case_insensitive_agent() {
+		let viewer = user_id!("@alice:example.com");
+		let agent = "@mindroom_helper:example.com";
+		let empty = json!({});
+		let pending_payload = secret_payload("pending", "$resp:example.com", "call-1");
+		let pending = message_event(
+			agent,
+			"m.room.message",
+			&json!({
+				"msgtype": "m.notice",
+				"body": "Secret requested",
+				"io.mindroom.secret_request": pending_payload,
+			}),
+			&empty,
+		);
+
+		for status in ["saved", "declined", "expired"] {
+			let payload = secret_payload(status, "$resp:example.com", "call-1");
+			let edit = message_event(
+				agent,
+				"m.room.message",
+				&json!({
+					"msgtype": "m.notice",
+					"body": "* Secret updated",
+					"m.new_content": {
+						"msgtype": "m.notice",
+						"body": "Secret updated",
+						"io.mindroom.secret_request": payload,
+					},
+				}),
+				&empty,
+			);
+			assert!(
+				is_folded_secret_request(viewer, &pending, Some(&edit)),
+				"{status} edit via m.new_content should fold"
+			);
+		}
+
+		let saved_payload = secret_payload("saved", "$resp:example.com", "call-1");
+		let direct_edit = message_event(
+			agent,
+			"m.room.message",
+			&json!({
+				"msgtype": "m.notice",
+				"body": "* Secret saved",
+				"io.mindroom.secret_request": saved_payload,
+			}),
+			&empty,
+		);
+		assert!(
+			is_folded_secret_request(viewer, &pending, Some(&direct_edit)),
+			"top-level edit fallback should fold when m.new_content is absent"
+		);
+
+		let max_ascii = "$".repeat(512);
+		let max_emoji = "\u{1F600}".repeat(256);
+		let boundary_payload = secret_payload("saved", &max_ascii, &max_emoji);
+		let saved_original = message_event(
+			"@MindRoom_Helper:example.com",
+			"m.room.message",
+			&json!({
+				"msgtype": "m.notice",
+				"body": "Secret saved",
+				"io.mindroom.secret_request": boundary_payload,
+			}),
+			&empty,
+		);
+		assert!(
+			is_folded_secret_request(viewer, &saved_original, None),
+			"uppercase MindRoom_ prefix and 512 UTF-16 anchor IDs should fold"
+		);
+
+		let unrelated_edit = message_event(
+			"@MindRoom_Helper:example.com",
+			"m.room.message",
+			&json!({ "msgtype": "m.notice", "body": "* plain fallback" }),
+			&empty,
+		);
+		assert!(
+			is_folded_secret_request(viewer, &saved_original, Some(&unrelated_edit)),
+			"edit without secret request fields should fall back to original"
+		);
+	}
+
+	#[test]
+	fn folded_secret_request_rejects_pending_and_invalid_anchors() {
+		let viewer = user_id!("@alice:example.com");
+		let agent = "@mindroom_helper:example.com";
+		let empty = json!({});
+		let over_ascii = secret_payload("saved", &"a".repeat(513), "call-1");
+		let over_emoji_id = "\u{1F600}".repeat(257);
+		let over_emoji = secret_payload("saved", "$resp:example.com", &over_emoji_id);
+		let cases = [
+			(
+				"pending with past expires_at",
+				json!({
+					"status": "pending",
+					"response_event_id": "$resp:example.com",
+					"tool_call_id": "call-1",
+					"expires_at": 1,
+				}),
+			),
+			(
+				"missing response_event_id",
+				json!({
+					"status": "saved",
+					"tool_call_id": "call-1",
+				}),
+			),
+			(
+				"missing tool_call_id",
+				json!({
+					"status": "saved",
+					"response_event_id": "$resp:example.com",
+				}),
+			),
+			(
+				"non-string anchor id",
+				json!({
+					"status": "saved",
+					"response_event_id": 42,
+					"tool_call_id": "call-1",
+				}),
+			),
+			("empty response_event_id", secret_payload("saved", "", "call-1")),
+			("empty tool_call_id", secret_payload("saved", "$resp:example.com", "")),
+			("ascii over 512 UTF-16", over_ascii),
+			("emoji over 512 UTF-16", over_emoji),
+		];
+
+		for (label, payload) in cases {
+			let child = message_event(
+				agent,
+				"m.room.message",
+				&json!({
+					"msgtype": "m.notice",
+					"body": "Secret notice",
+					"io.mindroom.secret_request": payload,
+				}),
+				&empty,
+			);
+			assert!(!is_folded_secret_request(viewer, &child, None), "{label} must not fold");
+		}
+	}
+
+	#[test]
+	fn folded_secret_request_rejects_untrusted_senders_spoofs_and_non_messages() {
+		let viewer = user_id!("@alice:example.com");
+		let agent = "@mindroom_helper:example.com";
+		let empty = json!({});
+		let payload = secret_payload("saved", "$resp:example.com", "call-1");
+		let saved_content = json!({
+			"msgtype": "m.notice",
+			"body": "Secret saved",
+			"io.mindroom.secret_request": payload,
+		});
+
+		for sender in [
+			"@mindroom_helper:other.example",
+			"@alice:example.com",
+			"@mindroom:example.com",
+		] {
+			let event = message_event(sender, "m.room.message", &saved_content, &empty);
+			assert!(
+				!is_folded_secret_request(viewer, &event, None),
+				"untrusted sender {sender} must not fold"
+			);
+		}
+
+		let plain_original = message_event(
+			agent,
+			"m.room.message",
+			&json!({ "msgtype": "m.text", "body": "ordinary reply" }),
+			&empty,
+		);
+		let spoof_edit = message_event(
+			agent,
+			"m.room.message",
+			&json!({
+				"msgtype": "m.text",
+				"body": "* spoofed",
+				"m.new_content": saved_content,
+			}),
+			&empty,
+		);
+		assert!(
+			!is_folded_secret_request(viewer, &plain_original, Some(&spoof_edit)),
+			"edit-only spoof without original io.mindroom.secret_request must not fold"
+		);
+
+		let saved_original = message_event(agent, "m.room.message", &saved_content, &empty);
+		let removing_edit = message_event(
+			agent,
+			"m.room.message",
+			&json!({
+				"msgtype": "m.notice",
+				"body": "* replaced",
+				"m.new_content": { "msgtype": "m.notice", "body": "replaced" },
+			}),
+			&empty,
+		);
+		assert!(
+			!is_folded_secret_request(viewer, &saved_original, Some(&removing_edit)),
+			"edit removing io.mindroom.secret_request must not fold"
+		);
+
+		let redacted = message_event(
+			agent,
+			"m.room.message",
+			&saved_content,
+			&json!({ "redacted_because": { "event_id": "$redaction:example.com" } }),
+		);
+		assert!(
+			!is_folded_secret_request(viewer, &redacted, None),
+			"redacted event must not fold"
+		);
+
+		let non_message = message_event(agent, "io.mindroom.notice", &saved_content, &empty);
+		assert!(
+			!is_folded_secret_request(viewer, &non_message, None),
+			"non-m.room.message event must not fold"
+		);
+	}
+
+	fn secret_payload(status: &str, response_event_id: &str, tool_call_id: &str) -> Value {
+		json!({
+			"status": status,
+			"response_event_id": response_event_id,
+			"tool_call_id": tool_call_id,
+		})
+	}
+
+	fn message_event(sender: &str, kind: &str, content: &Value, unsigned: &Value) -> Pdu {
+		from_value(json!({
+			"type": kind,
+			"content": content,
+			"event_id": "$message:example.com",
+			"room_id": "!room:example.com",
+			"sender": sender,
 			"prev_events": ["$prev:example.com"],
 			"auth_events": ["$auth:example.com"],
 			"origin_server_ts": 1_838_188_000,

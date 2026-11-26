@@ -21,6 +21,7 @@ mod tests {
 
 	const OWNER: &str = "preview-owner-token-01234567890123456789";
 	const MEMBER: &str = "preview-member-token-0123456789012345678";
+	const AGENT: &str = "preview-agent-token-01234567890123456789";
 
 	#[test]
 	fn thread_previews() -> Result {
@@ -75,6 +76,7 @@ mod tests {
 		title_rule(&router).await;
 		backfilled_root(&services, &router, &base).await?;
 		large_room(&router, &base).await;
+		folded_secret_requests(&services, &router).await?;
 		marker_and_encryption(&router, &base, &case.root).await;
 		Ok(())
 	}
@@ -663,6 +665,154 @@ mod tests {
 		services.db["eventid_pduid"].insert(event_id.as_bytes(), back_id.as_bytes());
 		services.db["pduid_pdu"].remove(old_id.as_bytes());
 		Ok(back_id)
+	}
+
+	async fn folded_secret_requests(services: &Services, router: &Router) -> Result {
+		let agent = user_id!("@mindroom_helper:localhost");
+		services
+			.users
+			.create(agent, Some("password"), None)
+			.await?;
+		services
+			.users
+			.create_device(agent, None, (Some(AGENT), None), None, None, None)
+			.await?;
+		let create = json!({"preset":"public_chat"});
+		let room = request(router, "POST", "/_matrix/client/v3/createRoom", OWNER, create).await;
+		let base = format!(
+			"/_matrix/client/v3/rooms/{}",
+			enc(room["room_id"].as_str().expect("secret request room"))
+		);
+		let base = base.as_str();
+		request(router, "POST", &format!("{base}/join"), AGENT, json!({})).await;
+
+		let root_body = json!({"msgtype":"m.text","body":"run tool"});
+		let root = send(router, base, OWNER, "sr-root", root_body).await;
+		let ans_body = thread(&root, "m.text", "initial answer");
+		let answer = send(router, base, AGENT, "sr-answer", ans_body).await;
+		let edit_body = json!({
+			"msgtype":"m.text","body":"* edited answer",
+			"m.new_content":{"msgtype":"m.text","body":"edited answer"},
+			"m.relates_to":{"rel_type":"m.replace","event_id":answer}
+		});
+		let answer_edit = send(router, base, AGENT, "sr-answer-edit", edit_body).await;
+		let pending_body = secret_notice(&root, "pending", &answer, "call-1");
+		let secret = send(router, base, AGENT, "sr-pending", pending_body).await;
+		let served = event(router, base, OWNER, &root).await;
+		let summary = &served["unsigned"]["m.relations"]["m.thread"];
+		assert_eq!(summary["count"], 2, "pending secret request counts as a thread reply");
+		assert_eq!(
+			summary["latest_event"]["event_id"], secret,
+			"pending secret request is the standard latest event"
+		);
+		assert_eq!(
+			summary["io.mindroom.latest_reply"]["event_id"], secret,
+			"pending anchored secret request must not be skipped"
+		);
+
+		// Editing to saved/declined/expired folds to answer; redacting restores pending.
+		for status in ["saved", "declined", "expired"] {
+			let body = secret_edit(&secret, status, &answer, "call-1");
+			let edit = send(router, base, AGENT, &format!("sr-{status}"), body).await;
+			let served = event(router, base, OWNER, &root).await;
+			let summary = &served["unsigned"]["m.relations"]["m.thread"];
+			assert_eq!(summary["count"], 2, "{status}: thread count stays unchanged");
+			assert_eq!(
+				summary["latest_event"]["event_id"], secret,
+				"{status}: latest_event stays the secret request"
+			);
+			let preview = &summary["io.mindroom.latest_reply"];
+			assert_eq!(
+				preview["event_id"], answer,
+				"{status}: latest_reply skips folded secret request"
+			);
+			assert_eq!(
+				preview["unsigned"]["m.relations"]["m.replace"]["event_id"], answer_edit,
+				"{status}: fallback latest_reply bundles its newest edit"
+			);
+			redact(router, base, &edit, &format!("sr-redact-{status}")).await;
+			let served = event(router, base, OWNER, &root).await;
+			let summary = &served["unsigned"]["m.relations"]["m.thread"];
+			assert_eq!(
+				summary["io.mindroom.latest_reply"]["event_id"], secret,
+				"{status}: redacting the edit restores the pending request"
+			);
+		}
+
+		// Refusal cases must remain visible in io.mindroom.latest_reply.
+		let r_body = json!({"msgtype":"m.text","body":"refusals"});
+		let r_root = send(router, base, OWNER, "sr-refusal-root", r_body).await;
+		let base_body = thread(&r_root, "m.text", "baseline");
+		let baseline = send(router, base, AGENT, "sr-refusal-base", base_body).await;
+		let owner_body = secret_notice(&r_root, "saved", &baseline, "call-2");
+		let non_agent = send(router, base, OWNER, "sr-non-agent", owner_body).await;
+		let served = event(router, base, OWNER, &r_root).await;
+		let preview = &served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.latest_reply"];
+		assert_eq!(
+			preview["event_id"], non_agent,
+			"non-agent saved secret request must not be skipped"
+		);
+
+		let mut unanchored_body = thread(&r_root, "m.notice", "Unanchored secret");
+		unanchored_body["io.mindroom.secret_request"] =
+			json!({"status":"saved","response_event_id":baseline});
+		let unanchored = send(router, base, AGENT, "sr-unanchored", unanchored_body).await;
+		let served = event(router, base, OWNER, &r_root).await;
+		let preview = &served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.latest_reply"];
+		assert_eq!(
+			preview["event_id"], unanchored,
+			"unanchored saved secret request must not be skipped"
+		);
+
+		let plain_body = thread(&r_root, "m.text", "ordinary reply");
+		let spoof = send(router, base, AGENT, "sr-spoof", plain_body).await;
+		let spoof_body = secret_edit(&spoof, "saved", &baseline, "call-3");
+		let spoof_edit = send(router, base, AGENT, "sr-spoof-edit", spoof_body).await;
+		let served = event(router, base, OWNER, &r_root).await;
+		let preview = &served["unsigned"]["m.relations"]["m.thread"]["io.mindroom.latest_reply"];
+		assert_eq!(preview["event_id"], spoof, "edit-only spoof must not be skipped");
+		assert_eq!(
+			preview["unsigned"]["m.relations"]["m.replace"]["event_id"], spoof_edit,
+			"unskipped reply keeps its replacement edit"
+		);
+
+		// A thread whose only reply is folded omits io.mindroom.latest_reply.
+		let only_body = json!({"msgtype":"m.text","body":"only secret"});
+		let only_root = send(router, base, OWNER, "sr-only-root", only_body).await;
+		let only_secret_body = secret_notice(&only_root, "saved", &only_root, "call-only");
+		let only_secret = send(router, base, AGENT, "sr-only", only_secret_body).await;
+		let served = event(router, base, OWNER, &only_root).await;
+		let summary = &served["unsigned"]["m.relations"]["m.thread"];
+		assert_eq!(summary["count"], 1, "folded-only thread retains its count");
+		assert_eq!(
+			summary["latest_event"]["event_id"], only_secret,
+			"folded-only thread retains standard latest_event"
+		);
+		assert!(
+			summary.get("io.mindroom.latest_reply").is_none(),
+			"folded-only thread omits io.mindroom.latest_reply"
+		);
+		Ok(())
+	}
+
+	fn secret_notice(root: &str, status: &str, resp: &str, call: &str) -> Value {
+		let mut content = thread(root, "m.notice", "Secret request");
+		content["io.mindroom.secret_request"] =
+			json!({"status":status,"response_event_id":resp,"tool_call_id":call});
+		content
+	}
+
+	fn secret_edit(target: &str, status: &str, resp: &str, call: &str) -> Value {
+		json!({
+			"msgtype":"m.notice","body":"* Secret request",
+			"m.new_content":{
+				"msgtype":"m.notice","body":"Secret request",
+				"io.mindroom.secret_request":{
+					"status":status,"response_event_id":resp,"tool_call_id":call
+				}
+			},
+			"m.relates_to":{"rel_type":"m.replace","event_id":target}
+		})
 	}
 
 	async fn marker_and_encryption(router: &Router, base: &str, root: &str) {
