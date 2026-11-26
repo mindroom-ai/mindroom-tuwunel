@@ -482,36 +482,15 @@ pub(crate) async fn sso_callback_route(
 	let unique_id = unique_id_sub((&provider, &userinfo.sub))?;
 
 	let complete_identity = async |old_user_id: Option<OwnedUserId>| {
-		let session = Session {
-			user_info: Some(userinfo.clone()),
-			..session
-		};
-
-		let user_id = match (session.user_id, old_user_id) {
-			| (Some(user_id), ..) | (None, Some(user_id)) => user_id,
-			| (None, None) => decide_user_id(&services, &provider, &userinfo, &unique_id).await?,
-		};
-
-		let session = Session {
-			user_id: Some(user_id.clone()),
-			..session
-		};
-
-		if !services.users.exists(&user_id).await {
-			let origin = match provider.registration {
-				| true => "sso",
-				// Present in LDAP is an existing user to provision, not a new registration.
-				| false if ldap_user_exists(&services, &user_id).await => "ldap",
-				| false =>
-					return Err!(Request(Forbidden(
-						"Registration from this provider is disabled"
-					))),
-			};
-
-			register_user(&services, &provider, &session, &userinfo, &user_id, origin).await?;
-		}
-
-		Ok((session, user_id))
+		complete_identity_session(
+			&services,
+			&provider,
+			session,
+			&userinfo,
+			&unique_id,
+			old_user_id,
+		)
+		.await
 	};
 
 	let (session, user_id, old_sess_id) = services
@@ -580,6 +559,103 @@ pub(crate) async fn sso_callback_route(
 	}
 
 	confirm_login_redirect(&services, redirect_url, &user_id, &cookie, idp_id)
+}
+
+async fn complete_identity_session(
+	services: &Services,
+	provider: &Provider,
+	session: Session,
+	userinfo: &UserInfo,
+	unique_id: &str,
+	old_user_id: Option<OwnedUserId>,
+) -> Result<(Session, OwnedUserId)> {
+	let session = Session {
+		user_info: Some(userinfo.clone()),
+		..session
+	};
+
+	let user_id =
+		select_user_id(services, provider, userinfo, unique_id, session.user_id, old_user_id)
+			.await?;
+
+	let session = Session {
+		user_id: Some(user_id.clone()),
+		..session
+	};
+
+	if !services.users.exists(&user_id).await {
+		let origin = match provider.registration {
+			| true => "sso",
+			// Present in LDAP is an existing user to provision, not a new registration.
+			| false if ldap_user_exists(services, &user_id).await => "ldap",
+			| false =>
+				return Err!(Request(Forbidden("Registration from this provider is disabled"))),
+		};
+
+		register_user(services, provider, &session, userinfo, &user_id, origin).await?;
+	}
+
+	Ok((session, user_id))
+}
+
+/// Choose the local account for an authenticated SSO identity, consuming all
+/// matching pending admin associations once.
+async fn select_user_id(
+	services: &Services,
+	provider: &Provider,
+	userinfo: &UserInfo,
+	unique_id: &str,
+	carried_user_id: Option<OwnedUserId>,
+	old_user_id: Option<OwnedUserId>,
+) -> Result<OwnedUserId> {
+	let associated = services
+		.oauth
+		.sessions
+		.take_user_associations_pending(provider.id(), userinfo);
+
+	match (carried_user_id, old_user_id) {
+		| (Some(user_id), ..) => Ok(user_id),
+		| (None, Some(user_id)) => {
+			if associated.iter().any(|p| p != &user_id) {
+				warn!(
+					provider = provider.id(),
+					%user_id,
+					?associated,
+					"Pending association was shadowed by an existing link and consumed."
+				);
+			}
+
+			Ok(user_id)
+		},
+		| (None, None) => match associated.as_slice() {
+			| [] => decide_user_id(services, provider, userinfo, unique_id).await,
+			| [user_id] => {
+				debug_info!(
+					provider = ?provider.id(),
+					?user_id,
+					?userinfo,
+					"Matched pending association"
+				);
+
+				Ok(user_id.clone())
+			},
+			| _ => refuse_ambiguous_association(provider.id(), &associated),
+		},
+	}
+}
+
+/// Refuse a sign-in that matched multiple pending associations. Only the log
+/// names the candidate accounts; all of them have already been consumed.
+fn refuse_ambiguous_association<T>(provider: &str, associated: &[OwnedUserId]) -> Result<T> {
+	warn!(
+		provider,
+		?associated,
+		"Multiple pending associations matched one sign-in; all were consumed."
+	);
+
+	Err!(Request(Forbidden(
+		"Multiple pending associations matched this sign-in; ask an administrator to re-approve."
+	)))
 }
 
 fn validate_session_cookie(
@@ -942,21 +1018,6 @@ async fn decide_user_id(
 	userinfo: &UserInfo,
 	unique_id: &str,
 ) -> Result<OwnedUserId> {
-	if let Some(user_id) = services
-		.oauth
-		.sessions
-		.find_user_association_pending(provider.id(), userinfo)
-	{
-		debug_info!(
-			provider = ?provider.id(),
-			?user_id,
-			?userinfo,
-			"Matched pending association"
-		);
-
-		return Ok(user_id);
-	}
-
 	let explicit = |claim: &str| provider.userid_claims.contains(claim);
 
 	let allowed = |claim: &str| provider.userid_claims.is_empty() || explicit(claim);

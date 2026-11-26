@@ -5,6 +5,7 @@ use tuwunel_core::{
 	itertools::Itertools,
 	utils::{BoolExt, stream::ReadyExt},
 };
+use tuwunel_service::oauth::sessions::association::ASSOCIATION_PENDING_LIFETIME;
 
 use crate::admin_command;
 
@@ -94,5 +95,11 @@ pub(super) async fn oauth_associate(
 		),
 	};
 
-	writeln!(self, "{lead} for {user_id} on provider {}.", provider.id()).await
+	let provider_id = provider.id();
+	let expires_mins = ASSOCIATION_PENDING_LIFETIME.as_secs() / 60;
+	writeln!(
+		self,
+		"{lead} for {user_id} on provider {provider_id} (expires in {expires_mins} minutes)."
+	)
+	.await
 }
