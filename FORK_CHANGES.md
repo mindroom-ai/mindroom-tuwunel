@@ -2104,10 +2104,10 @@ A redacted root keeps previews of its live children.
 Cost: each served root reads its native relation rows (every event relating
 to the root: thread events, reactions, edits of the root, rich replies)
 newest first and stops as soon as both fields are found, reading at most
-**50 rows**, plus at most 50 edit rows per selected preview. A field whose
-event is not within those 50 rows is omitted; clients fall back to opening
-the thread. There is no preview index, migration, purge hook or
-configuration option.
+**50 rows**, plus at most 50 edit rows per selected preview or inspected
+secret-request candidate. A field whose event is not within those 50 rows is
+omitted; clients fall back to opening the thread. There is no preview index,
+migration, purge hook or configuration option.
 
 Live relations to backfilled events now enter the native relation index
 (`add_relation`), so a backfilled root's live replies are found. Such

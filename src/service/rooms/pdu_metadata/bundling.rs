@@ -1056,11 +1056,9 @@ mod tests {
 			"io.mindroom.secret_request": payload,
 		});
 
-		for sender in [
-			"@mindroom_helper:other.example",
-			"@alice:example.com",
-			"@mindroom:example.com",
-		] {
+		for sender in
+			["@mindroom_helper:other.example", "@alice:example.com", "@mindroom:example.com"]
+		{
 			let event = message_event(sender, "m.room.message", &saved_content, &empty);
 			assert!(
 				!is_folded_secret_request(viewer, &event, None),

@@ -681,7 +681,9 @@ mod tests {
 		let room = request(router, "POST", "/_matrix/client/v3/createRoom", OWNER, create).await;
 		let base = format!(
 			"/_matrix/client/v3/rooms/{}",
-			enc(room["room_id"].as_str().expect("secret request room"))
+			enc(room["room_id"]
+				.as_str()
+				.expect("secret request room"))
 		);
 		let base = base.as_str();
 		request(router, "POST", &format!("{base}/join"), AGENT, json!({})).await;
