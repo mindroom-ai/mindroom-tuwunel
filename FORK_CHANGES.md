@@ -657,10 +657,11 @@ username or email) could match the stale entry and link to that account.
 `find_user_association_pending` is replaced by `take_user_associations_pending`,
 which prunes expired entries and consumes every matching pending association in
 one pass. `complete_sso_session` (via `select_account`) calls it once at account
-selection, so matching approvals are consumed even when shadowed by an existing
-link or assignment (and `claimed_account` no longer needs a separate peek), and
-overlapping approvals for multiple accounts are refused with `M_FORBIDDEN` after
-consuming all matches. Pending entries expire after
+selection, so matching approvals are consumed even when shadowed by a carried
+account, existing link, or assignment (and `claimed_account` no longer needs a
+separate peek), and overlapping approvals for multiple accounts are refused
+with `M_FORBIDDEN` after consuming all matches when no carried account,
+existing link, or assignment takes precedence. Pending entries expire after
 `ASSOCIATION_PENDING_LIFETIME` (30 minutes), `remove_user_association_pending`
 now removes across all providers when `idp_id` is `None`, and
 `!admin query oauth associate` reports the expiry window. Upstream `v2.1.0` has

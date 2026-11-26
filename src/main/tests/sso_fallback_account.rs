@@ -19,7 +19,7 @@ use axum::{
 	routing::{get, post},
 };
 use axum_server::from_tcp;
-use futures::{TryFutureExt, future::select};
+use futures::{FutureExt, future::select};
 use reqwest::{
 	Client, Response, StatusCode, Url,
 	header::{AUTHORIZATION, COOKIE, LOCATION, SET_COOKIE},
@@ -142,15 +142,29 @@ fn sso_fallback_account() -> Result {
 			.timeout(Duration::from_secs(10))
 			.build()?;
 
-		let serve = serve_provider(provider, issuer);
-		let exercise = exercise(services, base, &client)
-			.and_then(|()| reauthenticate(services, base, &client))
-			.and_then(|()| reserved_usernames(services, base, &client))
-			.and_then(|()| skipped_usernames(services, base, &client))
-			.and_then(|()| pending_association(services, base, &client))
-			.and_then(|()| overlapping_pending_associations(services, base, &client));
+		let serve = serve_provider(provider, issuer).boxed_local();
+		let exercise = async {
+			exercise(services, base, &client)
+				.boxed_local()
+				.await?;
+			reauthenticate(services, base, &client)
+				.boxed_local()
+				.await?;
+			reserved_usernames(services, base, &client)
+				.boxed_local()
+				.await?;
+			skipped_usernames(services, base, &client)
+				.boxed_local()
+				.await?;
+			pending_association(services, base, &client)
+				.boxed_local()
+				.await?;
+			overlapping_pending_associations(services, base, &client)
+				.boxed_local()
+				.await
+		};
 
-		select(pin!(serve), pin!(exercise))
+		select(serve, pin!(exercise))
 			.await
 			.factor_first()
 			.0
@@ -655,17 +669,7 @@ async fn skipped_usernames(services: &Services, base: &str, client: &Client) -> 
 /// so neither a subsequent identity nor one after a shadowed linked sign-in can
 /// take the target account.
 async fn pending_association(services: &Services, base: &str, client: &Client) -> Result {
-	let server = services.globals.server_name();
-	let zoe = UserId::parse_with_server_name("zoe", server)?;
-
-	services
-		.users
-		.full_register(Register {
-			user_id: Some(&zoe),
-			password: Some("sso-associate-test-password"),
-			..Default::default()
-		})
-		.await?;
+	let zoe = register_password_user(services, "zoe").await?;
 
 	let cmd = format!("query oauth associate {IDP} {zoe} --claim preferred_username=zoe");
 	accepted(services, &cmd).await?;
@@ -714,16 +718,7 @@ async fn pending_association(services: &Services, base: &str, client: &Client) -
 		"second identity falls back to its own localpart"
 	);
 
-	let sam = UserId::parse_with_server_name("sam", server)?;
-
-	services
-		.users
-		.full_register(Register {
-			user_id: Some(&sam),
-			password: Some("sso-associate-test-password"),
-			..Default::default()
-		})
-		.await?;
+	let sam = register_password_user(services, "sam").await?;
 
 	let cmd = format!("query oauth associate {STRICT} {sam} --claim preferred_username=sam");
 	accepted(services, &cmd).await?;
@@ -758,16 +753,7 @@ async fn pending_association(services: &Services, base: &str, client: &Client) -
 	assert_eq!(error["errcode"], "M_USER_IN_USE");
 	assert!(linked.is_not_found(), "sam-impostor's identity is linked to no account");
 
-	let uma = UserId::parse_with_server_name("uma", server)?;
-
-	services
-		.users
-		.full_register(Register {
-			user_id: Some(&uma),
-			password: Some("sso-associate-test-password"),
-			..Default::default()
-		})
-		.await?;
+	let uma = register_password_user(services, "uma").await?;
 
 	let cmd = format!("query oauth associate {IDP} {uma} --claim preferred_username=zoe");
 	accepted(services, &cmd).await?;
@@ -804,20 +790,8 @@ async fn overlapping_pending_associations(
 	base: &str,
 	client: &Client,
 ) -> Result {
-	let server = services.globals.server_name();
-	let vera = UserId::parse_with_server_name("vera", server)?;
-	let walt = UserId::parse_with_server_name("walt", server)?;
-
-	for user_id in [&vera, &walt] {
-		services
-			.users
-			.full_register(Register {
-				user_id: Some(user_id),
-				password: Some("sso-associate-test-password"),
-				..Default::default()
-			})
-			.await?;
-	}
+	let vera = register_password_user(services, "vera").await?;
+	let walt = register_password_user(services, "walt").await?;
 
 	let cmd = format!("query oauth associate {IDP} {vera} --claim sub=overlap-sub");
 	accepted(services, &cmd).await?;
@@ -869,6 +843,21 @@ async fn overlapping_pending_associations(
 	assert_eq!(account.localpart(), "overlap", "later sign-in proceeds cleanly");
 
 	Ok(())
+}
+
+async fn register_password_user(services: &Services, localpart: &str) -> Result<OwnedUserId> {
+	let user_id = UserId::parse_with_server_name(localpart, services.globals.server_name())?;
+
+	services
+		.users
+		.full_register(Register {
+			user_id: Some(&user_id),
+			password: Some("sso-associate-test-password"),
+			..Default::default()
+		})
+		.await?;
+
+	Ok(user_id)
 }
 
 async fn register_shared(services: &Services) -> Result {
