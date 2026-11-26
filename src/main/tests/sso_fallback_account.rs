@@ -47,6 +47,7 @@ use tuwunel_core::{
 use tuwunel_service::{
 	Services,
 	oauth::{Deletions, Session, UserInfo, fallback_localpart, unique_id_sub},
+	users::Register,
 };
 
 use self::{
@@ -89,9 +90,11 @@ static LOGS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 /// identical address with Alice. The provider sets no `callback_url` and the
 /// server no `well_known.client`, so the legacy callback stays mounted beside
 /// the new one, and Carol's last sign-in returns through the new one. Then a
-/// UIAA session's SSO stage is completed only by its own account's sign-in, and
-/// last, sign-in skips the usernames an appservice reserves, local policy
-/// forbids, strict syntax rejects or another server owns.
+/// UIAA session's SSO stage is completed only by its own account's sign-in,
+/// sign-in skips the usernames an appservice reserves, local policy forbids,
+/// strict syntax rejects or another server owns, and last, admin-approved
+/// pending associations are consumed once even when shadowed by an existing
+/// link or refused as overlapping.
 #[test]
 fn sso_fallback_account() -> Result {
 	let provider = TcpListener::bind(("127.0.0.1", 0))?;
@@ -143,7 +146,9 @@ fn sso_fallback_account() -> Result {
 		let exercise = exercise(services, base, &client)
 			.and_then(|()| reauthenticate(services, base, &client))
 			.and_then(|()| reserved_usernames(services, base, &client))
-			.and_then(|()| skipped_usernames(services, base, &client));
+			.and_then(|()| skipped_usernames(services, base, &client))
+			.and_then(|()| pending_association(services, base, &client))
+			.and_then(|()| overlapping_pending_associations(services, base, &client));
 
 		select(pin!(serve), pin!(exercise))
 			.await
@@ -642,6 +647,226 @@ async fn skipped_usernames(services: &Services, base: &str, client: &Client) -> 
 	assert!(linked.is_not_found(), "olivia's identity is linked to no account");
 	assert!(!exists(services, "reserved_olivia").await?, "no reserved account is created");
 	assert!(!exists(services, &fallback).await?, "the disabled fallback creates no account");
+
+	Ok(())
+}
+
+/// An admin-approved pending association is consumed once at account selection,
+/// so neither a subsequent identity nor one after a shadowed linked sign-in can
+/// take the target account.
+async fn pending_association(services: &Services, base: &str, client: &Client) -> Result {
+	let server = services.globals.server_name();
+	let zoe = UserId::parse_with_server_name("zoe", server)?;
+
+	services
+		.users
+		.full_register(Register {
+			user_id: Some(&zoe),
+			password: Some("sso-associate-test-password"),
+			..Default::default()
+		})
+		.await?;
+
+	let cmd = format!("query oauth associate {IDP} {zoe} --claim preferred_username=zoe");
+	accepted(services, &cmd).await?;
+
+	let pending = services
+		.oauth
+		.sessions
+		.is_user_association_pending(&zoe);
+
+	assert!(pending, "pending association is recorded for zoe");
+
+	let zoe_owner = SignIn {
+		idp: IDP,
+		callback: CALLBACK,
+		destination: CLIENT,
+		sub: "zoe-owner",
+		username: "zoe",
+		mailbox: "zoe",
+	};
+
+	let response = sign_in_to(client, base, zoe_owner).await?;
+	let account = signed_in(services, &response).await?;
+	let pending = services
+		.oauth
+		.sessions
+		.is_user_association_pending(&zoe);
+
+	assert_eq!(account, zoe, "first matching identity links to zoe");
+	assert!(!pending, "pending association is consumed after first sign-in");
+
+	let response = sign_in_to(client, base, zoe_owner).await?;
+	let account = signed_in(services, &response).await?;
+
+	assert_eq!(account, zoe, "linked identity keeps signing in to zoe");
+
+	let zoe_impostor = SignIn { sub: "zoe-impostor", ..zoe_owner };
+	let response = sign_in_to(client, base, zoe_impostor).await?;
+	let account = signed_in(services, &response).await?;
+	let provider = services.oauth.providers.get(IDP).await?;
+	let impostor_identity = unique_id_sub((&provider, "zoe-impostor"))?;
+
+	assert_ne!(account, zoe, "second identity with same claim must not take zoe");
+	assert_eq!(
+		fallback_localpart(&impostor_identity),
+		account.localpart(),
+		"second identity falls back to its own localpart"
+	);
+
+	let sam = UserId::parse_with_server_name("sam", server)?;
+
+	services
+		.users
+		.full_register(Register {
+			user_id: Some(&sam),
+			password: Some("sso-associate-test-password"),
+			..Default::default()
+		})
+		.await?;
+
+	let cmd = format!("query oauth associate {STRICT} {sam} --claim preferred_username=sam");
+	accepted(services, &cmd).await?;
+
+	let sam_owner = SignIn {
+		idp: STRICT,
+		sub: "sam-owner",
+		username: "sam",
+		mailbox: "sam",
+		..zoe_owner
+	};
+
+	let response = sign_in_to(client, base, sam_owner).await?;
+	let account = signed_in(services, &response).await?;
+
+	assert_eq!(account, sam, "first matching identity links to sam");
+
+	let sam_impostor = SignIn { sub: "sam-impostor", ..sam_owner };
+	let response = sign_in_to(client, base, sam_impostor).await?;
+
+	assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+	let error: Value = response.json().await?;
+	let strict = services.oauth.providers.get(STRICT).await?;
+	let sam_impostor_identity = unique_id_sub((&strict, "sam-impostor"))?;
+	let linked = services
+		.oauth
+		.sessions
+		.get_by_unique_id(&sam_impostor_identity)
+		.await;
+
+	assert_eq!(error["errcode"], "M_USER_IN_USE");
+	assert!(linked.is_not_found(), "sam-impostor's identity is linked to no account");
+
+	let uma = UserId::parse_with_server_name("uma", server)?;
+
+	services
+		.users
+		.full_register(Register {
+			user_id: Some(&uma),
+			password: Some("sso-associate-test-password"),
+			..Default::default()
+		})
+		.await?;
+
+	let cmd = format!("query oauth associate {IDP} {uma} --claim preferred_username=zoe");
+	accepted(services, &cmd).await?;
+
+	let response = sign_in_to(client, base, zoe_owner).await?;
+	let account = signed_in(services, &response).await?;
+	let pending = services
+		.oauth
+		.sessions
+		.is_user_association_pending(&uma);
+
+	assert_eq!(account, zoe, "already linked identity keeps zoe over pending uma");
+	assert!(!pending, "shadowed pending association for uma is consumed");
+
+	let uma_impostor = SignIn { sub: "uma-impostor", ..zoe_owner };
+	let response = sign_in_to(client, base, uma_impostor).await?;
+	let account = signed_in(services, &response).await?;
+	let uma_impostor_identity = unique_id_sub((&provider, "uma-impostor"))?;
+
+	assert_ne!(account, uma, "later unlinked identity must not take shadowed uma");
+	assert_eq!(
+		fallback_localpart(&uma_impostor_identity),
+		account.localpart(),
+		"later unlinked identity falls back to its own localpart"
+	);
+
+	Ok(())
+}
+
+/// Overlapping pending associations for different accounts refuse the sign-in
+/// without naming the candidates and consume every matching approval.
+async fn overlapping_pending_associations(
+	services: &Services,
+	base: &str,
+	client: &Client,
+) -> Result {
+	let server = services.globals.server_name();
+	let vera = UserId::parse_with_server_name("vera", server)?;
+	let walt = UserId::parse_with_server_name("walt", server)?;
+
+	for user_id in [&vera, &walt] {
+		services
+			.users
+			.full_register(Register {
+				user_id: Some(user_id),
+				password: Some("sso-associate-test-password"),
+				..Default::default()
+			})
+			.await?;
+	}
+
+	let cmd = format!("query oauth associate {IDP} {vera} --claim sub=overlap-sub");
+	accepted(services, &cmd).await?;
+
+	let cmd = format!("query oauth associate {IDP} {walt} --claim preferred_username=overlap");
+	accepted(services, &cmd).await?;
+
+	let overlap = SignIn {
+		idp: IDP,
+		callback: CALLBACK,
+		destination: CLIENT,
+		sub: "overlap-sub",
+		username: "overlap",
+		mailbox: "overlap",
+	};
+
+	let response = sign_in_to(client, base, overlap).await?;
+
+	assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+	let error: Value = response.json().await?;
+	let message = error["error"].as_str().unwrap_or_default();
+	let provider = services.oauth.providers.get(IDP).await?;
+	let identity = unique_id_sub((&provider, "overlap-sub"))?;
+	let linked = services
+		.oauth
+		.sessions
+		.get_by_unique_id(&identity)
+		.await;
+	let vera_pending = services
+		.oauth
+		.sessions
+		.is_user_association_pending(&vera);
+	let walt_pending = services
+		.oauth
+		.sessions
+		.is_user_association_pending(&walt);
+
+	assert_eq!(error["errcode"], "M_FORBIDDEN");
+	assert!(!message.contains("vera"), "client error must not name candidate accounts");
+	assert!(!message.contains("walt"), "client error must not name candidate accounts");
+	assert!(linked.is_not_found(), "ambiguous sign-in links no account");
+	assert!(!vera_pending, "first overlapping pending association is consumed");
+	assert!(!walt_pending, "second overlapping pending association is consumed");
+
+	let response = sign_in_to(client, base, overlap).await?;
+	let account = signed_in(services, &response).await?;
+
+	assert_eq!(account.localpart(), "overlap", "later sign-in proceeds cleanly");
 
 	Ok(())
 }
