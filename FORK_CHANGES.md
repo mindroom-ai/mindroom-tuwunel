@@ -2,9 +2,9 @@
 
 This document describes the current MindRoom fork behavior on top of upstream
 `tuwunel`. The fork is rebased directly onto upstream commits; see
-`docs/rebase-*.md` for the per-rebase log. As of the 2026-11-24 rebase the base
-is upstream `main` at `f7dc0770b` (not a release tag), 218 commits past the
-previous base, the upstream `v2.0.0` release (`a3feae1a2`). Earlier changes merged upstream and
+`docs/rebase-*.md` for the per-rebase log. As of the 2026-11-25 rebase the base
+is the upstream `v2.1.0` release (`4b0d90d97`), 3 commits past the previous
+base, upstream `main` at `f7dc0770b`. Earlier changes merged upstream and
 dropped from the fork include the room-creation default power-level override
 and the SSO grant-cookie path hardening (2026-07-07 rebase; the cookie's name
 and path now differ again), and the drained/zero one-time-key counts fix and
@@ -131,6 +131,14 @@ sync limits now cover `sticky_events`, and the CI formatter pin moves to
 `nightly-2026-11-20`.
 See the [upstream main `f7dc0770b` rebase record](docs/rebase-upstream-f7dc077-2026-11-24.md).
 
+At v2.1.0 (`4b0d90d97`), upstream adds three commits past `f7dc0770b`: a
+database pool worker-group fix for hosts whose storage queue IDs exceed the
+highest available core ID (`986f447cd`), a Playwright Dockerfile tweak
+(`0c2ff3441`), and the `2.1.0` version bump (`4b0d90d97`). All 106 fork commits
+(through `#192`) replay unchanged with no conflicts, no drops, and no code
+adaptations; the CI formatter pin stays `nightly-2026-11-20`.
+See the [v2.1.0 rebase record](docs/rebase-v2.1.0-2026-11-25.md).
+
 ## How To Inspect
 - Fork commits: `git log --reverse --oneline <upstream-base>..HEAD`
 - Files changed in the fork: `git diff --stat <upstream-base>..HEAD`
@@ -143,10 +151,11 @@ verification needs in the test environment instead of carrying extra patches.
 The history keeps the v1.9.1 ownership layout of eight commits (shared test
 infrastructure, five runtime features with their tests and compatibility
 changes, CI, and docs), followed by the squash-merged fork PRs that upstream
-does not contain, in merge order (#15 to #189), with the earlier rebase records
+does not contain, in merge order (#15 to #192), with the earlier rebase records
 in their historical positions, the two delayed-event commits and v2.0.0 record
-after #171, and this rebase's documentation last. No upstream backports are
-carried. The [upstream main `f7dc0770b` rebase record](docs/rebase-upstream-f7dc077-2026-11-24.md)
+after #171, the `f7dc0770b` record and Rust 1.95 recursion-limit commits before
+#192, and this rebase's documentation last. No upstream backports are
+carried. The [v2.1.0 rebase record](docs/rebase-v2.1.0-2026-11-25.md)
 describes this rebase. Earlier rebase records remain historical snapshots.
 
 ## Runtime Changes
