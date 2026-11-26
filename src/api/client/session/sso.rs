@@ -648,6 +648,20 @@ fn refuse_unclaimed<T>(user_id: &UserId, sub: &str, linked: Option<&UserId>) -> 
 	)))
 }
 
+/// Refuse a sign-in that matched multiple pending associations. Only the log
+/// names the candidate accounts; all of them have already been consumed.
+fn refuse_ambiguous_association<T>(provider: &str, associated: &[OwnedUserId]) -> Result<T> {
+	warn!(
+		provider,
+		?associated,
+		"Multiple pending associations matched one sign-in; all were consumed."
+	);
+
+	Err!(Request(Forbidden(
+		"Multiple pending associations matched this sign-in; ask an administrator to re-approve."
+	)))
+}
+
 /// Map an authenticated SSO/OIDC identity onto a local account and return the
 /// resulting user together with the committed session. Shared by the browser
 /// SSO callback and the native Apple login endpoint.
@@ -672,56 +686,16 @@ async fn complete_sso_session(
 			..session
 		};
 
-		// A listed address signs in only with the claims, whatever account it
-		// would get: linked, carried, adopted or assigned.
-		let assigned_user_id = match assigned_account(services, provider, &userinfo) {
-			| Some((user_id, false)) =>
-				return refuse_unclaimed(&user_id, &userinfo.sub, old_user_id.as_deref()),
-			| assigned => assigned.map(|(user_id, _)| user_id),
-		};
-
-		let mut taken = None;
-		let (user_id, mut held) = match (session.user_id, old_user_id) {
-			// A chained identity without a link of its own takes the carried
-			// account, which a listed address must name, verified.
-			| (Some(user_id), old_user_id) => match assigned_user_id {
-				| Some(assigned)
-					if old_user_id.is_none() && userinfo.email_verified == Some(false) =>
-					return refuse_unverified(&assigned),
-				| Some(assigned) if old_user_id.is_none() && assigned != user_id =>
-					return Err!(Request(Forbidden(warn!(
-						"This sign-in is assigned to {assigned}, not {user_id}, which it \
-						 carries."
-					)))),
-				| _ => (user_id, None),
-			},
-			| (None, Some(user_id)) => (user_id, None),
-			| (None, None) => match assigned_user_id {
-				| Some(user_id) if userinfo.email_verified == Some(false) =>
-					return refuse_unverified(&user_id),
-				| Some(user_id) => {
-					let assignment = services
-						.users
-						.assign_sso_account(&user_id)
-						.await?;
-
-					info!(
-						provider = provider.id(),
-						sub = %userinfo.sub,
-						%user_id,
-						"Linking the assigned account."
-					);
-					(user_id, Some(assignment))
-				},
-				| None => {
-					let (user_id, assignment, takes) =
-						first_account(services, provider, &userinfo, &unique_id).await?;
-
-					taken = takes;
-					(user_id, assignment)
-				},
-			},
-		};
+		let (user_id, mut held, taken) = select_account(
+			services,
+			provider,
+			&userinfo,
+			&unique_id,
+			session.user_id,
+			old_user_id,
+		)
+		.boxed() // size firewall
+		.await?;
 
 		let session = Session {
 			user_id: Some(user_id.clone()),
@@ -850,6 +824,88 @@ async fn complete_sso_session(
 		.await;
 
 	Ok((user_id, session))
+}
+
+/// Choose the local account for an authenticated SSO identity, consuming all
+/// matching pending admin associations once.
+async fn select_account(
+	services: &Services,
+	provider: &Provider,
+	userinfo: &UserInfo,
+	unique_id: &str,
+	carried_user_id: Option<OwnedUserId>,
+	old_user_id: Option<OwnedUserId>,
+) -> Result<(OwnedUserId, Option<SsoAssignment>, Option<bool>)> {
+	// A listed address signs in only with the claims, whatever account it
+	// would get: linked, carried, adopted or assigned.
+	let assigned_user_id = match assigned_account(services, provider, userinfo) {
+		| Some((user_id, false)) =>
+			return refuse_unclaimed(&user_id, &userinfo.sub, old_user_id.as_deref()),
+		| assigned => assigned.map(|(user_id, _)| user_id),
+	};
+
+	let associated = services
+		.oauth
+		.sessions
+		.take_user_associations_pending(provider.id(), userinfo);
+
+	let unverified = userinfo.email_verified == Some(false);
+	match (carried_user_id, old_user_id) {
+		// A chained identity without a link of its own takes the carried
+		// account, which a listed address must name, verified.
+		| (Some(user_id), old_user_id) => match assigned_user_id {
+			| Some(assigned) if old_user_id.is_none() && unverified =>
+				refuse_unverified(&assigned),
+			| Some(assigned) if old_user_id.is_none() && assigned != user_id =>
+				Err!(Request(Forbidden(warn!(
+					"This sign-in is assigned to {assigned}, not {user_id}, which it carries."
+				)))),
+			| _ => Ok((user_id, None, None)),
+		},
+		| (None, Some(user_id)) => {
+			if associated.iter().any(|p| p != &user_id) {
+				warn!(
+					provider = provider.id(),
+					%user_id,
+					?associated,
+					"Pending association was shadowed by an existing link and consumed."
+				);
+			}
+
+			Ok((user_id, None, None))
+		},
+		| (None, None) => match assigned_user_id {
+			| Some(user_id) if unverified => refuse_unverified(&user_id),
+			| Some(user_id) => {
+				let assignment = services
+					.users
+					.assign_sso_account(&user_id)
+					.await?;
+
+				info!(
+					provider = provider.id(),
+					sub = %userinfo.sub,
+					%user_id,
+					"Linking the assigned account."
+				);
+				Ok((user_id, Some(assignment), None))
+			},
+			| None => match associated.as_slice() {
+				| [] => first_account(services, provider, userinfo, unique_id).await,
+				| [user_id] => {
+					debug_info!(
+						provider = ?provider.id(),
+						?user_id,
+						?userinfo,
+						"Matched pending association"
+					);
+
+					Ok((user_id.clone(), None, None))
+				},
+				| _ => refuse_ambiguous_association(provider.id(), &associated),
+			},
+		},
+	}
 }
 
 /// What the registration rules a new account meets, and the registration
@@ -1228,9 +1284,9 @@ fn listed(services: &Services, user_id: &UserId) -> bool {
 		.any(|listed| listed.as_str() == user_id.as_str())
 }
 
-/// The account of a first sign-in that no assignment names: the one it claims,
-/// with its assignment, or else the one chosen by name, with whether it existed
-/// then (see `decide_user_id`).
+/// The account of a first sign-in that no assignment or pending association
+/// names: the one it claims, with its assignment, or else the one chosen by
+/// name, with whether it existed then (see `decide_user_id`).
 async fn first_account(
 	services: &Services,
 	provider: &Provider,
@@ -1287,13 +1343,8 @@ async fn claimed_account(
 	let reserved = listed(services, &user_id);
 	let forbidden = &services.config.registration.forbidden_usernames;
 	let forbidden = forbidden.is_match(user_id.localpart());
-	let associated = services
-		.oauth
-		.sessions
-		.find_user_association_pending(provider.id(), userinfo)
-		.is_some();
 
-	if associated || !services.users.exists(&user_id).await {
+	if !services.users.exists(&user_id).await {
 		return None;
 	}
 
@@ -1411,8 +1462,7 @@ fn userid_choices<'a>(provider: &Provider, userinfo: &'a UserInfo) -> [Option<&'
 
 /// Returns the user ID, and, for an account taken by name, whether it existed
 /// then: the sign-in holds such an account until its link is stored. None when
-/// the provider is trusted (it may take linked accounts) or an admin associated
-/// the account.
+/// the provider is trusted (it may take linked accounts).
 #[tracing::instrument(
 	level = "debug",
 	ret(level = "debug")
@@ -1425,21 +1475,6 @@ async fn decide_user_id(
 	userinfo: &UserInfo,
 	unique_id: &str,
 ) -> Result<(OwnedUserId, Option<bool>)> {
-	if let Some(user_id) = services
-		.oauth
-		.sessions
-		.find_user_association_pending(provider.id(), userinfo)
-	{
-		debug_info!(
-			provider = ?provider.id(),
-			?user_id,
-			?userinfo,
-			"Matched pending association"
-		);
-
-		return Ok((user_id, None));
-	}
-
 	let hold = !provider.trusted;
 	let choices = userid_choices(provider, userinfo)
 		.into_iter()

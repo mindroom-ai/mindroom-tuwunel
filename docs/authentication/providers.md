@@ -330,9 +330,16 @@ Specify whichever claims uniquely identify the user on that provider. `sub`
 is the most reliable because every OIDC provider guarantees it is stable and
 unique per user.
 
-**Pending approvals are held in memory, not the database.** The affected user
-must complete their login before the server is restarted, or the command must
-be run again.
+**Pending approvals are single-use and held in memory, not the database.**
+Each approval expires after 30 minutes (or on server restart, whichever comes
+first). Pending approvals are checked and consumed at account selection
+(after any `assigned_accounts_claims` check): a higher-priority carried
+account, existing link, or assignment still takes precedence while consuming
+all matching pending approvals, and overlapping approvals for multiple
+accounts are refused with `M_FORBIDDEN` only when no higher-priority account
+applies. If the affected user does not reach the SSO callback in time, the
+command must be run again; once the callback links the identity, finishing
+client login after the 30-minute window needs no new approval.
 
 After a supported database migration, stored provider mappings can be adopted
 in bulk from the source database. This one-time procedure has additional safety
